@@ -1,6 +1,3 @@
-Here is a **very short, simple, command-focused README** for getting started with your Slurm-hosted PostgreSQL server.
-
----
 
 # **README — Starting & Connecting to the AgIR PostgreSQL Server**
 

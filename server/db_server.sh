@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=pg_server_semif
+#SBATCH --job-name=pg_server_agir
 #SBATCH --account=dash_agir
 #SBATCH --partition=compute          # adjust if needed
 #SBATCH --time=12:00:00
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
-#SBATCH --output=/project/dash_agir/logs/pg_server_%x_%j.out.log
-#SBATCH --error=/project/dash_agir/logs/pg_server_%x_%j.err.log
+#SBATCH --output=/project/dash_agir/logs/pg_server/agir_%x_%j.out.log
+#SBATCH --error=/project/dash_agir/logs/pg_server/agir_%x_%j.err.log
 
 set -euo pipefail
 
@@ -17,6 +17,7 @@ echo "[PG-SERVER] Starting on $(hostname -f) at $(date)"
 # ------------------------------------------------------------------------------
 
 # Your existing env with tools, etc.
+module load miniconda
 source activate /project/dash_agir/matthew.kutugata/software/miniforge3/envs/semif_prep
 
 # PostgreSQL binaries (initdb, pg_ctl, psql)
@@ -31,10 +32,10 @@ PG_ROOT="/project/dash_agir/postgres"
 mkdir -p "$LOG_DIR" "$PG_ROOT"
 
 # Postgres cluster data directory (persists on /project)
-export PGDATA="${PG_ROOT}/pgdata_semif"
+export PGDATA="${PG_ROOT}/pgdata_agir"
 
 # Primary database name
-DB_NAME="semif_agir"
+DB_NAME="agir"
 
 # Connection info file (no secrets)
 COORD_FILE="${PG_ROOT}/pg_coords.env"
