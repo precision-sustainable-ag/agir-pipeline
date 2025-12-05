@@ -181,9 +181,11 @@ fi
 echo "[PG-SERVER] Ensuring schemas exist in '${DB_NAME}'"
 
 psql "port=${PGPORT} dbname=${DB_NAME} user=$USER" <<'SQL'
+CREATE SCHEMA IF NOT EXISTS core;
 CREATE SCHEMA IF NOT EXISTS source;
 CREATE SCHEMA IF NOT EXISTS processed;
 CREATE SCHEMA IF NOT EXISTS release;
+CREATE SCHEMA IF NOT EXISTS logs;
 SQL
 
 echo "[PG-SERVER] Schemas ensured."
