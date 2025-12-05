@@ -11,24 +11,20 @@ Changes from SQLite version:
 - Uses TIMESTAMPTZ for timestamps
 - Inserts into source.globus_file_index schema
 """
-
 import argparse
 import json
 import logging
-from logging.handlers import RotatingFileHandler
 import re
 import subprocess
-import time
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import psycopg2
 import psycopg2.extras
-
-import logging
 
 # ============================================================
 #                     LOGGING SETUP
@@ -37,6 +33,9 @@ import logging
 def setup_logging(log_file: str) -> logging.Logger:
     logger = logging.getLogger("globus_index")
     logger.setLevel(logging.INFO)
+
+    if logger.handlers:  # already configured
+        return logger
 
     fmt = logging.Formatter("[%(asctime)s][%(levelname)s] %(message)s")
 
@@ -64,11 +63,6 @@ def setup_logging(log_file: str) -> logging.Logger:
 
 # Batch format: MD_2025-01-01
 BATCH_PATTERN = re.compile(r"^([A-Z]{2})_(\d{4}-\d{2}-\d{2})$")
-
-# For filename timestamps (best-effort)
-EPOCH_SUFFIX_PATTERN = re.compile(r"^[A-Za-z0-9]+_(\d{9,11})(\.[^.]+)?$")
-DATETIME_PATTERN = re.compile(r"(\d{8}_\d{6})")
-
 
 def extract_batch_id(path: str) -> Optional[str]:
     """
@@ -117,12 +111,12 @@ def parse_last_modified_to_epoch(last_modified: Optional[str]) -> Optional[int]:
     return int(dt.timestamp())
 
 
-def extract_epoch_from_filename(filename: str) -> Optional[int]:
+def extract_epoch_from_filename(filename: str) -> Tuple[Optional[int], Optional[datetime]]:
     """
-    Extracts a Unix epoch timestamp from a filename.
-    
-    The function searches for any sequence of 10+ digits (typical for epoch seconds)
-    anywhere in the filename, excluding the extension.
+    Extract a Unix epoch timestamp from a filename.
+
+    Returns:
+        (epoch_seconds, epoch_as_datetime_utc) or (None, None)
 
     Examples:
         "MD_1764960482.jpg"                -> 1764960482
@@ -173,65 +167,36 @@ def infer_file_ext(rel_path: str, entry_type: str) -> Optional[str]:
         return ext.lstrip('.')  # Remove leading dot
     return None
 
-
 # ============================================================
-#                   POSTGRESQL SETUP
+#                     DATABASE HELPERS
 # ============================================================
 
-CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS source.globus_file_index (
-    file_id           BIGSERIAL PRIMARY KEY,
-    endpoint          TEXT NOT NULL,
-    location          TEXT NOT NULL,
-    lts_root          TEXT NOT NULL,
-    root_path         TEXT NOT NULL,
-    rel_path          TEXT NOT NULL,
-    file_name         TEXT NOT NULL,
-    entry_type        TEXT NOT NULL,
-    file_ext          TEXT,
-    size_bytes        BIGINT,
-    checksum          TEXT,
-    batch_id          TEXT,
-    batch_state       TEXT,
-    batch_date        DATE,
-    data_state        TEXT NOT NULL,
-    mtime_iso         TIMESTAMPTZ,
-    fname_ts_epoch    BIGINT,
-    fname_ts_iso      TIMESTAMPTZ,
-    created_at_ts_iso TIMESTAMPTZ
-);
-"""
+def apply_schema(conn: psycopg2.extensions.connection, schema_file: str, logger: logging.Logger) -> None:
+    
+    if not Path(schema_file).is_file():
+        raise FileNotFoundError(f"Schema file not found: {schema_file}")
+    logger.info(f"Applying schema file: {schema_file}")
+    
+    with open(schema_file, "r") as f:
+        sql = f.read()
 
-CREATE_INDEXES_SQL = [
-    """CREATE UNIQUE INDEX IF NOT EXISTS idx_globus_file_unique
-       ON source.globus_file_index(endpoint, data_state, root_path, rel_path);""",
-    """CREATE INDEX IF NOT EXISTS idx_globus_batch_state
-       ON source.globus_file_index(batch_id, data_state);""",
-    """CREATE INDEX IF NOT EXISTS idx_globus_path
-       ON source.globus_file_index(root_path, rel_path);""",
-    """CREATE INDEX IF NOT EXISTS idx_globus_location
-       ON source.globus_file_index(location);""",
-]
+    with conn.cursor() as cur:
+        cur.execute(sql)
+        conn.commit()
+
+    logger.info("Schema applied successfully.")
 
 
-def init_db(conn_params: Dict, logger: logging.Logger) -> psycopg2.extensions.connection:
-    """Initialize PostgreSQL connection and create table/indexes if needed."""
+def init_db(conn_params: Dict, schema_path: str, logger: logging.Logger) -> psycopg2.extensions.connection:
+    """Initialize PostgreSQL connection and create table/indexes if needed. apply schema file."""
     logger.info(f"Connecting to PostgreSQL database: {conn_params.get('dbname', 'agir')}")
     conn = psycopg2.connect(**conn_params)
     logger.info("Connected to PostgreSQL database")
     conn.autocommit = False
 
-    
-    with conn.cursor() as cur:
-        logger.info("Creating schema and table if not exist...")
-        # Create schema if it doesn't exist
-        cur.execute("CREATE SCHEMA IF NOT EXISTS source;")
-        cur.execute(CREATE_TABLE_SQL)
-        for sql in CREATE_INDEXES_SQL:
-            cur.execute(sql)
-        conn.commit()
-    
-    logger.info("DB initialized successfully")
+    # Load schema from file
+    apply_schema(conn, schema_path, logger)
+
     return conn
 
 
@@ -252,10 +217,9 @@ def insert_rows(conn: psycopg2.extensions.connection, rows: List[Tuple], logger:
                 batch_id, batch_state, batch_date,
                 data_state,
                 mtime_iso,
-                fname_ts_epoch, fname_ts_iso,
-                created_at_ts_iso
+                fname_ts_epoch, fname_ts_iso
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (endpoint, data_state, root_path, rel_path) DO NOTHING
             """,
             rows,
@@ -315,7 +279,6 @@ def crawl_tree_mp(
     dir_queue = deque([root_path])
     futures = {}
     rows: List[Tuple] = []
-    now_ts = datetime.now(timezone.utc)
     total_seen = 0
     max_inflight = max_workers * 4
 
@@ -372,7 +335,6 @@ def crawl_tree_mp(
                     mtime_epoch = parse_last_modified_to_epoch(last_modified)
                     fname_ts_epoch, fname_ts_dt = extract_epoch_from_filename(name)
                     mtime_iso = epoch_to_timestamptz(mtime_epoch)
-                    # fname_ts_epoch, fname_ts_dt = extract_fname_timestamp(name)
                     file_ext = infer_file_ext(rel_path, entry_type)
 
                     rows.append((
@@ -392,8 +354,7 @@ def crawl_tree_mp(
                         data_state,
                         mtime_iso,
                         fname_ts_epoch,
-                        fname_ts_dt,       # fname_ts_iso (TIMESTAMPTZ)
-                        now_ts,            # created_at_ts_iso
+                        fname_ts_dt       # fname_ts_iso (TIMESTAMPTZ)
                     ))
                     total_seen += 1
 
@@ -419,6 +380,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Multiprocessing index of Globus endpoint paths into PostgreSQL."
     )
+    parser.add_argument("--schema", required=True, help="Path to SQL schema file.")
     parser.add_argument("--host", default="localhost", help="PostgreSQL host.")
     parser.add_argument("--port", type=int, default=5432, help="PostgreSQL port.")
     parser.add_argument("--dbname", default="agir", help="PostgreSQL database name.")
@@ -436,7 +398,7 @@ def main() -> None:
     )
     parser.add_argument("--batch-size", type=int, default=2000, help="Insert batch size.")
     parser.add_argument("--max-workers", type=int, default=8, help="Number of worker processes.")
-    parser.add_argument("--log-file", help="Log file path (default: ./globus_index_pg.log)")
+    parser.add_argument("--log-file", default="./globus_index_pg.log", help="Log file path (default: ./globus_index_pg.log)")
     args = parser.parse_args()
 
     log_file = args.log_file or "./globus_index_pg.log"
@@ -459,12 +421,12 @@ def main() -> None:
         "host": args.host,
         "port": args.port,
         "dbname": args.dbname,
-        "user": args.user,
+        "user": args.user
     }
     if args.password:
         conn_params["password"] = args.password
-
-    conn = init_db(conn_params, logger)
+    schema_path = args.schema  # or compute default here
+    conn = init_db(conn_params, schema_path, logger)
 
     try:
         crawl_tree_mp(

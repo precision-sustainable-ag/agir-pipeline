@@ -1,4 +1,6 @@
-CREATE TABLE source.globus_file_index (
+CREATE SCHEMA IF NOT EXISTS source;
+
+CREATE TABLE IF NOT EXISTS source.globus_file_index (
     file_id           BIGSERIAL PRIMARY KEY,
 
     endpoint          TEXT NOT NULL,
