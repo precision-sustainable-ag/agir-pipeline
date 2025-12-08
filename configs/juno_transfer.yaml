@@ -1,0 +1,23 @@
+# Which report and what to move
+report:
+  csv_path: /project/dash_agir/matthew.kutugata/repos/agir-db/reports/globus_index/raw/2025-12-08_sync_batches_needing_juno_copy_images_and_metadata.csv
+  batch_column: batch_id
+
+transfer:
+  # Which data_state in source.globus_file_index to move
+  data_state: upload_raw
+  # Globus destination settings
+  juno_endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
+  
+  dest_root: /LTS/project/dash_agir/semifield-upload # where to mirror rel_path on JUNO
+  dry_run: false   # set to false to actually run globus transfer
+
+  # Highest preference first
+  location_priority:
+    # - CERES
+    # - NCSU
+
+  lts_root_priority:
+    # - /LTS/project/dash_agir
+    # - /project/dash_agir
+    # - /90day/dash_agir
