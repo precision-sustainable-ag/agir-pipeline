@@ -9,7 +9,7 @@
 #SBATCH --error=/project/dash_agir/logs/pg_server/agir_%x_%j.err.log
 
 set -euo pipefail
-
+unset PGHOST PGDATABASE PGUSER PGPASSWORD PGPORT
 echo "[PG-SERVER] Starting on $(hostname -f) at $(date)"
 
 # ------------------------------------------------------------------------------
@@ -104,54 +104,62 @@ PGLOG="${PGDATA}/postgres.log"
 
 echo "[PG-SERVER] Starting Postgres on port $PGPORT"
 pg_ctl -D "$PGDATA" -o "-p ${PGPORT}" -l "$PGLOG" start
+PGHOST_FQDN="$(hostname -f)"
 
-echo "[PG-SERVER] Waiting for Postgres to accept connections..."
+
+echo "[PG-SERVER] Waiting for Postgres to accept connections on ${PGHOST_FQDN}:${PGPORT}..."
+ready=0
 for i in {1..30}; do
-  # IMPORTANT: no host= → Unix socket → 'local ... trust' rule
-  if psql "port=${PGPORT} dbname=postgres user=$USER" \
-       -c "SELECT 1;" >/dev/null 2>&1; then
+  echo "[PG-SERVER] Readiness attempt ${i}..."
+  if psql "host=${PGHOST_FQDN} port=${PGPORT} dbname=$DB_NAME user=$USER" \
+       -c "SELECT 1;" ; then
     echo "[PG-SERVER] Postgres is UP"
+    ready=1
     break
+  else
+    status=$?
+    echo "[PG-SERVER] psql readiness failed with status ${status}"
   fi
   sleep 1
-  if [[ $i -eq 30 ]]; then
-    echo "[ERROR] Postgres failed to start. Tail of log:"
-    tail -n 50 "$PGLOG" || true
-    exit 1
-  fi
 done
+
+if [[ "$ready" -ne 1 ]]; then
+  echo "[ERROR] Postgres failed readiness check. Tail of log:"
+  tail -n 50 "$PGLOG" || true
+  exit 1
+fi
+
 
 # ------------------------------------------------------------------------------
 # 6. Do NOT change password — you already set it manually.
 #    Just update ~/.pgpass so the client knows how to connect.
 # ------------------------------------------------------------------------------
 
-PGHOST_FQDN="$(hostname -f)"
 PGPASS_FILE="${HOME}/.pgpass"
 
 # Extract your already-set password from existing .pgpass entry
 DB_PASSWORD="$(grep ":${DB_NAME}:${USER}:" "$PGPASS_FILE" | awk -F: '{print $5}')"
 
-if [[ -z "$DB_PASSWORD" ]]; then
-  echo "[ERROR] Could not find an existing password for ${USER} in ~/.pgpass"
-  echo "        Add it manually in this format:"
-  echo "        host:port:${DB_NAME}:${USER}:password"
-  exit 1
-fi
+# if [[ -z "$DB_PASSWORD" ]]; then
+#   echo "[ERROR] Could not find an existing password for ${USER} in ~/.pgpass"
+#   echo "        Add it manually in this format:"
+#   echo "        host:port:${DB_NAME}:${USER}:password"
+#   exit 1
+# fi
 
-# Build new entry for THIS session (new port each time)
-NEW_PG_LINE="${PGHOST_FQDN}:${PGPORT}:${DB_NAME}:${USER}:${DB_PASSWORD}"
+# # Build new entry for THIS session (new port each time)
+# NEW_PG_LINE="${PGHOST_FQDN}:${PGPORT}:${DB_NAME}:${USER}:${DB_PASSWORD}"
 
-echo "[PG-SERVER] Updating ~/.pgpass for this host/port:"
-echo "  ${PGHOST_FQDN}:${PGPORT}:${DB_NAME}:${USER}:********"
+# echo "[PG-SERVER] Updating ~/.pgpass for this host/port:"
+# echo "  ${PGHOST_FQDN}:${PGPORT}:${DB_NAME}:${USER}:********"
 
-# Remove old entries for this host/db/user
-grep -v "^${PGHOST_FQDN}:" "$PGPASS_FILE" > "${PGPASS_FILE}.tmp" || true
-mv "${PGPASS_FILE}.tmp" "$PGPASS_FILE"
+# # Remove old entries for this host/db/user
+# grep -v "^${PGHOST_FQDN}:" "$PGPASS_FILE" > "${PGPASS_FILE}.tmp" || true
+# mv "${PGPASS_FILE}.tmp" "$PGPASS_FILE"
 
-# Add new one
-echo "$NEW_PG_LINE" >> "$PGPASS_FILE"
-chmod 600 "$PGPASS_FILE"
+# # Add new one
+# echo "$NEW_PG_LINE" >> "$PGPASS_FILE"
+# chmod 600 "$PGPASS_FILE"
 
 
 # ------------------------------------------------------------------------------
@@ -161,18 +169,19 @@ chmod 600 "$PGPASS_FILE"
 echo "[PG-SERVER] Ensuring DB '${DB_NAME}' exists..."
 
 DB_EXISTS=$(
-  psql "port=${PGPORT} dbname=postgres user=$USER" \
+  psql "host=${PGHOST_FQDN} port=${PGPORT} dbname=${DB_NAME} user=$USER" \
        -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}';" \
   | tr -d '[:space:]' || true
 )
 
 if [[ "$DB_EXISTS" != "1" ]]; then
   echo "[PG-SERVER] Creating DB '${DB_NAME}'"
-  psql "port=${PGPORT} dbname=postgres user=$USER" \
+  psql "host=${PGHOST_FQDN} port=${PGPORT} dbname=${DB_NAME} user=$USER" \
        -c "CREATE DATABASE ${DB_NAME};"
 else
   echo "[PG-SERVER] Database '${DB_NAME}' already exists"
 fi
+
 
 # ------------------------------------------------------------------------------
 # 8. Ensure schemas: source / processed / release
@@ -180,7 +189,7 @@ fi
 
 echo "[PG-SERVER] Ensuring schemas exist in '${DB_NAME}'"
 
-psql "port=${PGPORT} dbname=${DB_NAME} user=$USER" <<'SQL'
+psql "host=${PGHOST_FQDN} port=${PGPORT} dbname=${DB_NAME} user=$USER" <<'SQL'
 CREATE SCHEMA IF NOT EXISTS core;
 CREATE SCHEMA IF NOT EXISTS source;
 CREATE SCHEMA IF NOT EXISTS processed;
@@ -194,21 +203,20 @@ echo "[PG-SERVER] Schemas ensured."
 # 9. Update ~/.pgpass for passwordless TCP access
 # ------------------------------------------------------------------------------
 
-PGHOST_FQDN="$(hostname -f)"
-PGPASS_FILE="${HOME}/.pgpass"
-PGPASS_LINE="${PGHOST_FQDN}:${PGPORT}:${DB_NAME}:${USER}:${DB_PASSWORD}"
+# PGPASS_FILE="${HOME}/.pgpass"
+# PGPASS_LINE="${PGHOST_FQDN}:${PGPORT}:${DB_NAME}:${USER}:${DB_PASSWORD}"
 
-echo "[PG-SERVER] Updating ~/.pgpass entry:"
-echo "  ${PGHOST_FQDN}:${PGPORT}:${DB_NAME}:${USER}:********"
+# echo "[PG-SERVER] Updating ~/.pgpass entry:"
+# echo "  ${PGHOST_FQDN}:${PGPORT}:${DB_NAME}:${USER}:********"
 
-# Remove any stale line for this exact host:port:db:user
-if [[ -f "$PGPASS_FILE" ]]; then
-  grep -v "^${PGHOST_FQDN}:${PGPORT}:${DB_NAME}:${USER}:" "$PGPASS_FILE" > "${PGPASS_FILE}.tmp" || true
-  mv "${PGPASS_FILE}.tmp" "$PGPASS_FILE"
-fi
+# # Remove any stale line for this exact host:port:db:user
+# if [[ -f "$PGPASS_FILE" ]]; then
+#   grep -v "^${PGHOST_FQDN}:${PGPORT}:${DB_NAME}:${USER}:" "$PGPASS_FILE" > "${PGPASS_FILE}.tmp" || true
+#   mv "${PGPASS_FILE}.tmp" "$PGPASS_FILE"
+# fi
 
-echo "$PGPASS_LINE" >> "$PGPASS_FILE"
-chmod 600 "$PGPASS_FILE"
+# echo "$PGPASS_LINE" >> "$PGPASS_FILE"
+# chmod 600 "$PGPASS_FILE"
 
 # ------------------------------------------------------------------------------
 # 10. Write connection coordinates (no secrets)
@@ -216,10 +224,10 @@ chmod 600 "$PGPASS_FILE"
 
 cat > "$COORD_FILE" <<EOF
 # Auto-generated by db_server.sh at $(date)
-PGHOST=${PGHOST_FQDN}
-PGPORT=${PGPORT}
-PGDATABASE=${DB_NAME}
-PGUSER=${USER}
+export PGHOST=${PGHOST_FQDN}
+export PGPORT=${PGPORT}
+export PGDATABASE=${DB_NAME}
+export PGUSER=${USER}
 # Authentication:
 #   - Password is managed by PostgreSQL and stored once in ~/.pgpass
 EOF
