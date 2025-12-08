@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS source.globus_file_index (
     lts_root          TEXT NOT NULL,
     root_path         TEXT NOT NULL,
     rel_path          TEXT NOT NULL,
+    parent_dir        TEXT,
     file_name         TEXT NOT NULL,
 
     entry_type        TEXT NOT NULL,
@@ -24,7 +25,7 @@ CREATE TABLE IF NOT EXISTS source.globus_file_index (
     mtime_iso         TIMESTAMPTZ,
     fname_ts_epoch    BIGINT,
     fname_ts_iso      TIMESTAMPTZ,
-    created_at_ts_iso  TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at_ts_iso TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ix_source_globus_unique

@@ -199,6 +199,31 @@ def init_db(conn_params: Dict, schema_path: str, logger: logging.Logger) -> psyc
 
     return conn
 
+def get_parent_folder(rel_path: str, entry_type: str) -> Optional[str]:
+    """
+    Return the immediate parent folder name for a file, based on rel_path.
+
+    Examples:
+        rel_path = "MD_2025-01-01/raws/file.raw"  -> "raws"
+        rel_path = "file.raw"                     -> None
+
+    For directories (entry_type == "dir"), this returns None.
+    """
+    if entry_type == "dir" or not rel_path:
+        return None
+
+    # Drop any trailing slash just in case
+    path = rel_path.rstrip("/")
+
+    # If there is no slash, the file lives directly under root_path
+    if "/" not in path:
+        return None
+
+    parent_dir = path.rsplit("/", 1)[0]
+    if not parent_dir:
+        return None
+
+    return parent_dir.split("/")[-1]
 
 def insert_rows(conn: psycopg2.extensions.connection, rows: List[Tuple], logger: logging.Logger) -> None:
     """Insert rows into PostgreSQL using batch insert."""
@@ -211,7 +236,7 @@ def insert_rows(conn: psycopg2.extensions.connection, rows: List[Tuple], logger:
             """
             INSERT INTO source.globus_file_index (
                 endpoint, location, lts_root,
-                root_path, rel_path, file_name,
+                root_path, rel_path, parent_dir, file_name,
                 entry_type, file_ext,
                 size_bytes, checksum,
                 batch_id, batch_state, batch_date,
@@ -219,15 +244,14 @@ def insert_rows(conn: psycopg2.extensions.connection, rows: List[Tuple], logger:
                 mtime_iso,
                 fname_ts_epoch, fname_ts_iso
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (endpoint, data_state, root_path, rel_path) DO NOTHING
             """,
             rows,
-            page_size=1000
         )
         conn.commit()
-    
-    logger.info(f"Inserted {len(rows)} rows")
+        logger.info("Inserted %d rows into source.globus_file_index", len(rows))
+
 
 
 # ============================================================
@@ -336,6 +360,7 @@ def crawl_tree_mp(
                     fname_ts_epoch, fname_ts_dt = extract_epoch_from_filename(name)
                     mtime_iso = epoch_to_timestamptz(mtime_epoch)
                     file_ext = infer_file_ext(rel_path, entry_type)
+                    parent_dir = get_parent_folder(rel_path, entry_type)
 
                     rows.append((
                         endpoint,
@@ -343,6 +368,7 @@ def crawl_tree_mp(
                         lts_root,
                         root_path,
                         rel_path,
+                        parent_dir,
                         name,              # file_name
                         entry_type,
                         file_ext,
