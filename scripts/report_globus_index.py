@@ -102,7 +102,7 @@ def main():
             write_csv(csv_path, rows)
 
             # Grab total_stats row (for markdown) if present
-            if nq.name == "total_stats":
+            if "total_stats" in nq.name:
                 total_stats = rows[0] if rows else {}
 
     # --- Markdown summary
@@ -126,7 +126,7 @@ def main():
 
     # Just list everything in RAW_DIR for that date
     for csv_file in sorted(RAW_DIR.glob(f"{today}_*.csv")):
-        md_lines.append(f"- [{csv_file.name}]({csv_file.relative_to(ROOT)})")
+        md_lines.append(f"- [{csv_file.name}](../{csv_file.parent.name / csv_file.name})")
 
     md_lines.append("")
     md_lines.append(
