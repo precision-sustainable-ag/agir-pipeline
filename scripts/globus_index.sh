@@ -51,6 +51,10 @@ JUNO_NPIR_ROOT="npir"
 JUNO_ROOT="dash_agir"
 CERES_ROOT="dash_agir"
 
+UPLOAD_ds="upload_raw"
+DEVELOPED_ds="developed_jpg"
+CUTOUT_ds="cutouts"
+
 # ============================================================
 #                   CONFIGURATION
 # ============================================================
@@ -59,33 +63,33 @@ CERES_ROOT="dash_agir"
 # Format: "endpoint_id|location|root_path|lts_root|data_state"
 # Includes: CERES (90-day + LTS), JUNO (LTS), NCSU (various LTS)
 ENDPOINTS=(
-    "${CERES_EP}|CERES|/project/${CERES_ROOT}/semifield-upload|${CERES_ROOT}|upload_raw"
-    "${CERES_EP}|CERES|/project/${CERES_ROOT}/semifield-developed-images|${CERES_ROOT}|developed_jpg"
-    "${CERES_EP}|CERES|/project/${CERES_ROOT}/semifield-cutouts|${CERES_ROOT}|cutouts"
+    "${CERES_EP}|CERES|/project/${CERES_ROOT}/semifield-upload|${CERES_ROOT}|${UPLOAD_ds}"
+    "${CERES_EP}|CERES|/project/${CERES_ROOT}/semifield-developed-images|${CERES_ROOT}|${DEVELOPED_ds}"
+    "${CERES_EP}|CERES|/project/${CERES_ROOT}/semifield-cutouts|${CERES_ROOT}|${CUTOUT_ds}"
 
-    "${CERES_EP}|CERES|/90daydata/${CERES_ROOT}/semifield-upload|${CERES_ROOT}|upload_raw"
-    "${CERES_EP}|CERES|/90daydata/${CERES_ROOT}/semifield-developed-images|${CERES_ROOT}|developed_jpg"
-    "${CERES_EP}|CERES|/90daydata/${CERES_ROOT}/semifield-cutouts|${CERES_ROOT}|cutouts"
+    "${CERES_EP}|CERES|/90daydata/${CERES_ROOT}/semifield-upload|${CERES_ROOT}|${UPLOAD_ds}"
+    "${CERES_EP}|CERES|/90daydata/${CERES_ROOT}/semifield-developed-images|${CERES_ROOT}|${DEVELOPED_ds}"
+    "${CERES_EP}|CERES|/90daydata/${CERES_ROOT}/semifield-cutouts|${CERES_ROOT}|${CUTOUT_ds}"
 
-    "${JUNO_EP}|JUNO|/LTS/project/${JUNO_ROOT}/semifield-upload|${JUNO_ROOT}|upload_raw"
-    "${JUNO_EP}|JUNO|/LTS/project/${JUNO_ROOT}/semifield-developed-images|${JUNO_ROOT}|developed_jpg"
-    "${JUNO_EP}|JUNO|/LTS/project/${JUNO_ROOT}/semifield-cutouts|${JUNO_ROOT}|cutouts"
+    "${JUNO_EP}|JUNO|/LTS/project/${JUNO_ROOT}/semifield-upload|${JUNO_ROOT}|${UPLOAD_ds}"
+    "${JUNO_EP}|JUNO|/LTS/project/${JUNO_ROOT}/semifield-developed-images|${JUNO_ROOT}|${DEVELOPED_ds}"
+    "${JUNO_EP}|JUNO|/LTS/project/${JUNO_ROOT}/semifield-cutouts|${JUNO_ROOT}|${CUTOUT_ds}"
 
-    "${JUNO_EP}|JUNO|/LTS/project/national_plant_image_repository/semifield-upload|${JUNO_NPIR_ROOT}|upload_raw"
-    "${JUNO_EP}|JUNO|/LTS/project/national_plant_image_repository/semifield-developed-images|${JUNO_NPIR_ROOT}|developed_jpg" 
-    "${JUNO_EP}|JUNO|/LTS/project/national_plant_image_repository/semifield-cutouts|${JUNO_NPIR_ROOT}|cutouts" 
+    "${JUNO_EP}|JUNO|/LTS/project/national_plant_image_repository/semifield-upload|${JUNO_NPIR_ROOT}|${UPLOAD_ds}"
+    "${JUNO_EP}|JUNO|/LTS/project/national_plant_image_repository/semifield-developed-images|${JUNO_NPIR_ROOT}|${DEVELOPED_ds}" 
+    "${JUNO_EP}|JUNO|/LTS/project/national_plant_image_repository/semifield-cutouts|${JUNO_NPIR_ROOT}|${CUTOUT_ds}" 
     
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_1}/semifield-upload|${NCSU_ROOT_1}|upload_raw"
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_2}/semifield-upload|${NCSU_ROOT_2}|upload_raw"
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_3}/semifield-upload|${NCSU_ROOT_3}|upload_raw"
+    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_1}/semifield-upload|${NCSU_ROOT_1}|${UPLOAD_ds}"
+    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_2}/semifield-upload|${NCSU_ROOT_2}|${UPLOAD_ds}"
+    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_3}/semifield-upload|${NCSU_ROOT_3}|${UPLOAD_ds}"
 
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_1}/semifield-developed-images|${NCSU_ROOT_1}|developed_jpg"
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_2}/semifield-developed-images|${NCSU_ROOT_2}|developed_jpg"
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_3}/semifield-developed-images|${NCSU_ROOT_3}|developed_jpg"
+    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_1}/semifield-developed-images|${NCSU_ROOT_1}|${DEVELOPED_ds}"
+    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_2}/semifield-developed-images|${NCSU_ROOT_2}|${DEVELOPED_ds}"
+    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_3}/semifield-developed-images|${NCSU_ROOT_3}|${DEVELOPED_ds}"
 
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_1}/semifield-cutouts|${NCSU_ROOT_1}|cutouts"
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_2}/semifield-cutouts|${NCSU_ROOT_2}|cutouts"
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_3}/semifield-cutouts|${NCSU_ROOT_3}|cutouts"
+    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_1}/semifield-cutouts|${NCSU_ROOT_1}|${CUTOUT_ds}"
+    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_2}/semifield-cutouts|${NCSU_ROOT_2}|${CUTOUT_ds}"
+    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_3}/semifield-cutouts|${NCSU_ROOT_3}|${CUTOUT_ds}"
 )
 
 # Script settings
