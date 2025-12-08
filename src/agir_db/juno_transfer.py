@@ -93,7 +93,7 @@ def ensure_logs_schema(conn) -> None:
     Assumes this script lives in scripts/, and SQL is at ../sql/05_logs/.
     """
     here = pathlib.Path(__file__).resolve()
-    schema_file = here.parent.parent / "sql" / "05_logs" / "logs.juno_transfers.sql"
+    schema_file = here.parent.parent / "sql" / "schemas" / "05_logs" / "logs.juno_transfers.sql"
     if not schema_file.exists():
         raise FileNotFoundError(f"Schema file not found: {schema_file}")
     run_sql_file(conn, schema_file)

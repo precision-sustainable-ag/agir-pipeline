@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REPORT_ROOT = ROOT / "reports" / "globus_index"
 RAW_DIR = REPORT_ROOT / "raw"
 SUMMARY_DIR = REPORT_ROOT / "summary"
-SQL_PATH = ROOT / "queries" / "globus_index" / "report_core.sql"
+SQL_PATH = ROOT / "sql" / "queries" / "globus_index" / "report_core.sql"
 
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 SUMMARY_DIR.mkdir(parents=True, exist_ok=True)

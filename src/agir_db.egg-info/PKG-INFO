@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: agir-db
+Version: 0.1.0
+Summary: Shared Postgres tools for AgIR
+Requires-Python: >=3.12
+Requires-Dist: psycopg2-binary
+Requires-Dist: pyyaml
