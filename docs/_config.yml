@@ -1,3 +1,6 @@
-theme: jekyll-theme-minimal
+theme: just-the-docs
 title: AgIR-DB
 description: AgIR-DB documentation and project updates.
+
+# Enable the built-in dark/light toggle
+color_scheme: dark
