@@ -42,9 +42,9 @@ from .images import ImageMetadata
 from .batches import BatchMetadata
 from .inventory import InventorySync
 from .transfers import TransferManager
+from .analytics import Analytics
 
 # Future phases (will be implemented later)
-# from .analytics import Analytics
 # from .migration import Migration
 
 
@@ -154,6 +154,9 @@ class AgirDB:
         
         # Phase 7: Transfer Management
         self.transfers = TransferManager(self._connection)
+        
+        # Phase 8: Analytics
+        self.analytics = Analytics(self._connection)
         
         # Future phases (will be implemented later)
         
