@@ -1,3 +1,11 @@
+---
+layout: default
+title: AgirDB API
+nav_order: 1
+---
+
+# AgirDB API Documentation
+
 # AgirDB API Documentation
 
 **Version:** 1.0.0 | **Author:** Matthew Kutugata
