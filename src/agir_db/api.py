@@ -34,8 +34,10 @@ from typing import Optional
 from .connection import ConnectionManager
 from .exceptions import AgirDBError
 
-# Domain class imports (will be implemented in later phases)
-# from .gaps import PipelineGaps
+# Domain class imports
+from .gaps import PipelineGaps
+
+# Future phases (will be implemented later)
 # from .stages import StageStatus
 # from .images import ImageMetadata
 # from .transfers import TransferManager
@@ -132,12 +134,12 @@ class AgirDB:
             password=password
         )
         
-        # Initialize domain components (placeholders for now)
-        # These will be uncommented as each component is implemented
+        # Initialize domain components
         
         # Phase 2: Pipeline Gaps
-        # self.gaps = PipelineGaps(self._connection)
+        self.gaps = PipelineGaps(self._connection)
         
+        # Future phases (will be implemented later)
         # Phase 3: Stage Status
         # self.stages = StageStatus(self._connection)
         
