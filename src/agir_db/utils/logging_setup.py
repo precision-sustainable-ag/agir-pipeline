@@ -73,12 +73,9 @@ def setup_logging(
             '%(filename)s:%(lineno)d - %(message)s'
         )
     
-    # Convert level string to logging level
-    numeric_level = getattr(logging, level.upper(), logging.INFO)
-    
     # Configure root logger
     root_logger = logging.getLogger()
-    root_logger.setLevel(numeric_level)
+    root_logger.setLevel(level)
     
     # Remove existing handlers to avoid duplicates
     root_logger.handlers.clear()
@@ -88,14 +85,14 @@ def setup_logging(
     
     # File handler
     file_handler = logging.FileHandler(log_file_path)
-    file_handler.setLevel(numeric_level)
+    file_handler.setLevel(level)
     file_handler.setFormatter(formatter)
     root_logger.addHandler(file_handler)
     
     # Console handler (optional)
     if console:
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(numeric_level)
+        console_handler.setLevel(level)
         console_handler.setFormatter(formatter)
         root_logger.addHandler(console_handler)
     
