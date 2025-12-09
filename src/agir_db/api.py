@@ -44,6 +44,7 @@ from .inventory import InventorySync
 from .transfers import TransferManager
 from .analytics import Analytics
 from .migration import Migration
+from .orchestration import Orchestration
 
 
 logger = logging.getLogger(__name__)
@@ -158,6 +159,9 @@ class AgirDB:
         
         # Phase 9: Migration Tools
         self.migration = Migration(self._connection)
+        
+        # Phase 10: Orchestration Helpers
+        self.orchestration = Orchestration(self._connection)
         
         # Phase 7: Transfer Management
         # self.transfers = TransferManager(self._connection)
