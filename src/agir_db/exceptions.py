@@ -245,6 +245,23 @@ class MigrationValidationError(MigrationError):
 
 
 # ==============================================================================
+# ORCHESTRATION ERRORS
+# ==============================================================================
+
+class OrchestrationError(AgirDBError):
+    """
+    Orchestration operation failed.
+    
+    Raised when high-level workflow orchestration encounters errors.
+    Common causes:
+    - Missing batch data
+    - Invalid workflow state
+    - Conversion pipeline failures
+    """
+    pass
+
+
+# ==============================================================================
 # VALIDATION ERRORS
 # ==============================================================================
 

@@ -59,6 +59,7 @@ from .inventory import InventorySync
 from .transfers import TransferManager
 from .analytics import Analytics
 from .migration import Migration
+from .orchestration import Orchestration
 
 # Logging utilities
 from .utils.logging_setup import setup_logging, get_logger, set_level
@@ -109,6 +110,9 @@ from .exceptions import (
     MissingRequiredFieldError,
     InvalidImageIdError,
     InvalidBatchIdError,
+
+    # Orchestration
+    OrchestrationError,
 )
 
 # Public API
@@ -127,6 +131,7 @@ __all__ = [
     'TransferManager',
     'Analytics',
     'Migration',
+    'Orchestration',
     
     # Logging
     'setup_logging',
@@ -161,4 +166,5 @@ __all__ = [
     'MissingRequiredFieldError',
     'InvalidImageIdError',
     'InvalidBatchIdError',
+    'OrchestrationError',
 ]
