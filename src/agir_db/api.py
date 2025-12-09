@@ -41,9 +41,9 @@ from .events import EventLogger
 from .images import ImageMetadata
 from .batches import BatchMetadata
 from .inventory import InventorySync
+from .transfers import TransferManager
 
 # Future phases (will be implemented later)
-# from .transfers import TransferManager
 # from .analytics import Analytics
 # from .migration import Migration
 
@@ -151,6 +151,9 @@ class AgirDB:
         
         # Phase 6: Inventory Sync
         self.inventory = InventorySync(self._connection)
+        
+        # Phase 7: Transfer Management
+        self.transfers = TransferManager(self._connection)
         
         # Future phases (will be implemented later)
         

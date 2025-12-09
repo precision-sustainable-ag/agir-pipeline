@@ -52,7 +52,7 @@ def test_image_metadata_initialization():
     
     from agir_db.connection import ConnectionManager
     
-    conn = ConnectionManager(host='localhost', port=5432, dbname='agir', user='testuser')
+    conn = ConnectionManager()
     images = ImageMetadata(conn)
     
     assert images.conn is conn
@@ -73,7 +73,7 @@ def test_batch_metadata_initialization():
     
     from agir_db.connection import ConnectionManager
     
-    conn = ConnectionManager(host='localhost', port=5432, dbname='agir', user='testuser')
+    conn = ConnectionManager()
     batches = BatchMetadata(conn)
     
     assert batches.conn is conn
@@ -93,7 +93,7 @@ def test_agirdb_integration():
     """Test that AgirDB exposes images and batches components."""
     print("\nTesting AgirDB.images and AgirDB.batches integration...")
     
-    db = AgirDB(host='localhost', port=5432, dbname='agir', user='testuser')
+    db = AgirDB()
     
     # Check that components exist
     assert hasattr(db, 'images'), "AgirDB does not have 'images' attribute"
@@ -109,7 +109,7 @@ def test_status_validation():
     print("\nTesting status validation...")
     
     from agir_db.connection import ConnectionManager
-    conn = ConnectionManager(host='localhost', port=5432, dbname='agir', user='testuser')
+    conn = ConnectionManager()
     
     images = ImageMetadata(conn)
     batches = BatchMetadata(conn)

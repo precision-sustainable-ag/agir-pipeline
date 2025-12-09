@@ -54,7 +54,7 @@ def test_stage_status_initialization():
     
     from agir_db.connection import ConnectionManager
     
-    conn = ConnectionManager(host='localhost', port=5432, dbname='agir', user='testuser')
+    conn = ConnectionManager()
     stages = StageStatus(conn)
     
     assert stages.conn is conn
@@ -74,7 +74,7 @@ def test_stage_validation():
     print("\nTesting stage validation...")
     
     from agir_db.connection import ConnectionManager
-    conn = ConnectionManager(host='localhost', port=5432, dbname='agir', user='testuser')
+    conn = ConnectionManager()
     stages = StageStatus(conn)
     
     # Valid stages should not raise
@@ -100,7 +100,7 @@ def test_status_validation():
     print("\nTesting status validation...")
     
     from agir_db.connection import ConnectionManager
-    conn = ConnectionManager(host='localhost', port=5432, dbname='agir', user='testuser')
+    conn = ConnectionManager()
     stages = StageStatus(conn)
     
     # Valid statuses should not raise
@@ -125,7 +125,7 @@ def test_agirdb_stages_integration():
     """Test that AgirDB exposes stages component."""
     print("\nTesting AgirDB.stages integration...")
     
-    db = AgirDB(host='localhost', port=5432, dbname='agir', user='testuser')
+    db = AgirDB()
     
     # Check that stages component exists
     assert hasattr(db, 'stages'), "AgirDB does not have 'stages' attribute"
@@ -150,7 +150,7 @@ def test_method_signatures():
     from agir_db.connection import ConnectionManager
     import inspect
     
-    conn = ConnectionManager(host='localhost', port=5432, dbname='agir', user='testuser')
+    conn = ConnectionManager()
     stages = StageStatus(conn)
     
     # start(batch_id, stage, job_id=None, metadata=None)

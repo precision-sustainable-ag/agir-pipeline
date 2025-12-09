@@ -33,7 +33,7 @@ def test_inventory_sync_initialization():
     
     from agir_db.connection import ConnectionManager
     
-    conn = ConnectionManager(host='localhost', port=5432, dbname='agir', user='testuser')
+    conn = ConnectionManager()
     inventory = InventorySync(conn)
     
     assert inventory.conn is conn
@@ -50,7 +50,7 @@ def test_agirdb_integration():
     """Test that AgirDB exposes inventory component."""
     print("\nTesting AgirDB.inventory integration...")
     
-    db = AgirDB(host='localhost', port=5432, dbname='agir', user='testuser')
+    db = AgirDB()
     
     # Check that component exists
     assert hasattr(db, 'inventory'), "AgirDB does not have 'inventory' attribute"

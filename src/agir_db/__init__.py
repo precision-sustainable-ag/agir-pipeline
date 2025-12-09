@@ -56,6 +56,7 @@ from .events import EventLogger
 from .images import ImageMetadata
 from .batches import BatchMetadata
 from .inventory import InventorySync
+from .transfers import TransferManager
 
 # Logging utilities
 from .utils.logging_setup import setup_logging, get_logger, set_level
@@ -121,6 +122,7 @@ __all__ = [
     'ImageMetadata',
     'BatchMetadata',
     'InventorySync',
+    'TransferManager',
     
     # Logging
     'setup_logging',
