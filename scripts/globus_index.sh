@@ -94,7 +94,7 @@ ENDPOINTS=(
 
 # Script settings
 REPO_DIR="/project/dash_agir/matthew.kutugata/repos/agir-db"
-PYTHON_SCRIPT="${REPO_DIR}/src/agir_db/globus_index.py"
+PYTHON_SCRIPT="${REPO_DIR}/scripts/globus_index.py"
 SCHEMA="${REPO_DIR}/sql/schemas/02_source/source.globus_file_index.sql"
 
 # check of pyhton script exists
