@@ -10,3 +10,5 @@ color_scheme: nil
 # Required for remote_theme on GitHub Pages
 plugins:
   - jekyll-remote-theme
+minima:
+    skin: dark
