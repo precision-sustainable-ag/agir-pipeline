@@ -4,12 +4,9 @@ description: AgIR-DB documentation and project updates.
 # Use Just the Docs as a remote theme on GitHub Pages
 remote_theme: just-the-docs/just-the-docs
 
-
-# Dark theme (you can also use `nil` for auto + toggle)
-color_scheme: nil
-
 # Required for remote_theme on GitHub Pages
 plugins:
   - jekyll-remote-theme
-minima:
-    skin: dark
+  
+# Dark theme (you can also use `nil` for auto + toggle)
+color_scheme: nil
