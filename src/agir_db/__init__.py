@@ -49,6 +49,9 @@ from .api import AgirDB
 # Connection management
 from .connection import ConnectionManager
 
+# Domain components
+from .gaps import PipelineGaps
+
 # Logging utilities
 from .utils.logging_setup import setup_logging, get_logger, set_level
 
@@ -105,6 +108,9 @@ __all__ = [
     # Main classes
     'AgirDB',
     'ConnectionManager',
+    
+    # Domain components
+    'PipelineGaps',
     
     # Logging
     'setup_logging',
