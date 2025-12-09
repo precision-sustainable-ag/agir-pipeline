@@ -1,8 +1,9 @@
 ---
 layout: default
-title: AgirDB API
+title: Home
 nav_order: 1
 ---
+
 
 # AgirDB API Documentation
 
