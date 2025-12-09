@@ -5,7 +5,7 @@ description: AgIR-DB documentation and project updates.
 remote_theme: just-the-docs/just-the-docs
 
 # Dark theme (you can also use `nil` for auto + toggle)
-color_scheme: dark
+color_scheme: nil
 
 # Required for remote_theme on GitHub Pages
 plugins:
