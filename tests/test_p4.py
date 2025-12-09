@@ -52,7 +52,7 @@ def test_event_logger_initialization():
     
     from agir_db.connection import ConnectionManager
     
-    conn = ConnectionManager(host='localhost', port=5432, dbname='agir', user='testuser')
+    conn = ConnectionManager()
     events = EventLogger(conn)
     
     assert events.conn is conn
@@ -75,7 +75,7 @@ def test_severity_validation():
     print("\nTesting severity validation...")
     
     from agir_db.connection import ConnectionManager
-    conn = ConnectionManager(host='localhost', port=5432, dbname='agir', user='testuser')
+    conn = ConnectionManager()
     events = EventLogger(conn)
     
     # Valid severities should not raise

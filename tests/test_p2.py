@@ -39,7 +39,7 @@ def test_pipeline_gaps_initialization():
     # This test doesn't actually connect - just verifies initialization
     from agir_db.connection import ConnectionManager
     
-    conn = ConnectionManager(host='localhost', port=5432, dbname='agir', user='testuser')
+    conn = ConnectionManager()
     gaps = PipelineGaps(conn)
     
     assert gaps.conn is conn
