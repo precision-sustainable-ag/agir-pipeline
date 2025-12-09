@@ -15,6 +15,8 @@ import socket
 from typing import Dict, List, Optional
 from datetime import datetime
 
+from psycopg2.extras import Json
+
 from .connection import ConnectionManager
 from .exceptions import (
     QueryError,
@@ -179,7 +181,10 @@ class StageStatus:
         logger.info(f"Starting stage '{stage}' for batch '{batch_id}' (job_id={job_id})")
         
         try:
-            self.conn.execute(query, (batch_id, stage, job_id, hostname, metadata))
+            # Wrap metadata dict with Json() for JSONB conversion
+            metadata_json = Json(metadata) if metadata is not None else None
+            
+            self.conn.execute(query, (batch_id, stage, job_id, hostname, metadata_json))
             logger.info(f"Stage '{stage}' marked as in-progress for batch '{batch_id}'")
         except Exception as e:
             logger.error(f"Failed to start stage: {e}")
@@ -273,10 +278,13 @@ class StageStatus:
                    f"(success={success}, files_processed={files_processed})")
         
         try:
+            # Wrap metadata dict with Json() for JSONB conversion
+            metadata_json = Json(metadata) if metadata is not None else None
+            
             self.conn.execute(
                 query,
                 (status, success, files_processed, files_failed, error_message,
-                 metadata, batch_id, stage)
+                 metadata_json, batch_id, stage)
             )
             logger.info(f"Stage '{stage}' marked as {status} for batch '{batch_id}'")
         except Exception as e:

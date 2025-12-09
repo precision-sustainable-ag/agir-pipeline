@@ -37,11 +37,11 @@ from .exceptions import AgirDBError
 # Domain class imports
 from .gaps import PipelineGaps
 from .stages import StageStatus
+from .events import EventLogger
 
 # Future phases (will be implemented later)
 # from .images import ImageMetadata
 # from .transfers import TransferManager
-# from .events import EventLogger
 # from .inventory import InventorySync
 # from .analytics import Analytics
 # from .batches import BatchMetadata
@@ -142,10 +142,10 @@ class AgirDB:
         # Phase 3: Stage Status
         self.stages = StageStatus(self._connection)
         
-        # Future phases (will be implemented later)
-        
         # Phase 4: Event Logging
-        # self.events = EventLogger(self._connection)
+        self.events = EventLogger(self._connection)
+        
+        # Future phases (will be implemented later)
         
         # Phase 5: Image Metadata & Batch Metadata
         # self.images = ImageMetadata(self._connection)
