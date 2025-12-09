@@ -1,6 +1,6 @@
 # Batch Metadata Component
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)
 
 The `batches` component manages metadata for processing batches.
 
@@ -139,4 +139,4 @@ db.batches.delete(batch_id='B001')
 - [Image Metadata](image-metadata.md) - Individual image metadata
 - [Database Schema](schema.md) - Table structure
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)

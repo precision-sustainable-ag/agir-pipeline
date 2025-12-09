@@ -1,6 +1,6 @@
 # Analytics Component
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)
 
 The `analytics` component provides reporting and statistics.
 

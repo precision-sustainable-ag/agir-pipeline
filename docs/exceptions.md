@@ -1,6 +1,6 @@
 # Exception Handling
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)
 
 AgirDB uses a hierarchical exception system for precise error handling.
 
@@ -438,4 +438,4 @@ finally:
 - [Troubleshooting](troubleshooting.md) - Common issues
 - [Best Practices](best-practices.md) - Error handling patterns
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)

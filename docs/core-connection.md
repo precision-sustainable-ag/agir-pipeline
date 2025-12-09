@@ -1,6 +1,6 @@
 # Core Connection Methods
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)
 
 ## AgirDB Class
 
@@ -280,4 +280,4 @@ See [Exception Handling](exceptions.md) for complete reference.
 
 ---
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)

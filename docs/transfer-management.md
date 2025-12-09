@@ -1,6 +1,6 @@
 # Transfer Management Component
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)
 
 The `transfers` component manages JUNO transfer operations.
 
@@ -150,4 +150,4 @@ db.transfers.cancel(
 
 ---
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)

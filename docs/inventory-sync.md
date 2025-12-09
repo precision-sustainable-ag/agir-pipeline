@@ -1,6 +1,6 @@
 # Inventory Synchronization Component
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)
 
 The `inventory` component synchronizes file system state with database records.
 
@@ -188,4 +188,4 @@ with AgirDB() as db:
 - [Pipeline Gaps](pipeline-gaps.md) - Gap-based work discovery
 - [Image Metadata](image-metadata.md) - Image records
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)

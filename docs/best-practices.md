@@ -1,6 +1,6 @@
 # Best Practices
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)
 
 Production-ready patterns and recommendations for using AgirDB.
 
@@ -440,4 +440,4 @@ def process_batch_id(batch_id: str):
 - [Exception Handling](exceptions.md) - Error handling reference
 - [Troubleshooting](troubleshooting.md) - Common issues
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)

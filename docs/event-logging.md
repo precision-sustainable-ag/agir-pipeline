@@ -1,6 +1,6 @@
 # Event Logging Component
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)
 
 The `events` component logs processing events for auditing and debugging.
 
@@ -217,4 +217,4 @@ with AgirDB() as db:
 - [Stage Status](stage-status.md) - Processing status tracking
 - [Troubleshooting](troubleshooting.md) - Using logs for debugging
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)

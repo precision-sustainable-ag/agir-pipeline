@@ -1,6 +1,6 @@
 # Pipeline Gaps Component
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)
 
 The `gaps` component provides work discovery through pipeline gap analysis. It identifies batches where output files are missing, indicating processing needs. This "pipeline gaps" methodology serves as the source of truth for work discovery.
 
@@ -365,4 +365,4 @@ with AgirDB() as db:
 - [Orchestration Examples](orchestration.md) - Complete workflows
 - [Best Practices](best-practices.md) - Production patterns
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)

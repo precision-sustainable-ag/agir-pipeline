@@ -1,6 +1,6 @@
 # Troubleshooting
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)
 
 Common issues and solutions when using AgirDB.
 
@@ -483,4 +483,4 @@ def print_diagnostics():
 - [Exception Handling](exceptions.md) - Exception reference
 - [Best Practices](best-practices.md) - Recommended patterns
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)

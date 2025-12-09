@@ -1,6 +1,6 @@
 # Stage Status Component
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)
 
 The `stages` component tracks the in-progress status of pipeline stages, preventing duplicate work and enabling monitoring. It works in conjunction with [pipeline gaps](pipeline-gaps.md) to provide complete workflow orchestration.
 
@@ -507,4 +507,4 @@ db.stages.complete(
 - [Orchestration Examples](orchestration.md) - Complete workflows
 - [Exception Handling](exceptions.md) - Error reference
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)

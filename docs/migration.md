@@ -1,6 +1,6 @@
 # Migration Component
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)
 
 The `migration` component imports data from legacy SQLite databases.
 
@@ -91,4 +91,4 @@ validation = db.migration.validate_sqlite(
 
 ---
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)

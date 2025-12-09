@@ -1,6 +1,6 @@
 # Image Metadata Component
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)
 
 The `images` component manages metadata for individual images across all processing stages.
 
@@ -329,4 +329,4 @@ db.images.insert(
 - [Pipeline Gaps](pipeline-gaps.md) - Find images needing work
 - [Database Schema](schema.md) - Table structure
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)

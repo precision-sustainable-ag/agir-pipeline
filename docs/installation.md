@@ -1,6 +1,6 @@
 # Installation Guide
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)
 
 Complete setup instructions for AgirDB.
 
@@ -465,4 +465,4 @@ After installation:
 
 ---
 
-[← Back to Index](README.md)
+[← Back to Index](index.md)
