@@ -38,13 +38,13 @@ from .exceptions import AgirDBError
 from .gaps import PipelineGaps
 from .stages import StageStatus
 from .events import EventLogger
+from .images import ImageMetadata
+from .batches import BatchMetadata
 
 # Future phases (will be implemented later)
-# from .images import ImageMetadata
 # from .transfers import TransferManager
 # from .inventory import InventorySync
 # from .analytics import Analytics
-# from .batches import BatchMetadata
 # from .migration import Migration
 
 
@@ -145,11 +145,11 @@ class AgirDB:
         # Phase 4: Event Logging
         self.events = EventLogger(self._connection)
         
-        # Future phases (will be implemented later)
+        # Phase 5: Image & Batch Metadata
+        self.images = ImageMetadata(self._connection)
+        self.batches = BatchMetadata(self._connection)
         
-        # Phase 5: Image Metadata & Batch Metadata
-        # self.images = ImageMetadata(self._connection)
-        # self.batches = BatchMetadata(self._connection)
+        # Future phases (will be implemented later)
         
         # Phase 6: Inventory Sync
         # self.inventory = InventorySync(self._connection)
@@ -162,6 +162,8 @@ class AgirDB:
         
         # Phase 9: Migration
         # self.migration = Migration(self._connection)
+
+        # Phase 10: Orchestration Helpers
         
         logger.info("AgirDB initialized")
     
