@@ -55,6 +55,7 @@ from .stages import StageStatus
 from .events import EventLogger
 from .images import ImageMetadata
 from .batches import BatchMetadata
+from .inventory import InventorySync
 
 # Logging utilities
 from .utils.logging_setup import setup_logging, get_logger, set_level
@@ -119,6 +120,7 @@ __all__ = [
     'EventLogger',
     'ImageMetadata',
     'BatchMetadata',
+    'InventorySync',
     
     # Logging
     'setup_logging',
