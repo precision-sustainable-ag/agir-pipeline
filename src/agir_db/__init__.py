@@ -53,6 +53,8 @@ from .connection import ConnectionManager
 from .gaps import PipelineGaps
 from .stages import StageStatus
 from .events import EventLogger
+from .images import ImageMetadata
+from .batches import BatchMetadata
 
 # Logging utilities
 from .utils.logging_setup import setup_logging, get_logger, set_level
@@ -115,6 +117,8 @@ __all__ = [
     'PipelineGaps',
     'StageStatus',
     'EventLogger',
+    'ImageMetadata',
+    'BatchMetadata',
     
     # Logging
     'setup_logging',
