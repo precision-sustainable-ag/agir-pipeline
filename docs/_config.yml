@@ -3,4 +3,4 @@ title: AgIR-DB
 description: AgIR-DB documentation and project updates.
 
 # Enable the built-in dark/light toggle
-color_scheme: dark
+color_scheme: nil  # enables auto mode + theme toggle
