@@ -51,6 +51,7 @@ from .connection import ConnectionManager
 
 # Domain components
 from .gaps import PipelineGaps
+from .stages import StageStatus
 
 # Logging utilities
 from .utils.logging_setup import setup_logging, get_logger, set_level
@@ -111,6 +112,7 @@ __all__ = [
     
     # Domain components
     'PipelineGaps',
+    'StageStatus',
     
     # Logging
     'setup_logging',
