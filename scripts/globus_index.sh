@@ -185,4 +185,9 @@ echo "========================================" | tee -a "${MAIN_LOG}"
 # Clean up old logs (keep last 30 days)
 find "${LOG_DIR}" -name "*.log" -type f -mtime +30 -delete
 
+# ------------------ Resubmit for next week -----
+echo "[WEEKLY] Scheduling next run for ~7 days from now at the same time..."
+
+sbatch --begin=now+7days "$0"
+
 exit 0
