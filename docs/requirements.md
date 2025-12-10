@@ -166,16 +166,28 @@ export PGUSER=agir_user
 - File logging: `/project/dash_agir/logs/agir_db_YYYYMMDD.log`
 - Database logging: `processed.events` table
 
-## **Current Scope (7 Active Tables)**
+## Active Database Tables (7)
 
 Currently implemented for RAW→JPG conversion:
-- `source.globus_file_index`
-- `processed.batches`
-- `processed.images`
-- `processed.stage_status`
-- `processed.events`
-- `processed.transfers`
+
+| Schema | Table | Purpose |
+|--------|-------|---------|
+| `source` | `globus_file_index` | File inventory from Globus |
+| `processed` | `batches` | Batch metadata & completion flags |
+| `processed` | `images` | Image metadata & EXIF data |
+| `processed` | `stage_status` | In-progress tracking |
+| `processed` | `events` | Complete audit trail |
+| `processed` | `transfers` | Globus transfer tracking |
+| `report` | 20+ views | Analytics & gap detection |
+
 - Plus 20+ reporting views
+
+**Future tables** (designed, not implemented):
+- `processed.detections` - Object detection results
+- `processed.segmentations` - Segmentation masks
+- `processed.cutouts` - Extracted plant images
+- `processed.cutout_features` - Morphological/spectral features
+
 
 Future stages (intentionally unimplemented until needed):
 - Object detection, segmentation, cutouts, feature extraction
