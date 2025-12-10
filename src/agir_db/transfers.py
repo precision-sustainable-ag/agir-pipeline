@@ -19,7 +19,8 @@ from .exceptions import (
     InvalidParameterError,
     TransferNotFoundError,
     TransferAlreadyInProgressError,
-    BatchNotFoundError
+    BatchNotFoundError,
+    ValidationError
 )
 
 
@@ -661,3 +662,181 @@ class TransferManager:
         except Exception as e:
             logger.error(f"Failed to get pending transfers: {e}")
             raise QueryError(f"Failed to get pending transfers: {e}") from e
+        
+    def get_batches_needing_juno_transfer(
+        self,
+        source_location: Optional[str] = None,
+        data_state: Optional[str] = None,
+        limit: Optional[int] = None
+    ) -> List[Dict]:
+        """
+        Get batches that need to be transferred to JUNO.
+        
+        Queries the report.missing_on_juno view to find batches where files
+        exist at source locations but are missing from JUNO.
+        
+        Parameters
+        ----------
+        source_location : str, optional
+            Filter by source location (e.g., 'NCSU', 'CERES')
+        data_state : str, optional
+            Filter by data_state (e.g., 'developed_jpg', 'upload_raw')
+        limit : int, optional
+            Maximum number of batches to return
+        
+        Returns
+        -------
+        List[Dict]
+            List of batches needing transfer with metadata:
+            - batch_id: Batch identifier
+            - location: Source location
+            - lts_root: LTS root on source
+            - root_path: Full root path on source
+            - data_state: Data state (upload_raw, developed_jpg, etc.)
+            - file_count: Number of files to transfer
+            - total_bytes: Total size in bytes
+        
+        Raises
+        ------
+        QueryError
+            If database query fails
+        ValidationError
+            If parameters are invalid
+        
+        Examples
+        --------
+        >>> # Get all NCSU developed_jpg batches needing transfer
+        >>> batches = db.transfers.get_batches_needing_juno_transfer(
+        ...     source_location='NCSU',
+        ...     data_state='developed_jpg'
+        ... )
+        
+        >>> # Get top 10 batches needing any transfer
+        >>> batches = db.transfers.get_batches_needing_juno_transfer(limit=10)
+        """
+        logger.info(
+            f"Getting batches needing JUNO transfer: "
+            f"location={source_location}, data_state={data_state}, limit={limit}"
+        )
+        
+        # Build query
+        query = """
+        SELECT 
+            batch_id,
+            location,
+            lts_root,
+            root_path,
+            data_state,
+            COUNT(*) AS file_count,
+            SUM(size_bytes) AS total_bytes
+        FROM report.missing_on_juno
+        WHERE 1=1
+        """
+        
+        params = {}
+        
+        if source_location:
+            query += f" AND location = '{source_location}'"
+        
+        if data_state:
+            query += f" AND data_state = '{data_state}'"
+        
+        query += """
+        GROUP BY batch_id, location, lts_root, root_path, data_state
+        ORDER BY batch_id
+        """
+        
+        if limit is not None:
+            query += f" LIMIT {int(limit)}"
+        
+        try:
+            results = self.conn.fetch_all(query)
+            logger.info(f"Found {len(results)} batches needing JUNO transfer")
+            return [dict(row) for row in results]
+            
+        except Exception as e:
+            logger.error(f"Failed to query batches needing transfer: {e}")
+            raise QueryError(f"Failed to get batches needing JUNO transfer: {e}")
+    
+    def get_files_needing_juno_transfer(
+        self,
+        batch_id: str,
+        source_location: Optional[str] = None,
+        data_state: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        Get specific files in a batch that need transfer to JUNO.
+        
+        Parameters
+        ----------
+        batch_id : str
+            Batch identifier
+        source_location : str, optional
+            Filter by source location
+        data_state : str, optional
+            Filter by data_state
+        
+        Returns
+        -------
+        List[Dict]
+            List of files needing transfer with full metadata
+        
+        Raises
+        ------
+        QueryError
+            If database query fails
+        ValidationError
+            If batch_id is invalid
+        
+        Examples
+        --------
+        >>> files = db.transfers.get_files_needing_juno_transfer(
+        ...     batch_id='MD_2025-01-01',
+        ...     source_location='NCSU',
+        ...     data_state='developed_jpg'
+        ... )
+        """
+        if not batch_id:
+            raise ValidationError("batch_id is required")
+        
+        logger.info(f"Getting files needing transfer for batch: {batch_id}")
+        
+        query = f"""
+        SELECT 
+            file_id,
+            endpoint,
+            location,
+            lts_root,
+            root_path,
+            rel_path,
+            parent_dir,
+            file_name,
+            file_ext,
+            size_bytes,
+            checksum,
+            batch_id,
+            batch_state,
+            batch_date,
+            data_state
+        FROM report.missing_on_juno
+        WHERE batch_id = '{batch_id}'
+        """
+        
+        if source_location:
+            query += f" AND location = '{source_location}'"
+        
+        if data_state:
+            query += f" AND data_state = '{data_state}'"
+        
+        query += " ORDER BY rel_path, file_name"
+        
+        try:
+            results = self.conn.fetch_all(query)
+            
+            logger.info(f"Found {len(results)} files needing transfer")
+            return [dict(row) for row in results]
+            
+        except Exception as e:
+            logger.error(f"Failed to query files needing transfer: {e}")
+            raise QueryError(f"Failed to get files needing transfer: {e}") from e
+    
