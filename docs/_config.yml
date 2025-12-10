@@ -9,4 +9,4 @@ plugins:
   - jekyll-remote-theme
   
 # Dark theme (you can also use `nil` for auto + toggle)
-color_scheme: nil
+color_scheme: dark

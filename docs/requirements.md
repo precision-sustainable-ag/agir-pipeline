@@ -1,5 +1,5 @@
 ---
-layout: minimal
+layout: default
 title: Requirements
 nav_order: 2
 ---
@@ -27,7 +27,6 @@ nav_order: 2
 
 **4. Production Style - Explicit Parameters**
 ```python
-# ✅ Your chosen style
 db.images.insert(
     image_id='MD_1683434234',
     batch_id='MD_2025-01-01',
