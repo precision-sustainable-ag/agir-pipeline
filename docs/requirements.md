@@ -1,8 +1,7 @@
 ---
-layout: minimal
+layout: default
 title: Requirements
 nav_order: 2
-nav_enabled: false
 ---
 
 <details open markdown="block">
