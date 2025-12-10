@@ -243,14 +243,6 @@ AgirDB (Main API)
 
 ---
 
-## Support
-
-- **Documentation**: This documentation set
-- **Issues**: Report on GitHub repository
-- **Contact**: Matthew Kutugata
-
----
-
 ## License
 
 Copyright © 2025 Precision Sustainable Ag. All rights reserved.
