@@ -5,6 +5,9 @@ nav_order: 2
 nav_enabled: true
 ---
 
+1. TOC
+{:toc}
+
 ## **Architectural Requirements**
 
 **1. Pipeline Gaps Methodology**
