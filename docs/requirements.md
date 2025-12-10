@@ -13,142 +13,141 @@ nav_order: 3
 {:toc}
 </details>
 
-## **Architectural Requirements**
+## Architectural Requirements
 
-**1. Pipeline Gaps Methodology**
-- Missing output files serve as the "source of truth" for work discovery
-- More reliable than status flags that can drift from reality
-- Self-correcting: system remains reliable even if status tracking fails
+### 1. Pipeline Gaps Methodology
+Missing output files are the source of truth for work discovery.
+
 - Views detect gaps by comparing expected vs. actual files in storage
+- Self-correcting - system stays reliable if status tracking fails
+- More reliable than status flags that can drift
 
-**2. Clean Separation of Concerns**
-- Database operations completely separate from conversion logic
-- Each component has a single, well-defined responsibility
+### 2. Separation of Concerns
+Each component has a single, well-defined responsibility.
+
+- Database operations separate from processing logic
 - Flat architecture over nested abstractions
 - Minimal coupling between components
 
-**3. Generic Pipeline Stages**
-- Support arbitrary stage names with underscore conventions (e.g., `raw_to_dng`, `dng_to_jpg`, `object_detection`)
-- Extensible for future computer vision pipelines
+### 3. Generic Pipeline Stages
+Supports arbitrary stage names with underscore conventions.
+
+- Examples: `raw_to_dng`, `dng_to_jpg`, `object_detection`
 - Not hardcoded to specific workflows
+- Extensible for future CV pipelines
 
-## **API Design Requirements**
+---
 
-**4. Production Style - Explicit Parameters**
+## API Design
+
+### 4. Explicit Parameters
+All parameters are explicit with type hints for IDE autocomplete.
+
 ```python
 db.images.insert(
     image_id='MD_1683434234',
     batch_id='MD_2025-01-01',
     width_px=13376,
     height_px=9528,
-    camera_make='SVS_VISTEK',
-    # ... all parameters explicit
+    camera_make='SVS_VISTEK'
 )
 ```
+
 - No dataclasses
-- Type hints for all parameters
-- IDE autocomplete support
-- Clear required vs optional parameters
+- Clear required vs. optional parameters
 - Plain functions returning dicts
 
-**5. Idempotent Operations**
-- Safe to re-run methods multiple times
+### 5. Idempotent Operations
+All operations are safe to re-run multiple times.
+
 - Handle duplicates gracefully
 - Use UPSERT patterns where appropriate
 - Recover from failures without corruption
 
-**6. Comprehensive Error Handling**
-- Custom exception hierarchy (not just generic errors)
-- All methods raise exceptions on error (no silent failures)
-- Detailed error messages with context
+### 6. Error Handling
+All methods raise exceptions on error with detailed context.
+
+- Custom exception hierarchy (not generic errors)
+- No silent failures
 - Transaction-safe with proper rollback
 
-**7. Dual Logging System**
-- **File logging**: `/project/dash_agir/logs/agir_db_YYYYMMDD.log`
-- **Database logging**: `processed.events` table
-- Both capture: timestamp, batch_id, stage, status, error details
-- Full audit trail for debugging and monitoring
+### 7. Dual Logging
+File and database logging for complete audit trail.
 
-## **Data Storage Requirements**
+```python
+# File: /project/dash_agir/logs/agir_db_YYYYMMDD.log
+# Database: processed.events table
+```
 
-**8. Fully Queryable Metadata (No JSONB for Core Data)**
-- All searchable fields as proper database columns
-- No JSONB fallback for structured data
-- Proper indexes for fast queries
-- JSONB only for truly flexible/extensible metadata
+Both capture: timestamp, batch_id, stage, status, error details
 
-**9. Rich Database Storage Over JSON Files**
-- Prefer database tables for metadata
-- String-based IDs: `"MD_1683434234"` for images, `"MD_1683434234_0"` for cutouts
-- Comprehensive indexing strategy (50+ indexes planned)
+---
+
+## Data Storage
+
+### 8. Fully Queryable Schema
+All searchable fields are proper database columns.
+
+- No JSONB for core data (only for flexible metadata)
+- 50+ indexes for fast queries
 - Foreign keys with CASCADE for data integrity
 
-## **Operational Requirements**
+### 9. ID Format
+String-based IDs for images and cutouts.
 
-**10. Context Manager Support**
+```python
+Images:  "MD_1683434234"
+Cutouts: "MD_1683434234_0"
+```
+
+---
+
+## Operations
+
+### 10. Context Manager
+Automatic connection management and transaction handling.
+
 ```python
 with AgirDB() as db:
     # Do work
     db.commit()  # or rollback on error
 ```
-- Automatic connection management
-- Transaction handling
-- Proper cleanup on exit
 
-**11. Bulk Operations Support**
+### 11. Bulk Operations
+Single and bulk methods for efficiency with large datasets.
+
 ```python
-# Single insert
-db.images.insert(...)
-
-# Bulk insert (preferred for efficiency)
-db.images.insert_bulk([image1, image2, ...])
+db.images.insert(...)          # Single insert
+db.images.insert_bulk([...])   # Bulk insert (preferred)
 ```
-- Both single and bulk methods
-- Bulk methods for efficiency with large batches
-- Maintain transactional integrity
 
-**12. Simple Retry Logic (Manual for Now)**
+Both maintain transactional integrity.
+
+### 12. Retry Strategy
+Manual retry capability, future-ready for workflow orchestration.
+
 ```python
 db.stages.reset(batch_id, 'raw_to_jpg')  # Clear failed status
 db.stages.start(batch_id, 'raw_to_jpg', job_id)
 ```
-- Manual retry capability
-- Future-ready for workflow orchestration (Snakemake/Airflow)
-- Track retry attempts via metadata
 
-## **Component Organization**
+Track retry attempts via metadata.
 
-**13. Domain-Specific Components**
-```sh
-AgirDB
-├── gaps          # Work discovery
-├── stages        # Status tracking
-├── images        # Image metadata
-├── batches       # Batch metadata
-├── transfers     # JUNO transfer operations
-├── events        # Event logging
-├── inventory     # File inventory sync
-├── analytics     # Reporting and statistics
-├── migration     # SQLite import
-└── orchestration # High-level workflows
-```
+---
 
-**14. Comprehensive Method Coverage (~95+ methods across 10 classes)**
-- 6-8 methods per component on average
-- Each method has single responsibility
-- Clear, descriptive method names
-- Consistent parameter patterns
+## Quality Standards
 
-## **Quality Requirements**
+### 13. Production-Ready Code
+All code meets production standards.
 
-**15. Production-Ready Standards**
 - Comprehensive docstrings for all methods
 - Test suite for each component
 - Type hints throughout
-- Proper exception handling
 - Performance optimization (indexed queries, bulk operations)
 
-**16. Configuration via Environment**
+### 14. Configuration
+Standard PostgreSQL environment variables or direct parameters.
+
 ```bash
 export PGHOST=localhost
 export PGPORT=5432
@@ -156,18 +155,32 @@ export PGDATABASE=agir
 export PGUSER=agir_user
 # Password via .pgpass file
 ```
-- Standard PostgreSQL environment variables
-- Alternative: direct parameter passing
-- No hardcoded credentials
 
+No hardcoded credentials.
 
-**17. Dual Logging System**
-- File logging: `/project/dash_agir/logs/agir_db_YYYYMMDD.log`
-- Database logging: `processed.events` table
+---
 
-## Active Database Tables (7)
+## Current Implementation
 
-Currently implemented for RAW→JPG conversion:
+### Components
+10 classes with ~95 total methods (6-8 methods per component).
+
+```
+AgirDB
+├── gaps          # Work discovery (7 methods)
+├── stages        # Status tracking (9 methods)
+├── images        # Image metadata (12 methods)
+├── batches       # Batch metadata (11 methods)
+├── transfers     # Transfer operations (11 methods)
+├── events        # Event logging (8 methods)
+├── inventory     # File sync (5 methods)
+├── analytics     # Reporting (14 methods)
+├── migration     # SQLite import (3 methods)
+└── orchestration # Workflows (10 methods)
+```
+
+### Active Tables
+7 tables currently implemented for RAW→JPG conversion.
 
 | Schema | Table | Purpose |
 |--------|-------|---------|
@@ -179,35 +192,61 @@ Currently implemented for RAW→JPG conversion:
 | `processed` | `transfers` | Globus transfer tracking |
 | `report` | 20+ views | Analytics & gap detection |
 
-- Plus 20+ reporting views
+### Future Tables
+Designed but not yet implemented - will be added when CV stages are needed.
 
-**Future tables** (designed, not implemented):
-- `processed.detections` - Object detection results
-- `processed.segmentations` - Segmentation masks
+- `processed.detections` - Bounding boxes from object detection
+- `processed.segmentations` - Mask file paths
 - `processed.cutouts` - Extracted plant images
 - `processed.cutout_features` - Morphological/spectral features
 
+---
 
-Future stages (intentionally unimplemented until needed):
-- Object detection, segmentation, cutouts, feature extraction
+## Scope Boundaries
+
+### What agir-db DOES
+Control plane and data layer for image processing pipelines.
+
+- Store metadata and results
+- Track processing status
+- Discover work (pipeline gaps)
+- Orchestrate workflows (call external packages)
+- Log events and audit trail
+- Generate analytics and reports
+- Manage transfers
+- Handle migrations
+- Provide APIs for external systems
+
+### What agir-db DOES NOT DO
+Domain-specific processing logic (lives in external packages).
+
+- Image processing algorithms → `svs-raw-api`
+- Object detection models → `agir-detect`
+- Segmentation models → `agir-segment`
+- Feature extraction → `agir-features`
+- Deep learning inference
+- Model weights/checkpoints
+
+**Architecture Principle:** agir-db is the control plane and data layer. Domain logic lives in dedicated packages.
 
 ---
 
-## **Future Requirements** 
+## Future Requirements
 
-### **Near term (6-12 months)**
+### Near Term (6-12 months)
 
-#### **1. Computer Vision Pipeline Support (agir-db side)**
+#### 1. Computer Vision Support
+Database tables and methods to store CV pipeline results.
 
-**New Database Tables:**
+**New Tables:**
 ```sql
-processed.detections      -- Bounding boxes from object detection
-processed.segmentations   -- Mask file paths
-processed.cutouts         -- Extracted plant images
-processed.cutout_features -- Morphological/spectral features
+processed.detections       -- Bounding boxes from object detection
+processed.segmentations    -- Mask file paths
+processed.cutouts          -- Extracted plant images
+processed.cutout_features  -- Morphological/spectral features
 ```
 
-**New Python Methods (in agir-db):**
+**New Methods:**
 ```python
 # Detection CRUD
 db.detections.insert(image_id, bounding_boxes)
@@ -227,7 +266,7 @@ db.cutouts.update_species(cutout_id, species_id)
 db.segmentations.insert(cutout_id, mask_path, area_px)
 db.segmentations.get_by_cutout(cutout_id)
 
-# Cutout Feature CRUD
+# Feature CRUD
 db.features.insert(cutout_id, features_dict)
 db.features.get_by_cutout(cutout_id)
 db.features.search(feature_filters)
@@ -258,7 +297,8 @@ db.orchestration.run_full_cv_pipeline(
 
 ---
 
-#### **2. Globus Integration Enhancements**
+#### 2. Globus Integration Enhancements
+Automatic transfer policies and verification.
 
 **Smart Transfer Policies:**
 ```python
@@ -286,7 +326,8 @@ db.transfers.get_unverified()  # Transfers needing verification
 
 ---
 
-#### **3. Enhanced Orchestration**
+#### 3. Enhanced Orchestration
+Pre-built workflows, custom builders, and automatic retry policies.
 
 **Workflow Templates:**
 ```python
@@ -335,11 +376,12 @@ db.orchestration.retry_failed_stages(
 
 ---
 
-#### **4. Data Quality & Validation**
+#### 4. Data Quality & Validation
+Input validation, quality metrics, and automated alerts.
 
 **Input Validation:**
 ```python
-# Validation rules
+# Validate readiness for processing
 db.validation.validate_batch_readiness(batch_id, stage='raw_to_jpg')
 # Checks: files exist, correct format, minimum size, etc.
 
@@ -363,7 +405,7 @@ db.quality.flag_outliers(batch_id, stage='object_detection')
 
 **Automated Alerts:**
 ```python
-# Configure alerts
+# Configure alert conditions
 db.alerts.configure(
     name='high_error_rate',
     condition='error_rate > 0.10',
@@ -382,24 +424,24 @@ db.alerts.configure(
 
 ---
 
-### **Medium term (1-2 years)**
+### Medium Term (1-2 years)
 
-#### **5. Horizontal Scalability**
+#### 5. Horizontal Scalability
+Multi-worker coordination with health monitoring.
 
-**Multi-Worker Coordination:**
+**Worker Coordination:**
 ```python
 # Worker registration
 db.workers.register(worker_id='worker-001', hostname='node-42', capabilities=['gpu'])
 db.workers.heartbeat(worker_id)  # Keep-alive
 db.workers.deregister(worker_id)
 
-# Smart work distribution
+# Smart work distribution (uses row-level locking)
 work = db.workers.claim_work(
     worker_id='worker-001',
     stage='object_detection',
     required_capabilities=['gpu']
 )
-# Uses row-level locking to prevent duplicate claims
 ```
 
 **Distributed Processing:**
@@ -414,7 +456,6 @@ db.orchestration.process_batches_parallel(
 
 **Health Monitoring:**
 ```python
-# Worker health
 db.workers.get_health_status()
 db.workers.detect_stale_workers(timeout_minutes=10)
 db.workers.reassign_work(from_worker='worker-002', to_worker='worker-003')
@@ -422,15 +463,18 @@ db.workers.reassign_work(from_worker='worker-002', to_worker='worker-003')
 
 ---
 
-#### **6. Database Performance Optimization**
+#### 6. Database Performance Optimization
+Partitioning, query optimization, and caching.
 
 **Table Partitioning:**
 ```sql
 -- Partition large tables by date
 CREATE TABLE processed.images_2025_01 PARTITION OF processed.images
     FOR VALUES FROM ('2025-01-01') TO ('2025-02-01');
+```
 
--- Automatic partition management
+```python
+# Automatic partition management
 db.maintenance.create_monthly_partitions(
     table='processed.images',
     months_ahead=3
@@ -439,11 +483,8 @@ db.maintenance.create_monthly_partitions(
 
 **Query Optimization:**
 ```python
-# Query performance monitoring
 db.analytics.get_slow_queries(min_duration_ms=1000)
 db.analytics.suggest_indexes()
-
-# Connection pooling tuning
 db.configure_pool(min_connections=5, max_connections=20)
 ```
 
@@ -456,11 +497,12 @@ db.cache.invalidate(key='batch_summary_MD_2025-01-01')
 
 ---
 
-#### **7. Data Lifecycle Management**
+#### 7. Data Lifecycle Management
+Retention policies, archival, and backup/recovery.
 
 **Retention Policies:**
 ```python
-# Configure retention
+# Configure retention by data type
 db.lifecycle.set_retention_policy(
     data_type='events',
     severity='INFO',
@@ -479,7 +521,7 @@ deleted = db.lifecycle.execute_cleanup()
 
 **Archival:**
 ```python
-# Archive old batches
+# Archive old batches to cold storage
 db.lifecycle.archive_batch(
     batch_id='MD_2024-01-01',
     destination='glacier',
@@ -492,7 +534,6 @@ db.lifecycle.restore_batch(batch_id='MD_2024-01-01')
 
 **Backup & Recovery:**
 ```python
-# Automated backups
 db.backup.configure_schedule(frequency='daily', retention=7)
 db.backup.create_snapshot(name='pre_migration_backup')
 db.backup.restore_from_snapshot(name='pre_migration_backup')
@@ -500,7 +541,8 @@ db.backup.restore_from_snapshot(name='pre_migration_backup')
 
 ---
 
-#### **8. API & Integration Layer**
+#### 8. API & Integration Layer
+REST API, CLI tool, and webhook support.
 
 **REST API:**
 ```python
@@ -519,7 +561,6 @@ app = api.create_app()
 
 **CLI Tool:**
 ```bash
-# Command-line interface
 agir-db status                              # Overall system status
 agir-db batch status MD_2025-01-01          # Single batch status
 agir-db batch retry MD_2025-01-01 --stage raw_to_jpg
@@ -529,35 +570,34 @@ agir-db gaps list --stage object_detection # Work queue
 
 **Webhook Support:**
 ```python
-# Register webhooks
+# Register webhooks for event notifications
 db.webhooks.register(
     event='batch.completed',
     url='https://example.com/webhook',
     headers={'Authorization': 'Bearer token'}
 )
-
-# Trigger webhooks (automatic)
-# Called internally when events occur
+# Triggers automatically when events occur
 ```
 
 ---
 
-#### **9. Multi-User & Permissions**
+#### 9. Multi-User & Permissions
+User management, audit trails, and project isolation.
 
 **User Management:**
 ```python
-# User accounts
+# User accounts with role-based permissions
 db.users.create(username='researcher1', role='operator')
 db.users.grant_permission(username='researcher1', permission='process_batches')
 
-# Audit trail
+# Audit trail for all user actions
 db.audit.log_action(user='researcher1', action='started_batch', batch_id='MD_2025-01-01')
 db.audit.get_user_actions(username='researcher1', days=7)
 ```
 
 **Project Isolation:**
 ```python
-# Multi-tenant support
+# Multi-tenant support with project-level access control
 db.projects.create(project_id='project_alpha', owner='researcher1')
 db.projects.add_member(project_id='project_alpha', username='researcher2', role='viewer')
 
@@ -565,15 +605,16 @@ db.projects.add_member(project_id='project_alpha', username='researcher2', role=
 batches = db.batches.get_by_project(project_id='project_alpha')
 ```
 
-### **Long term (2+ years)**
-
 ---
 
-#### **10. Enhanced Debugging & Observability**
+### Long Term (2+ years)
+
+#### 10. Enhanced Debugging & Observability
+Distributed tracing and advanced profiling.
 
 **Distributed Tracing:**
 ```python
-# OpenTelemetry integration
+# OpenTelemetry integration for request tracking
 db.tracing.enable(backend='jaeger')
 
 # Automatic trace propagation
@@ -584,23 +625,24 @@ with db.tracing.start_span('process_batch') as span:
 
 **Advanced Profiling:**
 ```python
-# Performance profiling
+# Performance profiling for operations
 profile = db.profiling.profile_operation(
     operation='batch_processing',
     batch_id='MD_2025-01-01'
 )
 
-# Memory tracking
+# Memory tracking with alerts
 db.profiling.monitor_memory(alert_threshold_mb=8000)
 ```
 
 ---
 
-#### **11. Data Export & Interoperability**
+#### 11. Data Export & Interoperability
+ML-ready dataset exports with versioning.
 
 **ML Dataset Export:**
 ```python
-# Export in ML-ready formats
+# Export to common ML formats
 db.export.to_coco_format(
     batch_ids=['MD_2025-01-01', 'MD_2025-01-02'],
     output_path='/datasets/training_set_v1.json'
@@ -611,36 +653,12 @@ db.export.to_yolo_format(
     output_dir='/datasets/yolo_v8'
 )
 
-# Data versioning
+# Dataset versioning for reproducibility
 db.export.create_dataset_version(
     name='training_set_v1',
     batch_ids=batch_list,
     tag='baseline'
 )
 ```
-
----
-
-## **Summary: Scope Boundaries**
-
-### **What agir-db DOES (Database + Orchestration):**
-- Store metadata and results
-- Track processing status
-- Discover work (pipeline gaps)
-- Orchestrate workflows (call external packages)
-- Log events and audit trail
-- Generate analytics and reports
-- Manage transfers
-- Handle migrations
-- Provide APIs for external systems
-
-### **What agir-db DOES NOT DO (External Packages):**
-- Image processing algorithms (svs-raw-api)
-- Model inference code (goes in `agir-detect`)
-- SAM/segmentation algorithms (goes in `agir-segment`)
-- Feature extraction logic (goes in `agir-features`)
-- PyTorch/TensorFlow dependencies
-- Model weights/checkpoints
-
 
 **Architecture Principle:** agir-db is the **control plane and data layer**. Domain-specific processing logic lives in dedicated packages.
