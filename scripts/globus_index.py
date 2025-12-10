@@ -252,7 +252,32 @@ def insert_rows(conn: psycopg2.extensions.connection, rows: List[Tuple], logger:
         conn.commit()
         logger.info("Inserted %d rows into source.globus_file_index", len(rows))
 
-
+def clear_location_index(
+    conn: psycopg2.extensions.connection,
+    endpoint: str,
+    location: str,
+    data_state: str,
+    root_path: str,
+    logger: logging.Logger
+) -> int:
+    """
+    Clear existing index entries for a specific location before re-indexing.
+    Returns number of rows deleted.
+    """
+    delete_query = """
+        DELETE FROM source.globus_file_index
+        WHERE endpoint = %s
+        AND location = %s
+        AND data_state = %s
+        AND root_path = %s;
+    """
+    
+    with conn.cursor() as cur:
+        cur.execute(delete_query, (endpoint, location, data_state, root_path))
+        deleted_count = cur.rowcount
+        conn.commit()
+        logger.info(f"Cleared {deleted_count} existing records for {location}/{data_state}")
+        return deleted_count
 
 # ============================================================
 #                     GLOBUS WORKER
@@ -425,6 +450,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=2000, help="Insert batch size.")
     parser.add_argument("--max-workers", type=int, default=8, help="Number of worker processes.")
     parser.add_argument("--log-file", default="./globus_index_pg.log", help="Log file path (default: ./globus_index_pg.log)")
+    parser.add_argument("--clean-slate", action="store_true", help="Clear existing records before indexing (ensures DB matches filesystem)")
     args = parser.parse_args()
 
     log_file = args.log_file or "./globus_index_pg.log"
@@ -453,6 +479,22 @@ def main() -> None:
         conn_params["password"] = args.password
     schema_path = args.schema  # or compute default here
     conn = init_db(conn_params, schema_path, logger)
+
+    try:
+        if args.clean_slate:
+            deleted = clear_location_index(
+                conn, 
+                args.endpoint,
+                args.location,
+                args.state,
+                args.root,
+                logger
+            )
+            logger.info(f"Clean slate mode: removed {deleted} old records")
+    except Exception as e:
+        logger.error(f"Error during clean slate operation: {e}")
+        conn.close()
+        return
 
     try:
         crawl_tree_mp(

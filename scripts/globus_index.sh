@@ -155,6 +155,7 @@ for endpoint_config in "${ENDPOINTS[@]}"; do
         --state "${state}" \
         --batch-size "${BATCH_SIZE}" \
         --max-workers "${MAX_WORKERS}" \
+        --clean-slate \
         --log-file "${ENDPOINT_LOG}" 2>&1 | tee -a "${MAIN_LOG}"; then
         
         echo "✓ Success: $location / $state" | tee -a "${MAIN_LOG}"
