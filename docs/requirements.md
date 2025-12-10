@@ -1,7 +1,8 @@
 ---
-layout: default
+layout: minimal
 title: Requirements
 nav_order: 2
+nav_enabled: true
 ---
 
 ## **Architectural Requirements**
