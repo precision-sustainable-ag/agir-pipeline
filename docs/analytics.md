@@ -1,3 +1,9 @@
+---
+title: Buttons
+parent: Overview
+nav_order: 1
+---
+
 # Analytics Component
 
 [← Back to Index](index.md)

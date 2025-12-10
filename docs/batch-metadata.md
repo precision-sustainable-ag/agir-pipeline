@@ -1,3 +1,9 @@
+---
+title: Buttons
+parent: Overview
+nav_order: 2
+---
+
 # Batch Metadata Component
 
 [← Back to Index](index.md)

@@ -28,7 +28,7 @@ AgirDB is a PostgreSQL-backed API for managing agricultural image processing pip
 ---
 
 ## Installation & Setup
-
+Not implmented
 ```bash
 pip install agir-db
 ```
@@ -263,4 +263,4 @@ AgirDB (Main API)
 
 ## License
 
-Copyright © 2025 Matthew Kutugata. All rights reserved.
+Copyright © 2025 Precision Sustainable Ag. All rights reserved.
