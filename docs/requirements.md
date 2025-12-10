@@ -2,7 +2,7 @@
 layout: minimal
 title: Requirements
 nav_order: 2
-nav_enabled: true
+nav_enabled: false
 ---
 
 1. TOC
@@ -176,9 +176,11 @@ Future stages (intentionally unimplemented until needed):
 
 ---
 
-## **FUTURE REQUIREMENTS - NEAR TERM (Next 6-12 months)**
+## **Future Requirements** 
 
-### **1. Computer Vision Pipeline Support (agir-db side)**
+### **Near term (6-12 months)**
+
+#### **1. Computer Vision Pipeline Support (agir-db side)**
 
 **New Database Tables:**
 ```sql
@@ -239,7 +241,7 @@ db.orchestration.run_full_cv_pipeline(
 
 ---
 
-### **2. Globus Integration Enhancements**
+#### **2. Globus Integration Enhancements**
 
 **Smart Transfer Policies:**
 ```python
@@ -267,7 +269,7 @@ db.transfers.get_unverified()  # Transfers needing verification
 
 ---
 
-### **3. Enhanced Orchestration**
+#### **3. Enhanced Orchestration**
 
 **Workflow Templates:**
 ```python
@@ -316,7 +318,7 @@ db.orchestration.retry_failed_stages(
 
 ---
 
-### **4. Data Quality & Validation**
+#### **4. Data Quality & Validation**
 
 **Input Validation:**
 ```python
@@ -363,9 +365,9 @@ db.alerts.configure(
 
 ---
 
-## **FUTURE REQUIREMENTS - MEDIUM TERM (1-2 years)**
+### **Medium term (1-2 years)**
 
-### **5. Horizontal Scalability**
+#### **5. Horizontal Scalability**
 
 **Multi-Worker Coordination:**
 ```python
@@ -403,7 +405,7 @@ db.workers.reassign_work(from_worker='worker-002', to_worker='worker-003')
 
 ---
 
-### **6. Database Performance Optimization**
+#### **6. Database Performance Optimization**
 
 **Table Partitioning:**
 ```sql
@@ -437,8 +439,7 @@ db.cache.invalidate(key='batch_summary_MD_2025-01-01')
 
 ---
 
-
-### **7. Data Lifecycle Management**
+#### **7. Data Lifecycle Management**
 
 **Retention Policies:**
 ```python
@@ -482,7 +483,7 @@ db.backup.restore_from_snapshot(name='pre_migration_backup')
 
 ---
 
-### **8. API & Integration Layer**
+#### **8. API & Integration Layer**
 
 **REST API:**
 ```python
@@ -524,7 +525,7 @@ db.webhooks.register(
 
 ---
 
-### **9. Multi-User & Permissions**
+#### **9. Multi-User & Permissions**
 
 **User Management:**
 ```python
@@ -547,11 +548,11 @@ db.projects.add_member(project_id='project_alpha', username='researcher2', role=
 batches = db.batches.get_by_project(project_id='project_alpha')
 ```
 
-## **FUTURE REQUIREMENTS - LONG TERM (2+ years)**
+### **Long term (2+ years)**
 
 ---
 
-### **10. Enhanced Debugging & Observability**
+#### **10. Enhanced Debugging & Observability**
 
 **Distributed Tracing:**
 ```python
@@ -578,7 +579,7 @@ db.profiling.monitor_memory(alert_threshold_mb=8000)
 
 ---
 
-### **11. Data Export & Interoperability**
+#### **11. Data Export & Interoperability**
 
 **ML Dataset Export:**
 ```python
@@ -603,7 +604,7 @@ db.export.create_dataset_version(
 
 ---
 
-## **SUMMARY: Scope Boundaries**
+## **Summary: Scope Boundaries**
 
 ### **What agir-db DOES (Database + Orchestration):**
 - Store metadata and results
