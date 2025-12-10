@@ -135,42 +135,34 @@ class AgirDB:
         
         # Initialize domain components
         
-        # Phase 2: Pipeline Gaps
+        # Pipeline Gaps
         self.gaps = PipelineGaps(self._connection)
         
-        # Phase 3: Stage Status
+        # Stage Status
         self.stages = StageStatus(self._connection)
         
-        # Phase 4: Event Logging
+        # Event Logging
         self.events = EventLogger(self._connection)
         
-        # Phase 5: Image & Batch Metadata
+        # Image & Batch Metadata
         self.images = ImageMetadata(self._connection)
         self.batches = BatchMetadata(self._connection)
         
-        # Phase 6: Inventory Sync
+        # Inventory Sync
         self.inventory = InventorySync(self._connection)
         
-        # Phase 7: Transfer Management
+        # Transfer Management
         self.transfers = TransferManager(self._connection)
         
-        # Phase 8: Analytics
+        # Analytics
         self.analytics = Analytics(self._connection)
         
-        # Phase 9: Migration Tools
+        # Migration Tools
         self.migration = Migration(self._connection)
         
-        # Phase 10: Orchestration Helpers
+        # Orchestration Helpers
         self.orchestration = Orchestration(self._connection)
         
-        # Phase 7: Transfer Management
-        # self.transfers = TransferManager(self._connection)
-        
-        # Phase 8: Analytics
-        # self.analytics = Analytics(self._connection)
-        
-        # Phase 9: Migration
-        # self.migration = Migration(self._connection)
         
         logger.info("AgirDB initialized")
     
