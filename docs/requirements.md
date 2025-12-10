@@ -1,5 +1,5 @@
 ---
-layout: dark
+layout: minimal
 title: Requirements
 nav_order: 2
 ---
