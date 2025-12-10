@@ -1,3 +1,9 @@
+---
+title: Image metadata
+parent: Overview
+nav_order: 6
+---
+
 # Image Metadata Component
 
 [← Back to Index](index.md)

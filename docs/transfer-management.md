@@ -1,3 +1,9 @@
+---
+title: Transfer management
+parent: Overview
+nav_order: 12
+---
+
 # Transfer Management Component
 
 [← Back to Index](index.md)

@@ -1,3 +1,9 @@
+---
+title: Inventory sync
+parent: Overview
+nav_order: 7
+---
+
 # Inventory Synchronization Component
 
 [← Back to Index](index.md)

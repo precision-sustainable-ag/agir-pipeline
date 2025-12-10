@@ -1,3 +1,8 @@
+---
+title: Core connection
+parent: Overview
+nav_order: 3
+---
 # Core Connection Methods
 
 [← Back to Index](index.md)

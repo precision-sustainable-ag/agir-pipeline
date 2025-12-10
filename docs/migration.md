@@ -1,3 +1,9 @@
+---
+title: Migration
+parent: Overview
+nav_order: 8
+---
+
 # Migration Component
 
 [← Back to Index](index.md)

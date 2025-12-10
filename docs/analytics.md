@@ -1,5 +1,5 @@
 ---
-title: Buttons
+title: Analytics
 parent: Overview
 nav_order: 1
 ---

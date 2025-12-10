@@ -1,3 +1,9 @@
+---
+title: Data gaps
+parent: Overview
+nav_order: 10
+---
+
 # Pipeline Gaps Component
 
 [← Back to Index](index.md)

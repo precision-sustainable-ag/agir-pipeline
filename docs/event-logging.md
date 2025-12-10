@@ -1,3 +1,9 @@
+---
+title: Event logging
+parent: Overview
+nav_order: 4
+---
+
 # Event Logging Component
 
 [← Back to Index](index.md)

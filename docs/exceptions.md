@@ -1,3 +1,9 @@
+---
+title: Exceptions
+parent: Overview
+nav_order: 5
+---
+
 # Exception Handling
 
 [← Back to Index](index.md)

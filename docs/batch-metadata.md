@@ -1,5 +1,5 @@
 ---
-title: Buttons
+title: Batch metadata
 parent: Overview
 nav_order: 2
 ---

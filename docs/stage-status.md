@@ -1,3 +1,9 @@
+---
+title: Stage status
+parent: Overview
+nav_order: 11
+---
+
 # Stage Status Component
 
 [← Back to Index](index.md)
