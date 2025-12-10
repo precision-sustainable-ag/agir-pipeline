@@ -111,7 +111,7 @@ db.stages.start(batch_id, 'raw_to_jpg', job_id)
 ## **Component Organization**
 
 **13. Domain-Specific Components**
-```python
+```sh
 AgirDB
 ├── gaps          # Work discovery
 ├── stages        # Status tracking
