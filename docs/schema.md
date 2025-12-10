@@ -1,3 +1,9 @@
+---
+layout: default
+title: Layout
+nav_order: 4
+---
+
 # AgirDB Complete Table Reference
 
 **Database:** `agir` (PostgreSQL)  

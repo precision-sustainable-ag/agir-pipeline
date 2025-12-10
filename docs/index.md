@@ -15,16 +15,6 @@ nav_order: 1
 
 AgirDB is a PostgreSQL-backed API for managing agricultural image processing pipelines. It uses "pipeline gaps" methodology (missing output files) as the source of truth for work discovery, providing robust and self-correcting workflow orchestration.
 
-### Quick Links
-
-- [Installation & Setup](#installation--setup)
-- [Quick Start](#quick-start)
-- [Complete Workflows](orchestration.md)
-- [Best Practices](best-practices.md)
-- [Exception Handling](exceptions.md)
-- [Troubleshooting](troubleshooting.md)
-- [Database Schema](schema.md)
-
 ---
 
 ## Installation & Setup
