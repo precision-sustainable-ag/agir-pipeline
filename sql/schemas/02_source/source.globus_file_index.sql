@@ -4,9 +4,10 @@ CREATE TABLE IF NOT EXISTS source.globus_file_index (
     file_id           BIGSERIAL PRIMARY KEY,
 
     endpoint          TEXT NOT NULL,
-    location          TEXT NOT NULL,
-    lts_root          TEXT NOT NULL,
-    root_path         TEXT NOT NULL,
+    site              TEXT NOT NULL,
+    storage_domain    TEXT NOT NULL,
+    namespace         TEXT NOT NULL,
+    storage_root      TEXT NOT NULL,
     rel_path          TEXT NOT NULL,
     parent_dir        TEXT,
     file_name         TEXT NOT NULL,
@@ -29,4 +30,4 @@ CREATE TABLE IF NOT EXISTS source.globus_file_index (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ix_source_globus_unique
-ON source.globus_file_index(endpoint, data_state, root_path, rel_path);
+ON source.globus_file_index(endpoint, data_state, storage_root, rel_path);
