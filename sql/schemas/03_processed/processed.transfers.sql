@@ -1,12 +1,12 @@
 /* ============================================================
  * processed.transfers
  *
- * Track Globus transfers between storage locations.
+ * Track Globus transfers between storage sites.
  *
  * Design principles:
  * - Track transfer lifecycle (pending → in_progress → completed/failed)
  * - Store Globus task IDs for monitoring
- * - Record source/destination locations
+ * - Record source/destination sites
  * - Monitor transfer progress and timing
  * ============================================================
  */
@@ -26,8 +26,8 @@ CREATE TABLE processed.transfers (
     batch_id TEXT NOT NULL,
     
     -- Source and destination
-    source_location TEXT NOT NULL,           -- 'JUNO', 'CERES', 'NCSU', etc.
-    destination_location TEXT NOT NULL,      -- 'JUNO', 'CERES', 'NCSU', etc.
+    source_site TEXT NOT NULL,           -- 'JUNO', 'CERES', 'NCSU', etc.
+    destination_site TEXT NOT NULL,      -- 'JUNO', 'CERES', 'NCSU', etc.
     source_path TEXT,                        -- Full source path
     destination_path TEXT,                   -- Full destination path
     
@@ -89,9 +89,9 @@ ON processed.transfers (batch_id, created_at DESC);
 CREATE INDEX idx_transfers_status 
 ON processed.transfers (status, updated_at DESC);
 
--- Query by locations
-CREATE INDEX idx_transfers_locations 
-ON processed.transfers (source_location, destination_location, created_at DESC);
+-- Query by sites
+CREATE INDEX idx_transfers_sites 
+ON processed.transfers (source_site, destination_site, created_at DESC);
 
 -- Query in-progress transfers
 CREATE INDEX idx_transfers_active 
@@ -160,8 +160,8 @@ CREATE VIEW processed.active_transfers AS
 SELECT
     transfer_id,
     batch_id,
-    source_location,
-    destination_location,
+    source_site,
+    destination_site,
     status,
     globus_task_id,
     file_count,
@@ -183,8 +183,8 @@ CREATE VIEW processed.failed_transfers AS
 SELECT
     transfer_id,
     batch_id,
-    source_location,
-    destination_location,
+    source_site,
+    destination_site,
     globus_task_id,
     error_message,
     retry_count,
@@ -201,8 +201,8 @@ CREATE VIEW processed.completed_transfers AS
 SELECT
     transfer_id,
     batch_id,
-    source_location,
-    destination_location,
+    source_site,
+    destination_site,
     file_count,
     bytes_total,
     duration_seconds,
@@ -213,11 +213,11 @@ FROM processed.transfers
 WHERE status = 'completed'
 ORDER BY completed_at DESC;
 
--- Transfer statistics by location pair
-CREATE VIEW processed.transfer_stats_by_location AS
+-- Transfer statistics by site pair
+CREATE VIEW processed.transfer_stats_by_site AS
 SELECT
-    source_location,
-    destination_location,
+    source_site,
+    destination_site,
     COUNT(*) as total_transfers,
     COUNT(*) FILTER (WHERE status = 'completed') as completed_count,
     COUNT(*) FILTER (WHERE status = 'failed') as failed_count,
@@ -227,7 +227,7 @@ SELECT
     MIN(completed_at) as first_transfer,
     MAX(completed_at) as last_transfer
 FROM processed.transfers
-GROUP BY source_location, destination_location
+GROUP BY source_site, destination_site
 ORDER BY total_transfers DESC;
 
 -- Pending transfers (queue)
@@ -235,8 +235,8 @@ CREATE VIEW processed.pending_transfers AS
 SELECT
     transfer_id,
     batch_id,
-    source_location,
-    destination_location,
+    source_site,
+    destination_site,
     source_path,
     destination_path,
     file_count,
@@ -288,7 +288,7 @@ $$ LANGUAGE plpgsql;
 -- ============================================================
 
 COMMENT ON TABLE processed.transfers IS 
-'Track Globus transfers between storage locations';
+'Track Globus transfers between storage sites';
 
 COMMENT ON COLUMN processed.transfers.globus_task_id IS 
 'Globus transfer task ID for monitoring via Globus API';
@@ -305,5 +305,5 @@ COMMENT ON VIEW processed.active_transfers IS
 COMMENT ON VIEW processed.failed_transfers IS 
 'Failed transfers that may need retry or investigation';
 
-COMMENT ON VIEW processed.transfer_stats_by_location IS 
-'Aggregate statistics by source/destination location pair';
+COMMENT ON VIEW processed.transfer_stats_by_site IS 
+'Aggregate statistics by source/destination site pair';

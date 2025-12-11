@@ -111,7 +111,7 @@ SELECT
     s.updated_at,
     b.batch_state,
     b.batch_date,
-    b.location
+    b.site
 FROM processed.stage_status s
 LEFT JOIN processed.batches b ON s.batch_id = b.batch_id
 WHERE s.status IN ('failed', 'error')
@@ -150,8 +150,8 @@ CREATE OR REPLACE VIEW processed.transfer_performance AS
 SELECT
     t.transfer_id,
     t.batch_id,
-    t.source_location,
-    t.destination_location,
+    t.source_site,
+    t.destination_site,
     t.status,
     t.file_count,
     t.bytes_total,
@@ -177,8 +177,8 @@ COMMENT ON VIEW processed.transfer_performance IS
 -- Transfer summary by route
 CREATE OR REPLACE VIEW processed.transfer_summary_by_route AS
 SELECT
-    source_location,
-    destination_location,
+    source_site,
+    destination_site,
     COUNT(*) as total_transfers,
     COUNT(*) FILTER (WHERE status = 'completed') as completed_transfers,
     COUNT(*) FILTER (WHERE status = 'failed') as failed_transfers,
@@ -191,7 +191,7 @@ SELECT
     AVG(transfer_rate_mbps) FILTER (WHERE status = 'completed') as avg_transfer_rate_mbps,
     MAX(completed_at) FILTER (WHERE status = 'completed') as last_transfer_time
 FROM processed.transfers
-GROUP BY source_location, destination_location
+GROUP BY source_site, destination_site
 ORDER BY total_transfers DESC;
 
 COMMENT ON VIEW processed.transfer_summary_by_route IS
@@ -207,7 +207,7 @@ SELECT
     b.batch_id,
     b.batch_state,
     b.batch_date,
-    b.location,
+    b.site,
     b.processing_status as batch_status,
     b.file_count_raw,
     b.file_count_jpg,
@@ -237,7 +237,7 @@ FROM processed.batches b
 LEFT JOIN processed.stage_status s ON b.batch_id = s.batch_id
 LEFT JOIN processed.transfers t ON b.batch_id = t.batch_id
 GROUP BY 
-    b.batch_id, b.batch_state, b.batch_date, b.location, b.processing_status,
+    b.batch_id, b.batch_state, b.batch_date, b.site, b.processing_status,
     b.file_count_raw, b.file_count_jpg, b.raw_to_jpg_complete,
     b.jpg_to_metadata_complete, b.metadata_to_cutouts_complete,
     b.created_at, b.updated_at
@@ -321,10 +321,10 @@ COMMENT ON VIEW processed.recent_critical_events IS
 -- STORAGE ANALYTICS
 -- ============================================================
 
--- Storage utilization by location
-CREATE OR REPLACE VIEW processed.storage_by_location AS
+-- Storage utilization by site
+CREATE OR REPLACE VIEW processed.storage_by_site AS
 SELECT
-    b.location,
+    b.site,
     COUNT(DISTINCT b.batch_id) as batch_count,
     SUM(b.file_count_raw) as total_raw_files,
     SUM(b.file_count_jpg) as total_jpg_files,
@@ -336,12 +336,12 @@ SELECT
     MIN(b.batch_date) as earliest_batch,
     MAX(b.batch_date) as latest_batch
 FROM processed.batches b
-WHERE b.location IS NOT NULL
-GROUP BY b.location
+WHERE b.site IS NOT NULL
+GROUP BY b.site
 ORDER BY total_bytes DESC;
 
-COMMENT ON VIEW processed.storage_by_location IS
-'Storage utilization by location';
+COMMENT ON VIEW processed.storage_by_site IS
+'Storage utilization by site';
 
 -- Storage growth over time
 CREATE OR REPLACE VIEW processed.storage_growth AS

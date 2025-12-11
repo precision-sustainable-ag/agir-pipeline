@@ -30,10 +30,9 @@ CREATE TABLE processed.batches (
     batch_state TEXT NOT NULL,              -- e.g., 'MD', 'TX', 'NC'
     batch_date DATE NOT NULL,               -- Date of batch
     
-    -- Location
-    location TEXT,                          -- e.g., 'JUNO', 'CERES', 'NCSU'
-    lts_root TEXT,                          -- LTS root identifier
-    root_path TEXT,                         -- Full path to batch root
+    -- site
+    site TEXT,                          -- e.g., 'JUNO', 'CERES', 'NCSU'
+    storage_root TEXT,                          -- LTS root identifier
     
     -- Processing status
     processing_status TEXT CHECK (processing_status IN (
@@ -151,10 +150,10 @@ ON processed.batches (batch_state, batch_date DESC);
 CREATE INDEX idx_batches_status 
 ON processed.batches (processing_status, updated_at DESC);
 
--- Query by location
-CREATE INDEX idx_batches_location 
-ON processed.batches (location, batch_date DESC) 
-WHERE location IS NOT NULL;
+-- Query by site
+CREATE INDEX idx_batches_site 
+ON processed.batches (site, batch_date DESC) 
+WHERE site IS NOT NULL;
 
 -- Query by completion flags
 CREATE INDEX idx_batches_completion 
@@ -261,7 +260,7 @@ SELECT
     b.batch_id,
     b.batch_state,
     b.batch_date,
-    b.location,
+    b.site,
     b.processing_status,
     b.file_count_raw,
     b.file_count_jpg,
@@ -278,7 +277,7 @@ SELECT
     b.updated_at
 FROM processed.batches b
 LEFT JOIN processed.images i ON b.batch_id = i.batch_id
-GROUP BY b.batch_id, b.batch_state, b.batch_date, b.location, 
+GROUP BY b.batch_id, b.batch_state, b.batch_date, b.site, 
          b.processing_status, b.file_count_raw, b.file_count_jpg,
          b.file_count_metadata, b.file_count_cutout,
          b.raw_to_jpg_complete, b.jpg_to_metadata_complete,

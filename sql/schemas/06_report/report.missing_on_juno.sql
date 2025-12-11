@@ -1,5 +1,5 @@
 -- Fixed version of report.missing_on_juno
--- The original joined on root_path, which differs between locations
+-- The original joined on storage_root, which differs between sites
 -- This version only joins on batch_id + rel_path + file_name
 
 CREATE SCHEMA IF NOT EXISTS report;
@@ -12,9 +12,8 @@ WITH elsewhere AS (
     SELECT
         file_id,
         endpoint,
-        location,
-        lts_root,
-        root_path,
+        site,
+        storage_root,
         rel_path,
         parent_dir,
         file_name,
@@ -28,7 +27,7 @@ WITH elsewhere AS (
         data_state
     FROM source.globus_file_index
     WHERE
-        location <> 'JUNO'
+        site <> 'JUNO'
         AND entry_type = 'file'
         AND batch_id IS NOT NULL
 ),
@@ -40,7 +39,7 @@ juno AS (
         file_name
     FROM source.globus_file_index
     WHERE
-        location = 'JUNO'
+        site = 'JUNO'
         AND entry_type = 'file'
         AND batch_id IS NOT NULL
 )
@@ -55,5 +54,5 @@ LEFT JOIN juno j
 WHERE j.file_name IS NULL;           -- Not found on JUNO = missing
 
 COMMENT ON VIEW report.missing_on_juno IS 
-'Files that exist at source locations (NCSU, CERES) but are missing from JUNO.
-Join is on batch_id + data_state + rel_path + file_name (NOT root_path).';
+'Files that exist at source sites (NCSU, CERES) but are missing from JUNO.
+Join is on batch_id + data_state + rel_path + file_name (NOT storage_root).';

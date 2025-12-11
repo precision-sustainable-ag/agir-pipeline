@@ -73,9 +73,8 @@ SELECT
     r.file_id,
     r.batch_id,
     r.endpoint,
-    r.location,
-    r.lts_root,
-    r.root_path,
+    r.site,
+    r.storage_root,
     r.rel_path,
     r.file_name,
     r.file_ext,
@@ -131,9 +130,8 @@ SELECT
     j.file_id,
     j.batch_id,
     j.endpoint,
-    j.location,
-    j.lts_root,
-    j.root_path,
+    j.site,
+    j.storage_root,
     j.rel_path,
     j.file_name,
     j.file_ext,
@@ -166,9 +164,8 @@ SELECT
     m.file_id,
     m.batch_id,
     m.endpoint,
-    m.location,
-    m.lts_root,
-    m.root_path,
+    m.site,
+    m.storage_root,
     m.rel_path,
     m.file_name,
     m.file_ext,
@@ -208,9 +205,8 @@ SELECT
     batch_state,
     batch_date,
     COUNT(*) AS files_needing_processing,
-    MIN(location) AS primary_location,
-    MIN(lts_root) AS primary_lts_root,
-    MIN(root_path) AS primary_root_path,
+    MIN(site) AS primary_site,
+    MIN(storage_root) AS primary_storage_root,
     SUM(size_bytes) AS total_bytes
 FROM report.files_needing_raw_to_jpg
 GROUP BY batch_id, batch_state, batch_date
@@ -226,9 +222,8 @@ SELECT
     batch_state,
     batch_date,
     COUNT(*) AS files_needing_processing,
-    MIN(location) AS primary_location,
-    MIN(lts_root) AS primary_lts_root,
-    MIN(root_path) AS primary_root_path,
+    MIN(site) AS primary_site,
+    MIN(storage_root) AS primary_storage_root,
     SUM(size_bytes) AS total_bytes
 FROM report.files_needing_jpg_to_metadata
 GROUP BY batch_id, batch_state, batch_date
@@ -244,9 +239,8 @@ SELECT
     batch_state,
     batch_date,
     COUNT(*) AS files_needing_processing,
-    MIN(location) AS primary_location,
-    MIN(lts_root) AS primary_lts_root,
-    MIN(root_path) AS primary_root_path,
+    MIN(site) AS primary_site,
+    MIN(storage_root) AS primary_storage_root,
     SUM(size_bytes) AS total_bytes
 FROM report.files_needing_metadata_to_cutouts
 GROUP BY batch_id, batch_state, batch_date
@@ -270,8 +264,8 @@ WITH batch_files AS (
         COUNT(*) FILTER (WHERE data_state = 'developed_jpg' AND LOWER(file_ext) IN ('jpg','jpeg') AND parent_dir = 'images') AS jpg_count,
         COUNT(*) FILTER (WHERE data_state = 'developed_jpg' AND LOWER(file_ext) = 'json' AND parent_dir = 'metadata') AS metadata_count,
         COUNT(*) FILTER (WHERE data_state = 'cutouts') AS cutout_count,
-        MIN(location) AS primary_location,
-        MIN(lts_root) AS primary_lts_root
+        MIN(site) AS primary_site,
+        MIN(storage_root) AS primary_storage_root
     FROM source.globus_file_index
     WHERE batch_id IS NOT NULL AND entry_type = 'file'
     GROUP BY batch_id, batch_state, batch_date
@@ -307,8 +301,8 @@ SELECT
     (b.jpg_count = b.raw_count AND b.raw_count > 0) AS raw_to_jpg_complete,
     (b.metadata_count = b.jpg_count AND b.jpg_count > 0) AS jpg_to_metadata_complete,
     (b.cutout_count > 0) AS has_cutouts,
-    b.primary_location,
-    b.primary_lts_root
+    b.primary_site,
+    b.primary_storage_root
 FROM batch_files b
 LEFT JOIN gaps_raw_to_jpg g1 ON b.batch_id = g1.batch_id
 LEFT JOIN gaps_jpg_to_metadata g2 ON b.batch_id = g2.batch_id

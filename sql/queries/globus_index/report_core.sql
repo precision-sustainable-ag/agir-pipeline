@@ -23,17 +23,17 @@ SELECT
     MAX(created_at_ts_iso) AS last_indexed
 FROM source.globus_file_index;
 
--- name: cnt_batch_location_state_counts
+-- name: cnt_batch_site_state_counts
 SELECT
     batch_id,
-    location,
+    site,
     SUM(CASE WHEN data_state = 'upload_raw'    THEN 1 ELSE 0 END) AS n_upload_raw,
     SUM(CASE WHEN data_state = 'developed_jpg' THEN 1 ELSE 0 END) AS n_developed_jpg,
     SUM(CASE WHEN data_state = 'cutouts'       THEN 1 ELSE 0 END) AS n_cutouts
 FROM source.globus_file_index
 WHERE batch_id IS NOT NULL
-GROUP BY batch_id, location
-ORDER BY batch_id, location;
+GROUP BY batch_id, site
+ORDER BY batch_id, site;
 
 /* ============================================================
  * 2. EXPLORATION AND UTILITY
@@ -51,9 +51,8 @@ LIMIT 10000;
 -- name: util_select_unique_column_values
 WITH uniq AS (
     SELECT 'endpoint'    AS column_name, endpoint::text    AS value FROM source.globus_file_index
-    UNION SELECT 'location',    location::text    FROM source.globus_file_index
-    UNION SELECT 'lts_root',    lts_root::text    FROM source.globus_file_index
-    UNION SELECT 'root_path',   root_path::text   FROM source.globus_file_index
+    UNION SELECT 'site',    site::text    FROM source.globus_file_index
+    UNION SELECT 'storage_root',    storage_root::text    FROM source.globus_file_index
     UNION SELECT 'parent_dir',  parent_dir::text  FROM source.globus_file_index
     UNION SELECT 'entry_type',  entry_type::text  FROM source.globus_file_index
     UNION SELECT 'file_ext',    file_ext::text    FROM source.globus_file_index
