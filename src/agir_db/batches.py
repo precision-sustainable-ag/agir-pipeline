@@ -55,7 +55,7 @@ class BatchMetadata:
     ...         batch_id='MD_2025-01-01',
     ...         batch_state='MD',
     ...         batch_date=date(2025, 1, 1),
-    ...         location='JUNO'
+    ...         site='JUNO'
     ...     )
     ...     
     ...     # Update file counts
@@ -86,9 +86,8 @@ class BatchMetadata:
         batch_id: str,
         batch_state: str,
         batch_date: date,
-        location: Optional[str] = None,
-        lts_root: Optional[str] = None,
-        root_path: Optional[str] = None,
+        site: Optional[str] = None,
+        storage_root: Optional[str] = None,
         processing_status: str = 'pending',
         metadata: Optional[Dict] = None
     ) -> None:
@@ -103,11 +102,10 @@ class BatchMetadata:
             State code (e.g., 'MD', 'TX', 'NC')
         batch_date : date
             Date of batch
-        location : str, optional
-            Storage location (e.g., 'JUNO', 'CERES')
-        lts_root : str, optional
-            LTS root identifier
-        root_path : str, optional
+        site : str, optional
+            Storage site (e.g., 'JUNO', 'CERES')
+        storage_root : str, optional
+        storage_roott identifier
             Full path to batch root directory
         processing_status : str, optional
             Processing status (default: 'pending')
@@ -130,8 +128,8 @@ class BatchMetadata:
         ...     batch_id='MD_2025-01-01',
         ...     batch_state='MD',
         ...     batch_date=date(2025, 1, 1),
-        ...     location='JUNO',
-        ...     root_path='/lts/MD_2025-01-01'
+        ...     site='JUNO',
+        ...     storage_root='/lts/MD_2025-01-01'
         ... )
         """
         self._validate_status(processing_status)
@@ -139,12 +137,12 @@ class BatchMetadata:
         query = """
             INSERT INTO processed.batches (
                 batch_id, batch_state, batch_date,
-                location, lts_root, root_path,
+                site, storage_root,
                 processing_status, metadata
             ) VALUES (
                 %s, %s, %s,
                 %s, %s, %s,
-                %s, %s
+                %s
             );
         """
         
@@ -157,7 +155,7 @@ class BatchMetadata:
             self.conn.execute(
                 query,
                 (batch_id, batch_state, batch_date,
-                 location, lts_root, root_path,
+                 site, storage_root,
                  processing_status, metadata_json)
             )
             logger.info(f"Batch {batch_id} inserted successfully")

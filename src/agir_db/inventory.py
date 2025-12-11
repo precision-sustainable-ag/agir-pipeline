@@ -110,13 +110,13 @@ class InventorySync:
                 batch_id,
                 batch_state,
                 batch_date,
-                location,
-                lts_root,
+                site,
+                storage_root,
                 COUNT(*) as file_count,
                 SUM(size_bytes) as total_bytes
             FROM source.globus_file_index
             WHERE batch_id = %s
-            GROUP BY batch_id, batch_state, batch_date, location, lts_root;
+            GROUP BY batch_id, batch_state, batch_date, site, storage_root;
         """
         
         try:
@@ -143,7 +143,7 @@ class InventorySync:
         else:
             batch_insert_query = """
                 INSERT INTO processed.batches (
-                    batch_id, batch_state, batch_date, location, lts_root,
+                    batch_id, batch_state, batch_date, site, storage_root,
                     file_count_raw, total_bytes, processing_status, first_seen_at
                 ) VALUES (
                     %s, %s, %s, %s, %s,
@@ -159,7 +159,7 @@ class InventorySync:
                 self.conn.execute(
                     batch_insert_query,
                     (batch_id, batch_info['batch_state'], batch_info['batch_date'],
-                     batch_info['location'], batch_info['lts_root'],
+                     batch_info['site'], batch_info['storage_root'],
                      batch_info['file_count'], batch_info['total_bytes'])
                 )
                 action = "Updated" if batch_existed else "Inserted"
@@ -174,7 +174,7 @@ class InventorySync:
                 batch_id,
                 file_name,
                 rel_path,
-                root_path,
+                storage_root,
                 size_bytes,
                 file_ext,
                 -- Compute base_name by removing extensions (handles .jpg.pp3, etc.)

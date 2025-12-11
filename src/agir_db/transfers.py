@@ -2,19 +2,21 @@
 Transfer management for Globus file transfers.
 
 This module provides methods for tracking and managing file transfers
-between storage locations (JUNO, CERES, NCSU, etc.) using Globus.
+between storage sites (JUNO, CERES, NCSU, etc.) using Globus.
 """
-
+import re
 import logging
 import socket
 import getpass
-from typing import Dict, List, Optional
+import subprocess
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
 from psycopg2.extras import Json
 
 from .connection import ConnectionManager
 from .exceptions import (
+    GlobusError,
     QueryError,
     InvalidParameterError,
     TransferNotFoundError,
@@ -60,8 +62,8 @@ class TransferManager:
     ...     # Start a transfer
     ...     transfer_id = db.transfers.start_transfer(
     ...         batch_id='MD_2025-01-01',
-    ...         source_location='JUNO',
-    ...         destination_location='CERES',
+    ...         source_site='JUNO',
+    ...         destination_site='CERES',
     ...         source_path='/juno/md/MD_2025-01-01',
     ...         destination_path='/ceres/md/MD_2025-01-01'
     ...     )
@@ -90,14 +92,15 @@ class TransferManager:
     def start_transfer(
         self,
         batch_id: str,
-        source_location: str,
-        destination_location: str,
+        source_site: str,
+        destination_site: str,
         source_path: Optional[str] = None,
         destination_path: Optional[str] = None,
         file_count: Optional[int] = None,
         bytes_total: Optional[int] = None,
         job_id: Optional[str] = None,
-        metadata: Optional[Dict] = None
+        metadata: Optional[Dict] = None,
+        validate_batch: bool = True
     ) -> int:
         """
         Start a new transfer (creates pending transfer record).
@@ -106,10 +109,10 @@ class TransferManager:
         ----------
         batch_id : str
             Batch being transferred
-        source_location : str
-            Source location (e.g., 'JUNO', 'CERES')
-        destination_location : str
-            Destination location
+        source_site : str
+            Source site (e.g., 'JUNO', 'CERES')
+        destination_site : str
+            Destination site
         source_path : str, optional
             Full source path
         destination_path : str, optional
@@ -122,6 +125,8 @@ class TransferManager:
             SLURM job ID or workflow ID
         metadata : dict, optional
             Additional metadata
+        validate_batch: bool, optional
+            Whether to validate that the batch exists in processed.batches before starting the transfer (default: True)
         
         Returns
         -------
@@ -139,8 +144,8 @@ class TransferManager:
         --------
         >>> transfer_id = db.transfers.start_transfer(
         ...     batch_id='MD_2025-01-01',
-        ...     source_location='JUNO',
-        ...     destination_location='CERES',
+        ...     source_site='JUNO',
+        ...     destination_site='CERES',
         ...     source_path='/juno/md/MD_2025-01-01',
         ...     destination_path='/ceres/md/MD_2025-01-01',
         ...     file_count=150,
@@ -150,11 +155,12 @@ class TransferManager:
         # Verify batch exists
         batch_query = "SELECT 1 FROM processed.batches WHERE batch_id = %s;"
         if not self.conn.fetch_one(batch_query, (batch_id,)):
-            raise BatchNotFoundError(f"Batch {batch_id} not found in processed.batches")
+            raise BatchNotFoundError(f"Batch {batch_id} not found in processed.batches.\
+                                      You may need to sync the batch first using db.inventory.sync_batch(batch_id)")
         
         query = """
             INSERT INTO processed.transfers (
-                batch_id, source_location, destination_location,
+                batch_id, source_site, destination_site,
                 source_path, destination_path,
                 status, file_count, bytes_total,
                 job_id, requested_by, metadata
@@ -167,14 +173,14 @@ class TransferManager:
             RETURNING transfer_id;
         """
         
-        logger.info(f"Starting transfer for batch {batch_id}: {source_location} → {destination_location}")
+        logger.info(f"Starting transfer for batch {batch_id}: {source_site} → {destination_site}")
         
         try:
             metadata_json = Json(metadata) if metadata is not None else None
             
             result = self.conn.fetch_one(
                 query,
-                (batch_id, source_location, destination_location,
+                (batch_id, source_site, destination_site,
                  source_path, destination_path,
                  file_count, bytes_total,
                  job_id, self.username, metadata_json)
@@ -421,7 +427,7 @@ class TransferManager:
         # Get original transfer details
         get_query = """
             SELECT 
-                batch_id, source_location, destination_location,
+                batch_id, source_site, destination_site,
                 source_path, destination_path, file_count, bytes_total,
                 job_id, metadata, retry_count
             FROM processed.transfers
@@ -443,7 +449,7 @@ class TransferManager:
         # Create new transfer with incremented retry count
         insert_query = """
             INSERT INTO processed.transfers (
-                batch_id, source_location, destination_location,
+                batch_id, source_site, destination_site,
                 source_path, destination_path,
                 status, file_count, bytes_total,
                 job_id, requested_by, metadata, retry_count
@@ -463,7 +469,7 @@ class TransferManager:
             
             result = self.conn.fetch_one(
                 insert_query,
-                (original['batch_id'], original['source_location'], original['destination_location'],
+                (original['batch_id'], original['source_site'], original['destination_site'],
                  original['source_path'], original['destination_path'],
                  original['file_count'], original['bytes_total'],
                  original['job_id'], self.username, original['metadata'], new_retry_count)
@@ -665,7 +671,7 @@ class TransferManager:
         
     def get_batches_needing_juno_transfer(
         self,
-        source_location: Optional[str] = None,
+        source_site: Optional[str] = None,
         data_state: Optional[str] = None,
         limit: Optional[int] = None
     ) -> List[Dict]:
@@ -673,12 +679,12 @@ class TransferManager:
         Get batches that need to be transferred to JUNO.
         
         Queries the report.missing_on_juno view to find batches where files
-        exist at source locations but are missing from JUNO.
+        exist at source sites but are missing from JUNO.
         
         Parameters
         ----------
-        source_location : str, optional
-            Filter by source location (e.g., 'NCSU', 'CERES')
+        source_site : str, optional
+            Filter by source site (e.g., 'NCSU', 'CERES')
         data_state : str, optional
             Filter by data_state (e.g., 'developed_jpg', 'upload_raw')
         limit : int, optional
@@ -689,9 +695,8 @@ class TransferManager:
         List[Dict]
             List of batches needing transfer with metadata:
             - batch_id: Batch identifier
-            - location: Source location
-            - lts_root: LTS root on source
-            - root_path: Full root path on source
+            - site: Source site
+            - storge_root: LTS root on source
             - data_state: Data state (upload_raw, developed_jpg, etc.)
             - file_count: Number of files to transfer
             - total_bytes: Total size in bytes
@@ -707,7 +712,7 @@ class TransferManager:
         --------
         >>> # Get all NCSU developed_jpg batches needing transfer
         >>> batches = db.transfers.get_batches_needing_juno_transfer(
-        ...     source_location='NCSU',
+        ...     source_site='NCSU',
         ...     data_state='developed_jpg'
         ... )
         
@@ -716,33 +721,31 @@ class TransferManager:
         """
         logger.info(
             f"Getting batches needing JUNO transfer: "
-            f"location={source_location}, data_state={data_state}, limit={limit}"
+            f"site={source_site}, data_state={data_state}, limit={limit}"
         )
         
         # Build query
         query = """
         SELECT 
             batch_id,
-            location,
-            lts_root,
-            root_path,
+            site,
+            storge_root,
             data_state,
+            endpoint,
             COUNT(*) AS file_count,
             SUM(size_bytes) AS total_bytes
         FROM report.missing_on_juno
         WHERE 1=1
         """
-        
-        params = {}
-        
-        if source_location:
-            query += f" AND location = '{source_location}'"
+
+        if source_site:
+            query += f" AND site = '{source_site}'"
         
         if data_state:
             query += f" AND data_state = '{data_state}'"
         
         query += """
-        GROUP BY batch_id, location, lts_root, root_path, data_state
+        GROUP BY batch_id, site, storage_root, data_state, endpoint
         ORDER BY batch_id
         """
         
@@ -761,7 +764,7 @@ class TransferManager:
     def get_files_needing_juno_transfer(
         self,
         batch_id: str,
-        source_location: Optional[str] = None,
+        source_site: Optional[str] = None,
         data_state: Optional[str] = None
     ) -> List[Dict]:
         """
@@ -771,8 +774,8 @@ class TransferManager:
         ----------
         batch_id : str
             Batch identifier
-        source_location : str, optional
-            Filter by source location
+        source_site : str, optional
+            Filter by source site
         data_state : str, optional
             Filter by data_state
         
@@ -792,7 +795,7 @@ class TransferManager:
         --------
         >>> files = db.transfers.get_files_needing_juno_transfer(
         ...     batch_id='MD_2025-01-01',
-        ...     source_location='NCSU',
+        ...     source_site='NCSU',
         ...     data_state='developed_jpg'
         ... )
         """
@@ -805,9 +808,8 @@ class TransferManager:
         SELECT 
             file_id,
             endpoint,
-            location,
-            lts_root,
-            root_path,
+            site,
+            storage_root,
             rel_path,
             parent_dir,
             file_name,
@@ -822,8 +824,8 @@ class TransferManager:
         WHERE batch_id = '{batch_id}'
         """
         
-        if source_location:
-            query += f" AND location = '{source_location}'"
+        if source_site:
+            query += f" AND site = '{source_site}'"
         
         if data_state:
             query += f" AND data_state = '{data_state}'"
@@ -839,4 +841,371 @@ class TransferManager:
         except Exception as e:
             logger.error(f"Failed to query files needing transfer: {e}")
             raise QueryError(f"Failed to get files needing transfer: {e}") from e
-    
+
+    def execute_transfer(
+        self,
+        batch_id: str,
+        data_state: str,
+        dest_endpoint: str,
+        dest_root: str,
+        dest_site: str,
+        source_site: Optional[str] = None,
+        recursive: bool = True,
+        dry_run: bool = False,
+        label: Optional[str] = None,
+        job_id: Optional[str] = None
+    ) -> int:
+        """
+        Execute a Globus transfer for a batch from source to destination.
+        
+        This method:
+        1. Queries database to find source site details
+        2. Builds Globus transfer command
+        3. Executes the transfer via subprocess
+        4. Parses the Globus task ID
+        5. Creates and updates transfer record in database
+        
+        Parameters
+        ----------
+        batch_id : str
+            Batch identifier to transfer
+        data_state : str
+            Data state to transfer (e.g., 'upload_raw', 'developed_jpg')
+        dest_endpoint : str
+            Globus endpoint ID for destination
+        dest_root : str
+            Root path on destination where batch should be copied
+        dest_site : str
+            Destination site identifier (e.g., 'JUNO', 'CERES', 'NCSU')
+        source_site : str, optional
+            Source site filter (e.g., 'NCSU', 'CERES', 'JUNO').
+            If None, uses the first available source.
+        recursive : bool, default=True
+            Whether to use --recursive flag for directory transfer
+        dry_run : bool, default=False
+            If True, prints command without executing
+        label : str, optional
+            Custom label for Globus transfer.
+            If None, generates label from batch_id and data_state.
+        job_id : str, optional
+            SLURM job ID or workflow identifier
+        
+        Returns
+        -------
+        int
+            Transfer ID in processed.transfers table
+        
+        Raises
+        ------
+        ValidationError
+            If batch_id, data_state, or required parameters are invalid
+        QueryError
+            If database query fails or no source found
+        GlobusError
+            If Globus transfer command fails
+        
+        Examples
+        --------
+        >>> # Execute transfer from NCSU to JUNO
+        >>> transfer_id = db.transfers.execute_transfer(
+        ...     batch_id='MD_2025-01-01',
+        ...     data_state='developed_jpg',
+        ...     dest_endpoint='904c2108-90cf-11e8-9672-0a6d4e044368',
+        ...     dest_root='/LTS/project/dash_agir/developed_jpg',
+        ...     dest_site='JUNO'
+        ... )
+        
+        >>> # Transfer from JUNO to CERES
+        >>> transfer_id = db.transfers.execute_transfer(
+        ...     batch_id='MD_2025-01-01',
+        ...     data_state='developed_jpg',
+        ...     dest_endpoint='ceres-endpoint-id',
+        ...     dest_root='/project/agir/developed_jpg',
+        ...     dest_site='CERES',
+        ...     source_site='JUNO'
+        ... )
+        
+        >>> # Dry run to preview command
+        >>> transfer_id = db.transfers.execute_transfer(
+        ...     batch_id='MD_2025-01-01',
+        ...     data_state='upload_raw',
+        ...     dest_endpoint='904c2108-90cf-11e8-9672-0a6d4e044368',
+        ...     dest_root='/LTS/project/dash_agir/semifield-upload',
+        ...     dest_site='JUNO',
+        ...     dry_run=True
+        ... )
+        
+        >>> # Transfer from specific source site with job tracking
+        >>> transfer_id = db.transfers.execute_transfer(
+        ...     batch_id='MD_2025-01-01',
+        ...     data_state='developed_jpg',
+        ...     dest_endpoint='904c2108-90cf-11e8-9672-0a6d4e044368',
+        ...     dest_root='/LTS/project/dash_agir/developed_jpg',
+        ...     dest_site='JUNO',
+        ...     source_site='NCSU',
+        ...     job_id='slurm-12345'
+        ... )
+        """
+        # Validate inputs
+        if not batch_id:
+            raise ValidationError("batch_id is required")
+        if not data_state:
+            raise ValidationError("data_state is required")
+        if not dest_endpoint:
+            raise ValidationError("dest_endpoint is required")
+        if not dest_root:
+            raise ValidationError("dest_root is required")
+        if not dest_site:
+            raise ValidationError("dest_site is required")
+        
+        logger.info(
+            f"Executing transfer: batch={batch_id}, data_state={data_state}, "
+            f"source={source_site or 'auto'} -> dest={dest_site}, dry_run={dry_run}"
+        )
+        
+        # Query database to find source
+        source = self._get_source_for_transfer(batch_id, data_state, source_site)
+        
+        if not source:
+            raise QueryError(
+                f"No source found for batch {batch_id} with data_state={data_state}"
+                + (f" at site={source_site}" if source_site else "")
+            )
+        
+        # Build paths
+        source_path = f"{source['storage_root'].rstrip('/')}/{batch_id}"
+        dest_path = f"{dest_root.rstrip('/')}/{batch_id}"
+        
+        # Generate label if not provided
+        if label is None:
+            label = f"agir_{data_state}_{batch_id}_{source['site']}_to_{dest_site}"
+        
+        # Build Globus command
+        cmd = self._build_globus_command(
+            source_endpoint=source['endpoint'],
+            dest_endpoint=dest_endpoint,
+            source_path=source_path,
+            dest_path=dest_path,
+            label=label,
+            recursive=recursive
+        )
+        
+        logger.info(f"Globus command: {' '.join(cmd)}")
+        
+        # Create pending transfer record
+        transfer_id = self.start_transfer(
+            batch_id=batch_id,
+            source_site=source['site'],
+            destination_site=dest_site,
+            source_path=source_path,
+            destination_path=dest_path,
+            job_id=job_id,
+            metadata={
+                'data_state': data_state,
+                'source_endpoint': source['endpoint'],
+                'dest_endpoint': dest_endpoint,
+                'storge_root': source.get('storge_root'),
+                'command': ' '.join(cmd)
+            },
+            validate_batch=False
+        )
+        
+        logger.info(f"Created transfer record: transfer_id={transfer_id}")
+        
+        # Execute Globus command (unless dry run)
+        if dry_run:
+            logger.info(f"[DRY RUN] Would execute: {' '.join(cmd)}")
+            return transfer_id
+        
+        try:
+            # Run Globus transfer command
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=60
+            )
+            
+            # Parse Globus task ID from output
+            globus_task_id = self._parse_globus_task_id(result.stdout)
+            
+            if not globus_task_id:
+                raise GlobusError(
+                    f"Failed to parse Globus task ID from output: {result.stdout}"
+                )
+            
+            logger.info(f"Globus transfer submitted: task_id={globus_task_id}")
+            
+            # Update transfer record with Globus task ID
+            self.update_globus_task(transfer_id, globus_task_id)
+            
+            logger.info(f"Transfer {transfer_id} updated with Globus task {globus_task_id}")
+            
+            return transfer_id
+            
+        except subprocess.TimeoutExpired as e:
+            error_msg = f"Globus transfer command timed out after 60s"
+            logger.error(error_msg)
+            self.complete(transfer_id, success=False, error_message=error_msg)
+            raise GlobusError(error_msg) from e
+            
+        except subprocess.CalledProcessError as e:
+            error_msg = f"Globus transfer failed: {e.stderr}"
+            logger.error(error_msg)
+            self.complete(transfer_id, success=False, error_message=error_msg)
+            raise GlobusError(error_msg) from e
+            
+        except Exception as e:
+            error_msg = f"Unexpected error during transfer: {str(e)}"
+            logger.error(error_msg)
+            self.complete(transfer_id, success=False, error_message=error_msg)
+            raise GlobusError(error_msg) from e
+        
+
+
+    def _get_source_for_transfer(
+        self,
+        batch_id: str,
+        data_state: str,
+        source_site: Optional[str] = None
+    ) -> Optional[Dict]:
+        """
+        Query database to find source details for transfer.
+        
+        Parameters
+        ----------
+        batch_id : str
+            Batch identifier
+        data_state : str
+            Data state to transfer
+        source_site : str, optional
+            Preferred source site
+        
+        Returns
+        -------
+        dict or None
+            Source details with keys: endpoint, site, storage_root, batch_id
+        """
+        query = """
+        SELECT DISTINCT
+            endpoint,
+            site,
+            storge_root,
+
+            batch_id
+        FROM source.globus_file_index
+        WHERE batch_id = %s
+        AND data_state = %s
+        AND entry_type = 'file'
+        """
+        
+        params = [batch_id, data_state]
+        
+        if source_site:
+            query += " AND site = %s"
+            params.append(source_site)
+        
+        query += " LIMIT 1;"
+        
+        try:
+            result = self.conn.fetch_one(query, tuple(params))
+            
+            if result:
+                logger.debug(
+                    f"Found source: site={result['site']}, "
+                    f"endpoint={result['endpoint']}"
+                )
+            else:
+                logger.warning(
+                    f"No source found for batch={batch_id}, "
+                    f"data_state={data_state}, site={source_site}"
+                )
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to query source: {e}")
+            raise QueryError(f"Failed to get source for transfer: {e}") from e
+
+
+    def _build_globus_command(
+        self,
+        source_endpoint: str,
+        dest_endpoint: str,
+        source_path: str,
+        dest_path: str,
+        label: str,
+        recursive: bool = True
+    ) -> list:
+        """
+        Build Globus transfer command.
+        
+        Parameters
+        ----------
+        source_endpoint : str
+            Source Globus endpoint ID
+        dest_endpoint : str
+            Destination Globus endpoint ID
+        source_path : str
+            Full source path
+        dest_path : str
+            Full destination path
+        label : str
+            Transfer label
+        recursive : bool, default=True
+            Whether to transfer recursively
+        
+        Returns
+        -------
+        list
+            Command as list of strings for subprocess
+        """
+        cmd = [
+            'globus',
+            'transfer',
+            f'{source_endpoint}:{source_path}',
+            f'{dest_endpoint}:{dest_path}',
+            '--label', label,
+            '--skip-activation-check'
+        ]
+        
+        if recursive:
+            cmd.append('--recursive')
+        
+        return cmd
+
+
+    def _parse_globus_task_id(self, output: str) -> Optional[str]:
+        """
+        Parse Globus task ID from command output.
+        
+        Globus CLI outputs task ID in format:
+        "Task ID: abc-123-def-456"
+        
+        Parameters
+        ----------
+        output : str
+            stdout from globus transfer command
+        
+        Returns
+        -------
+        str or None
+            Task ID if found, None otherwise
+        """
+        # Match pattern: "Task ID: <uuid>"
+        match = re.search(r'Task ID:\s*([a-f0-9\-]+)', output, re.IGNORECASE)
+        
+        if match:
+            task_id = match.group(1)
+            logger.debug(f"Parsed task ID: {task_id}")
+            return task_id
+        
+        logger.warning(f"Failed to parse task ID from output: {output}")
+        return None
+
+
+    # Also add GlobusError to exceptions if not already present
+    class GlobusError(Exception):
+        """Raised when Globus operations fail."""
+        pass

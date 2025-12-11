@@ -92,13 +92,18 @@ class PipelineGaps:
     def get_batches_with_gaps(
         self,
         stage: str,
-        limit: Optional[int] = None
+        limit: Optional[int] = None,
+        site: Optional[str] = None,
+        storage_root: Optional[str] = None
     ) -> List[Dict]:
         """
         Get batches that have gaps (missing outputs) for a pipeline stage.
         
         This is the main work discovery method. It returns batches that need
         processing, ordered by date (newest first).
+        
+        NOTE: This method filters at the FILE level first, then aggregates to batch level.
+        This ensures accurate counts when filtering by site/storage_root.
         
         Parameters
         ----------
@@ -109,6 +114,11 @@ class PipelineGaps:
             - 'metadata_to_cutouts': Metadata files missing cutouts
         limit : int, optional
             Maximum number of batches to return. If None, returns all.
+        site : str, optional
+            Filter by storage site (JUNO, NCSU, CERES). If None, returns all sites.
+        storage_root : str, optional
+            Filter by LTS root path (longterm_images, dash_agir, GROW_DATA, etc.).
+            If None, returns all LTS roots.
         
         Returns
         -------
@@ -117,10 +127,9 @@ class PipelineGaps:
             - batch_id: Batch identifier
             - batch_state: State code (MD, TX, NC, etc.)
             - batch_date: Date of batch
-            - files_needing_processing: Number of files with gaps
-            - primary_location: Where files are located (JUNO, CERES, NCSU)
-            - primary_lts_root: LTS root path
-            - primary_root_path: Full root path
+            - files_needing_processing: Number of files with gaps (filtered by site/storage_root)
+            - primary_site: Where files are located
+            - primary_storage_root: LTS root path
             - total_bytes: Total size of files needing processing
         
         Raises
@@ -132,69 +141,117 @@ class PipelineGaps:
         
         Examples
         --------
+        >>> # Get all batches needing processing
         >>> batches = db.gaps.get_batches_with_gaps('raw_to_jpg', limit=10)
-        >>> for batch in batches:
-        ...     print(f"{batch['batch_id']}: {batch['files_needing_processing']} files")
+        >>> 
+        >>> # Get batches from specific site
+        >>> juno_batches = db.gaps.get_batches_with_gaps('raw_to_jpg', site='JUNO')
+        >>> 
+        >>> # Get batches from specific LTS root
+        >>> grow_batches = db.gaps.get_batches_with_gaps('raw_to_jpg', storage_root='GROW_DATA')
+        >>> storage_root
+        >>> # Get batches with multiple filters
+        >>> batches = db.gaps.get_batches_with_gaps(
+        ...     stage='raw_to_jpg',
+        ...     site='NCSU',
+        ...     storage_root='longterm_images',
+        ...     storage_root
+        ... )
         """
         self._validate_stage(stage)
         
-        view_map = {
-            'raw_to_jpg': 'report.batches_needing_raw_to_jpg',
-            'jpg_to_metadata': 'report.batches_needing_jpg_to_metadata',
-            'metadata_to_cutouts': 'report.batches_needing_metadata_to_cutouts'
+        file_view_map = {
+            'raw_to_jpg': 'report.files_needing_raw_to_jpg',
+            'jpg_to_metadata': 'report.files_needing_jpg_to_metadata',
+            'metadata_to_cutouts': 'report.files_needing_metadata_to_cutouts'
         }
         
-        view_name = view_map[stage]
+        file_view = file_view_map[stage]
         
-        query = f"SELECT * FROM {view_name}"
+        # Build WHERE clause for filters
+        where_clauses = []
+        if site is not None:
+            where_clauses.append(f"site = '{site}'")
+        if storage_root is not None:
+            where_clauses.append(f"storage_root = '{storage_root}'")
+        where_clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        
+        # Aggregate files to batch level AFTER filtering
+        query = f"""
+            SELECT
+                batch_id,
+                batch_state,
+                batch_date,
+                COUNT(*) AS files_needing_processing,
+                MIN(site) AS primary_site,
+                MIN(storage_root) AS primary_storage_root,
+                SUM(storage_root AS total_bytstorage_root
+            FROM {file_view}
+            {where_clause}
+            GROUP BY batch_id, batch_state, batch_date
+            ORDER BY batch_date DESC, batch_id
+        """
+        
         if limit is not None:
             query += f" LIMIT {int(limit)}"
+        
         query += ";"
         
-        logger.info(f"Querying batches with gaps for stage '{stage}' (limit={limit})")
+        filter_desc = []
+        if site:
+            filter_desc.append(f"site={site}")
+        if storage_root:
+            filter_desc.append(f"storage_root={storage_root}")
+        filter_str = f" ({', '.join(filter_desc)})" if filter_desc else ""
+        logger.info(f"Querying batches with gaps for stage '{stage}'{filter_str} (limit={limit})")
         
         try:
             results = self.conn.fetch_all(query)
-            logger.info(f"Found {len(results)} batches with gaps for stage '{stage}'")
+            logger.info(f"Found {len(results)} batches with gaps for stage '{stage}'{filter_str}")
             return results
         except Exception as e:
             logger.error(f"Failed to query batches with gaps: {e}")
             raise QueryError(f"Failed to query batches with gaps for stage '{stage}': {e}") from e
     
+
+    
     def get_files_with_gap(
         self,
         batch_id: str,
-        stage: str
+        stage: str,
+        site: Optional[str] = None,
+        storage_root: Optional[str] = None
     ) -> List[Dict]:
         """
         Get specific files within a batch that have gaps (missing outputs).
         
-        Use this to get file-level details for processing. Returns the actual
-        input files that need to be processed.
+        This method provides file-level details for processing. Use after
+        get_batches_with_gaps() to get the actual files that need work.
         
         Parameters
         ----------
         batch_id : str
-            Batch identifier (e.g., 'MD_2025-01-01')
+            Batch identifier
         stage : str
             Pipeline stage to check
+        site : str, optional
+            Filter by storage site (JUNO, NCSU, CERES). If None, returns all sites.
+        storage_root : str, optional
+            Filter by LTS root path (longterm_images, dash_agir, GROW_DATA, etc.).
+        storage_root, returns all LTS roots.
         
         Returns
         -------
         list of dict
             File records with gap information:
-            - file_id: Unique file identifier
-            - batch_id: Batch identifier
-            - file_name: Name of file
-            - base_name: Filename without extension
-            - file_ext: File extension
-            - root_path: Full path to root directory
-            - rel_path: Relative path under root
-            - location: Storage location (JUNO, CERES, NCSU)
-            - lts_root: LTS root identifier
-            - size_bytes: File size
+            - image_id: Image identifier
+            - file_path: Path to input file
+            - expected_output_path: Where output should be
+            - file_size_bytes: Size of input file
+            - site: Storage site (JUNO, CERES, NCSU)
+            - storage_root: LTS root path
         
-        Raises
+        Raisesstorage_root
         ------
         InvalidParameterError
             If stage is not valid
@@ -203,10 +260,26 @@ class PipelineGaps:
         
         Examples
         --------
-        >>> files = db.gaps.get_files_with_gap('MD_2025-01-01', 'raw_to_jpg')
+        >>> # Get all files needing processing in a batch
+        >>> files = db.gaps.get_files_with_gap('MD_20230501', 'raw_to_jpg')
+        >>> 
+        >>> # Get files from specific site
+        >>> files = db.gaps.get_files_with_gap('MD_20230501', 'raw_to_jpg', site='JUNO')
+        >>> 
+        >>> # Get files from specific LTS root
+        >>> files = db.gaps.get_files_with_gap('MD_20230501', 'raw_to_jpg', storage_root='GROW_DATA')
+        >>> 
+        >>> # Combine filtersstorage_root
+        >>> files = db.gaps.get_files_with_gap(
+        ...     batch_id='MD_20230501',
+        ...     stage='raw_to_jpg',
+        ...     site='NCSU',
+        ...     storage_root='longterm_images'
+        ... )
+        >>> storage_root
         >>> for file in files:
-        ...     raw_path = Path(file['root_path']) / file['rel_path']
-        ...     print(f"Process: {raw_path}")
+        ...     print(f"Process: {file['file_path']} → {file['expected_output_path']}")
+        
         """
         self._validate_stage(stage)
         
@@ -218,31 +291,50 @@ class PipelineGaps:
         
         view_name = view_map[stage]
         
+        # Build WHERE clause for filters
+        where_clauses = ["batch_id = %s"]
+        params = [batch_id]
+        
+        if site is not None:
+            where_clauses.append("site = %s")
+            params.append(site)
+        if storage_root is not None:
+            where_clauses.append("storage_root = %s")
+            params.append(storage_root)
         query = f"""
             SELECT *
             FROM {view_name}
-            WHERE batch_id = %s
-            ORDER BY file_name;
+            WHERE {' AND '.join(where_clauses)}
+            ORDER BY file_id;
         """
         
-        logger.info(f"Querying files with gaps for batch '{batch_id}', stage '{stage}'")
+        filter_desc = []
+        if site:
+            filter_desc.append(f"site={site}")
+        if storage_root:
+            filter_desc.append(f"storage_root={storage_root}")
+        filter_str = f" ({', '.join(filter_desc)})" if filter_desc else ""
+        logger.info(f"Querying files with gaps for batch '{batch_id}', stage '{stage}'{filter_str}")
         
         try:
-            results = self.conn.fetch_all(query, (batch_id,))
-            logger.info(f"Found {len(results)} files with gaps in batch '{batch_id}'")
+            results = self.conn.fetch_all(query, tuple(params))
+            logger.info(f"Found {len(results)} files with gaps for batch '{batch_id}', stage '{stage}'{filter_str}")
             return results
         except Exception as e:
-            logger.error(f"Failed to query files with gap: {e}")
-            raise QueryError(
-                f"Failed to query files with gap for batch '{batch_id}', stage '{stage}': {e}"
-            ) from e
+            logger.error(f"Failed to query files with gaps: {e}")
+            raise QueryError(f"Failed to query files with gaps for batch '{batch_id}', stage '{stage}': {e}") from e
     
-    def get_batch_pipeline_summary(self, batch_id: str) -> Optional[Dict]:
+
+    
+    def get_batch_pipeline_summary(
+        self,
+        batch_id: str
+    ) -> Dict:
         """
-        Get complete pipeline status for a single batch.
+        Get overall pipeline status summary for a batch.
         
-        Returns file counts and gap counts for all pipeline stages, providing
-        a comprehensive view of batch processing status.
+        This provides a high-level view of where a batch stands across
+        all pipeline stages.
         
         Parameters
         ----------
@@ -251,25 +343,15 @@ class PipelineGaps:
         
         Returns
         -------
-        dict or None
-            Pipeline summary with:
+        dict
+            Summary with counts for each stage:
             - batch_id: Batch identifier
-            - batch_state: State code
-            - batch_date: Date of batch
-            - raw_count: Number of RAW files
-            - jpg_count: Number of JPG files
-            - metadata_count: Number of metadata JSON files
-            - cutout_count: Number of cutout files
-            - raw_to_jpg_gap: Files needing RAW → JPG
-            - jpg_to_metadata_gap: Files needing JPG → metadata
-            - metadata_to_cutouts_gap: Files needing metadata → cutouts
-            - raw_to_jpg_complete: Boolean, True if stage complete
-            - jpg_to_metadata_complete: Boolean, True if stage complete
-            - has_cutouts: Boolean, True if any cutouts exist
-            - primary_location: Storage location
-            - primary_lts_root: LTS root
-            
-            Returns None if batch not found.
+            - raw_to_jpg_gaps: Number of RAW files missing JPG
+            - jpg_to_metadata_gaps: Number of JPG files missing metadata
+            - metadata_to_cutouts_gaps: Number of metadata files missing cutouts
+            - total_raw_files: Total RAW files in batch
+            - total_jpg_files: Total JPG files in batch
+            - total_metadata_files: Total metadata files in batch
         
         Raises
         ------
@@ -278,55 +360,51 @@ class PipelineGaps:
         
         Examples
         --------
-        >>> summary = db.gaps.get_batch_pipeline_summary('MD_2025-01-01')
-        >>> if summary:
-        ...     print(f"RAW files: {summary['raw_count']}")
-        ...     print(f"JPG files: {summary['jpg_count']}")
-        ...     print(f"Gaps: {summary['raw_to_jpg_gap']}")
-        ...     if summary['raw_to_jpg_complete']:
-        ...         print("RAW → JPG: Complete!")
+        >>> summary = db.gaps.get_batch_pipeline_summary('MD_20230501')
+        >>> print(f"RAW→JPG: {summary['raw_to_jpg_gaps']} gaps")
+        >>> print(f"JPG→Meta: {summary['jpg_to_metadata_gaps']} gaps")
         """
         query = """
             SELECT *
-            FROM report.batch_pipeline_status
+            FROM report.batch_pipeline_summary
             WHERE batch_id = %s;
         """
         
         logger.info(f"Querying pipeline summary for batch '{batch_id}'")
         
         try:
-            result = self.conn.fetch_one(query, (batch_id,))
-            if result:
-                logger.debug(f"Retrieved pipeline summary for batch '{batch_id}'")
-            else:
+            results = self.conn.fetch_all(query, (batch_id,))
+            if not results:
                 logger.warning(f"No pipeline summary found for batch '{batch_id}'")
-            return result
+                return {}
+            logger.info(f"Retrieved pipeline summary for batch '{batch_id}'")
+            return results[0]
         except Exception as e:
             logger.error(f"Failed to query batch pipeline summary: {e}")
-            raise QueryError(
-                f"Failed to query pipeline summary for batch '{batch_id}': {e}"
-            ) from e
+            raise QueryError(f"Failed to query pipeline summary for batch '{batch_id}': {e}") from e
     
-    def get_gap_summary(self, stage: Optional[str] = None) -> List[Dict]:
+    def get_gap_summary(
+        self,
+        stage: Optional[str] = None
+    ) -> Dict:
         """
-        Get overall statistics about pipeline gaps across all batches.
+        Get overall gap statistics across all batches.
         
-        Returns aggregate counts of batches and files with gaps. Useful for
-        monitoring and capacity planning.
+        This provides system-wide metrics for monitoring pipeline health.
         
         Parameters
         ----------
         stage : str, optional
-            Specific stage to get summary for. If None, returns all stages.
+            Filter to specific stage. If None, returns summary for all stages.
         
         Returns
         -------
-        list of dict
-            Summary records with:
-            - stage: Pipeline stage name
-            - batches_with_gaps: Number of batches with gaps
-            - total_files_with_gaps: Total files needing processing
-            - total_bytes: Total size of files needing processing
+        dict
+            Summary statistics:
+            - total_batches: Total number of batches
+            - batches_with_gaps: Number of batches needing processing
+            - total_gaps: Total number of missing outputs
+            - stages: Dict of per-stage gap counts
         
         Raises
         ------
@@ -337,34 +415,36 @@ class PipelineGaps:
         
         Examples
         --------
-        >>> # Get summary for all stages
-        >>> summaries = db.gaps.get_gap_summary()
-        >>> for summary in summaries:
-        ...     print(f"{summary['stage']}: {summary['batches_with_gaps']} batches")
-        
-        >>> # Get summary for specific stage
+        >>> # Get overall summary
+        >>> summary = db.gaps.get_gap_summary()
+        >>> print(f"Total batches with gaps: {summary['batches_with_gaps']}")
+        >>> 
+        >>> # Get stage-specific summary
         >>> summary = db.gaps.get_gap_summary('raw_to_jpg')
-        >>> print(f"Files needing processing: {summary[0]['total_files_with_gaps']}")
+        >>> print(f"RAW→JPG gaps: {summary['total_gaps']}")
         """
         if stage is not None:
             self._validate_stage(stage)
         
-        query = "SELECT * FROM report.pipeline_gap_summary"
+        query = """
+            SELECT *
+            FROM report.gap_summary
+        """
         
         if stage is not None:
-            query += " WHERE stage = %s"
-            params = (stage,)
-        else:
-            params = None
+            query += f" WHERE stage = '{stage}'"
         
-        query += " ORDER BY stage;"
+        query += ";"
         
-        logger.info(f"Querying gap summary (stage={stage})")
+        logger.info(f"Querying gap summary{' for stage ' + stage if stage else ''}")
         
         try:
-            results = self.conn.fetch_all(query, params)
-            logger.debug(f"Retrieved gap summary with {len(results)} records")
-            return results
+            results = self.conn.fetch_all(query)
+            if not results:
+                logger.warning("No gap summary found")
+                return {}
+            logger.info("Retrieved gap summary")
+            return results[0] if stage else results
         except Exception as e:
             logger.error(f"Failed to query gap summary: {e}")
             raise QueryError(f"Failed to query gap summary: {e}") from e

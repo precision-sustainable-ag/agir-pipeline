@@ -223,7 +223,7 @@ class Migration:
                 insert_query = """
                     INSERT INTO processed.batches (
                         batch_id, batch_state, batch_date,
-                        location, lts_root,
+                        site, storage_root,
                         file_count_raw, total_bytes,
                         processing_status, metadata
                     ) VALUES (
@@ -240,8 +240,8 @@ class Migration:
                         batch_data['batch_id'],
                         batch_data['batch_state'],
                         batch_data['batch_date'],
-                        batch_data['location'],
-                        batch_data['lts_root'],
+                        batch_data['site'],
+                        batch_data['storage_root'],
                         batch_data['file_count_raw'],
                         batch_data['total_bytes'],
                         batch_data['processing_status'],
@@ -352,15 +352,15 @@ class Migration:
             'batch_id': batch_id,
             'batch_state': batch_state,
             'batch_date': batch_date,
-            'location': row_dict.get('location') or row_dict.get('site') or 'UNKNOWN',
-            'lts_root': row_dict.get('lts_root') or row_dict.get('root_path'),
+            'site': row_dict.get('site') or row_dict.get('location') or 'UNKNOWN',
+            'storage_root': row_dict.get('storage_root') or row_dict.get('lts_root'),
             'file_count_raw': row_dict.get('file_count') or row_dict.get('raw_count') or 0,
             'total_bytes': row_dict.get('total_bytes') or row_dict.get('size_bytes') or 0,
             'processing_status': row_dict.get('status') or 'pending',
             'metadata': {
                 'imported_from': 'sqlite',
                 'original_data': {k: v for k, v in row_dict.items() if k not in [
-                    'batch_id', 'id', 'batch_date', 'date', 'location', 'site'
+                    'batch_id', 'id', 'batch_date', 'date', 'site', 'location'
                 ]}
             }
         }
@@ -476,7 +476,7 @@ class Migration:
         result['batch_exists'] = True
         
         # Check required fields
-        required_fields = ['batch_state', 'batch_date', 'location']
+        required_fields = ['batch_state', 'batch_date', 'site']
         for field in required_fields:
             if not batch.get(field):
                 result['missing_required_fields'].append(field)

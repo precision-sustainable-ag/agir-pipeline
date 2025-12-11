@@ -500,8 +500,8 @@ class Analytics:
     def get_transfer_performance(
         self,
         days: int = 30,
-        source_location: Optional[str] = None,
-        destination_location: Optional[str] = None
+        source_site: Optional[str] = None,
+        destination_site: Optional[str] = None
     ) -> List[Dict]:
         """
         Get transfer performance metrics.
@@ -510,10 +510,10 @@ class Analytics:
         ----------
         days : int, optional
             Number of days to retrieve (default: 30)
-        source_location : str, optional
-            Filter by source location
-        destination_location : str, optional
-            Filter by destination location
+        source_site : str, optional
+            Filter by source site
+        destination_site : str, optional
+            Filter by destination site
         
         Returns
         -------
@@ -524,7 +524,7 @@ class Analytics:
         --------
         >>> perf = db.analytics.get_transfer_performance(days=7)
         >>> for p in perf:
-        ...     print(f"{p['source_location']} → {p['destination_location']}: {p['actual_mbps']} MB/s")
+        ...     print(f"{p['source_site']} → {p['destination_site']}: {p['actual_mbps']} MB/s")
         """
         logger.info(f"Getting transfer performance for last {days} days")
         
@@ -537,13 +537,13 @@ class Analytics:
         """
         params = [cutoff_date]
         
-        if source_location:
-            query += " AND source_location = %s"
-            params.append(source_location)
+        if source_site:
+            query += " AND source_site = %s"
+            params.append(source_site)
         
-        if destination_location:
-            query += " AND destination_location = %s"
-            params.append(destination_location)
+        if destination_site:
+            query += " AND destination_site = %s"
+            params.append(destination_site)
         
         query += " ORDER BY completed_at DESC;"
         
@@ -564,8 +564,8 @@ class Analytics:
         -------
         list of dict
             Transfer summary by route with:
-            - source_location
-            - destination_location
+            - source_site
+            - destination_site
             - total_transfers
             - completed_transfers
             - failed_transfers
@@ -577,7 +577,7 @@ class Analytics:
         --------
         >>> summary = db.analytics.get_transfer_summary_by_route()
         >>> for s in summary:
-        ...     route = f"{s['source_location']} → {s['destination_location']}"
+        ...     route = f"{s['source_site']} → {s['destination_site']}"
         ...     print(f"{route}: {s['total_gb_transferred']} GB")
         """
         logger.info("Getting transfer summary by route")
@@ -593,15 +593,15 @@ class Analytics:
             logger.error(f"Failed to get transfer summary: {e}")
             raise QueryError(f"Failed to get transfer summary: {e}") from e
     
-    def get_storage_by_location(self) -> List[Dict]:
+    def get_storage_by_site(self) -> List[Dict]:
         """
-        Get storage utilization by location.
+        Get storage utilization by site.
         
         Returns
         -------
         list of dict
-            Storage by location with:
-            - location
+            Storage by site with:
+            - site
             - batch_count
             - total_raw_files
             - total_jpg_files
@@ -612,22 +612,22 @@ class Analytics:
         
         Examples
         --------
-        >>> storage = db.analytics.get_storage_by_location()
+        >>> storage = db.analytics.get_storage_by_site()
         >>> for s in storage:
-        ...     print(f"{s['location']}: {s['total_gb']} GB ({s['batch_count']} batches)")
+        ...     print(f"{s['site']}: {s['total_gb']} GB ({s['batch_count']} batches)")
         """
-        logger.info("Getting storage by location")
+        logger.info("Getting storage by site")
         
-        query = "SELECT * FROM processed.storage_by_location;"
+        query = "SELECT * FROM processed.storage_by_site;"
         
         try:
             results = self.conn.fetch_all(query)
-            logger.debug(f"Retrieved {len(results)} location storage records")
+            logger.debug(f"Retrieved {len(results)} site storage records")
             return results
             
         except Exception as e:
-            logger.error(f"Failed to get storage by location: {e}")
-            raise QueryError(f"Failed to get storage by location: {e}") from e
+            logger.error(f"Failed to get storage by site: {e}")
+            raise QueryError(f"Failed to get storage by site: {e}") from e
     
     def get_storage_growth(
         self,
