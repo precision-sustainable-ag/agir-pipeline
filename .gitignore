@@ -1,3 +1,6 @@
 reports/
 __pycache__/
 .vscode
+info/
+squashfs-root/
+RawTherapee_*
