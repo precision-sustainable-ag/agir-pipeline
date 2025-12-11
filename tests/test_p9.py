@@ -66,7 +66,7 @@ def create_test_sqlite_db(path: Path, batch_id: str) -> None:
         CREATE TABLE batch_metadata (
             batch_id TEXT PRIMARY KEY,
             batch_date TEXT,
-            location TEXT,
+            site TEXT,
             file_count INTEGER,
             total_bytes INTEGER,
             status TEXT

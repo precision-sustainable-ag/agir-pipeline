@@ -185,7 +185,7 @@ class PipelineGaps:
                 COUNT(*) AS files_needing_processing,
                 MIN(site) AS primary_site,
                 MIN(storage_root) AS primary_storage_root,
-                SUM(storage_root AS total_bytstorage_root
+                SUM(size_bytes) AS total_bytes
             FROM {file_view}
             {where_clause}
             GROUP BY batch_id, batch_state, batch_date
@@ -428,7 +428,7 @@ class PipelineGaps:
         
         query = """
             SELECT *
-            FROM report.gap_summary
+            FROM report.pipeline_gap_summary
         """
         
         if stage is not None:

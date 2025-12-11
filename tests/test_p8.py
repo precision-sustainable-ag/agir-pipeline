@@ -45,7 +45,7 @@ def test_analytics_initialization():
     assert hasattr(analytics, 'get_error_rate')
     assert hasattr(analytics, 'get_transfer_performance')
     assert hasattr(analytics, 'get_transfer_summary_by_route')
-    assert hasattr(analytics, 'get_storage_by_location')
+    assert hasattr(analytics, 'get_storage_by_site')
     assert hasattr(analytics, 'get_storage_growth')
     assert hasattr(analytics, 'get_batch_summary')
     assert hasattr(analytics, 'get_camera_stats')
@@ -194,7 +194,7 @@ def test_with_database(skip_if_no_db=True):
             print(f"✓ Transfer performance retrieved: {len(transfer_perf)} records")
             if transfer_perf:
                 t = transfer_perf[0]
-                route = f"{t['source_location']} → {t['destination_location']}"
+                route = f"{t['source_site']} → {t['destination_site']}"
                 print(f"  Recent: {route} - {t.get('actual_mbps', 0)} MB/s")
             
             # ========================================
@@ -208,20 +208,20 @@ def test_with_database(skip_if_no_db=True):
             print(f"✓ Transfer route summary retrieved: {len(route_summary)} routes")
             if route_summary:
                 r = route_summary[0]
-                print(f"  {r['source_location']} → {r['destination_location']}: {r.get('total_gb_transferred', 0)} GB")
+                print(f"  {r['source_site']} → {r['destination_site']}: {r.get('total_gb_transferred', 0)} GB")
             
             # ========================================
-            # TEST STORAGE BY LOCATION
+            # TEST STORAGE BY site
             # ========================================
             
-            print("\nTest 11: Getting storage by location...")
-            storage = db.analytics.get_storage_by_location()
+            print("\nTest 11: Getting storage by site...")
+            storage = db.analytics.get_storage_by_site()
             
             assert isinstance(storage, list)
-            print(f"✓ Storage by location retrieved: {len(storage)} locations")
+            print(f"✓ Storage by site retrieved: {len(storage)} sites")
             if storage:
                 s = storage[0]
-                print(f"  {s['location']}: {s.get('total_gb', 0)} GB ({s['batch_count']} batches)")
+                print(f"  {s['site']}: {s.get('total_gb', 0)} GB ({s['batch_count']} batches)")
             
             # ========================================
             # TEST STORAGE GROWTH

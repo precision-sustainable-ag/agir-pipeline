@@ -180,9 +180,9 @@ def test_with_database(skip_if_no_db=True):
                 batch_id=test_batch_id,
                 batch_state='MD',
                 batch_date=test_batch_date,
-                location='JUNO',
-                lts_root='test_lts',
-                root_path='/test/path',
+                site='JUNO',
+                storage_root='test_lts',
+
                 processing_status='pending'
             )
             db.commit()

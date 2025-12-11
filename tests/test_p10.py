@@ -245,8 +245,8 @@ def test_with_database(skip_if_no_db=True):
             assert isinstance(queue_md, list)
             print(f"✓ Found {len(queue_md)} MD batches")
             
-            # Filter by location
-            queue_juno = db.orchestration.get_conversion_queue(limit=5, location='JUNO')
+            # Filter by site
+            queue_juno = db.orchestration.get_conversion_queue(limit=5, site='JUNO')
             assert isinstance(queue_juno, list)
             print(f"✓ Found {len(queue_juno)} JUNO batches")
             

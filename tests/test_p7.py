@@ -134,7 +134,7 @@ def test_with_database(skip_if_no_db=True):
                     batch_id=test_batch_id,
                     batch_state='MD',
                     batch_date=date(2025, 1, 1),
-                    location='JUNO'
+                    site='JUNO'
                 )
                 db.commit()
                 print(f"✓ Created test batch: {test_batch_id}")
@@ -159,8 +159,8 @@ def test_with_database(skip_if_no_db=True):
             print("\nTest 1: Starting a transfer...")
             transfer_id = db.transfers.start_transfer(
                 batch_id=test_batch_id,
-                source_location='JUNO',
-                destination_location='CERES',
+                source_site='JUNO',
+                destination_site='CERES',
                 source_path='/juno/test',
                 destination_path='/ceres/test',
                 file_count=100,
@@ -178,8 +178,8 @@ def test_with_database(skip_if_no_db=True):
             assert transfer is not None
             assert transfer['batch_id'] == test_batch_id
             assert transfer['status'] == 'pending'
-            assert transfer['source_location'] == 'JUNO'
-            assert transfer['destination_location'] == 'CERES'
+            assert transfer['source_site'] == 'JUNO'
+            assert transfer['destination_site'] == 'CERES'
             print(f"✓ Transfer verified: status={transfer['status']}")
             
             # ========================================
@@ -190,8 +190,8 @@ def test_with_database(skip_if_no_db=True):
             try:
                 db.transfers.start_transfer(
                     batch_id='FAKE_BATCH_9999-99-99',
-                    source_location='JUNO',
-                    destination_location='CERES'
+                    source_site='JUNO',
+                    destination_site='CERES'
                 )
                 db.commit()
                 raise AssertionError("Should have raised BatchNotFoundError")
@@ -287,8 +287,8 @@ def test_with_database(skip_if_no_db=True):
             print("\nTest 8: Creating a failed transfer...")
             failed_transfer_id = db.transfers.start_transfer(
                 batch_id=test_batch_id,
-                source_location='JUNO',
-                destination_location='CERES',
+                source_site='JUNO',
+                destination_site='CERES',
                 file_count=50,
                 bytes_total=1250000000
             )
@@ -355,8 +355,8 @@ def test_with_database(skip_if_no_db=True):
             print("\nTest 12: Creating and getting pending transfer...")
             pending_transfer_id = db.transfers.start_transfer(
                 batch_id=test_batch_id,
-                source_location='CERES',
-                destination_location='NCSU',
+                source_site='CERES',
+                destination_site='NCSU',
                 file_count=25
             )
             db.commit()
