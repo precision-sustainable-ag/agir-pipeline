@@ -94,7 +94,8 @@ class PipelineGaps:
         stage: str,
         limit: Optional[int] = None,
         site: Optional[str] = None,
-        storage_root: Optional[str] = None
+        namespace: Optional[str] = None,
+        storage_domain: Optional[str] = None,
     ) -> List[Dict]:
         """
         Get batches that have gaps (missing outputs) for a pipeline stage.
@@ -172,8 +173,10 @@ class PipelineGaps:
         where_clauses = []
         if site is not None:
             where_clauses.append(f"site = '{site}'")
-        if storage_root is not None:
-            where_clauses.append(f"storage_root = '{storage_root}'")
+        if namespace is not None:
+            where_clauses.append(f"namespace = '{namespace}'")
+        if storage_domain is not None:
+            where_clauses.append(f"storage_domain = '{storage_domain}'")
         where_clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         
         # Aggregate files to batch level AFTER filtering
@@ -184,7 +187,8 @@ class PipelineGaps:
                 batch_date,
                 COUNT(*) AS files_needing_processing,
                 MIN(site) AS primary_site,
-                MIN(storage_root) AS primary_storage_root,
+                MIN(namespace) AS primary_namespace,
+                MIN(storage_domain) AS primary_storage_domain,
                 SUM(size_bytes) AS total_bytes
             FROM {file_view}
             {where_clause}
@@ -200,8 +204,10 @@ class PipelineGaps:
         filter_desc = []
         if site:
             filter_desc.append(f"site={site}")
-        if storage_root:
-            filter_desc.append(f"storage_root={storage_root}")
+        if namespace:
+            filter_desc.append(f"namespace={namespace}")
+        if storage_domain:
+            filter_desc.append(f"storage_domain={storage_domain}")
         filter_str = f" ({', '.join(filter_desc)})" if filter_desc else ""
         logger.info(f"Querying batches with gaps for stage '{stage}'{filter_str} (limit={limit})")
         

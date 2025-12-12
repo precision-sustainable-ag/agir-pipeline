@@ -93,7 +93,7 @@ class Orchestration:
         """
         Get batches needing RAW to JPG conversion.
         
-        Uses data_state to distinguish upload_raw (input) from developed_jpg (output).
+        Uses data_state to distinguish semifield-upload (input) from semifield-developed-images (output).
         Supports site and storage_root filtering to handle batch duplicates.
         
         A batch may appear multiple times if it exists at different site/storage_root
@@ -119,8 +119,8 @@ class Orchestration:
             - batch_date
             - site
             - storage_root
-            - raw_count (files at data_state='upload_raw')
-            - jpg_count (files at data_state='developed_jpg')
+            - raw_count (files at data_state='semifield-upload')
+            - jpg_count (files at data_state='semifield-developed-images')
             - gap_count (raw_count - jpg_count)
             - priority (calculated based on age)
         
@@ -150,27 +150,27 @@ class Orchestration:
                     g.batch_date,
                     g.site,
                     g.storage_root,
-                    -- Count RAW files at upload_raw state
+                    -- Count RAW files at semifield-upload state
                     COUNT(*) FILTER (
-                        WHERE g.data_state = 'upload_raw' 
+                        WHERE g.data_state = 'semifield-upload' 
                           AND LOWER(g.file_ext) IN ('raw', 'arw')
                           AND g.entry_type = 'file'
                     ) as raw_count,
-                    -- Count JPG files at developed_jpg state
+                    -- Count JPG files at semifield-developed-images state
                     COUNT(*) FILTER (
-                        WHERE g.data_state = 'developed_jpg' 
+                        WHERE g.data_state = 'semifield-developed-images' 
                           AND LOWER(g.file_ext) IN ('jpg', 'jpeg')
                           AND g.entry_type = 'file'
                     ) as jpg_count,
                     -- Calculate gap
                     (
                         COUNT(*) FILTER (
-                            WHERE g.data_state = 'upload_raw' 
+                            WHERE g.data_state = 'semifield-upload' 
                               AND LOWER(g.file_ext) IN ('raw', 'arw')
                               AND g.entry_type = 'file'
                         ) - 
                         COUNT(*) FILTER (
-                            WHERE g.data_state = 'developed_jpg' 
+                            WHERE g.data_state = 'semifield-developed-images' 
                               AND LOWER(g.file_ext) IN ('jpg', 'jpeg')
                               AND g.entry_type = 'file'
                         )
@@ -205,18 +205,18 @@ class Orchestration:
                 HAVING 
                     -- Only include batches with RAW files and gaps
                     COUNT(*) FILTER (
-                        WHERE g.data_state = 'upload_raw' 
+                        WHERE g.data_state = 'semifield-upload' 
                           AND LOWER(g.file_ext) IN ('raw', 'arw')
                           AND g.entry_type = 'file'
                     ) > 0
                     AND (
                         COUNT(*) FILTER (
-                            WHERE g.data_state = 'upload_raw' 
+                            WHERE g.data_state = 'semifield-upload' 
                               AND LOWER(g.file_ext) IN ('raw', 'arw')
                               AND g.entry_type = 'file'
                         ) - 
                         COUNT(*) FILTER (
-                            WHERE g.data_state = 'developed_jpg' 
+                            WHERE g.data_state = 'semifield-developed-images' 
                               AND LOWER(g.file_ext) IN ('jpg', 'jpeg')
                               AND g.entry_type = 'file'
                         )
@@ -268,8 +268,8 @@ class Orchestration:
         """
         Get list of RAW files that need JPG conversion.
         
-        Looks for RAW files at data_state='upload_raw' that don't have
-        corresponding JPG files at data_state='developed_jpg'. Filters
+        Looks for RAW files at data_state='semifield-upload' that don't have
+        corresponding JPG files at data_state='semifield-developed-images'. Filters
         by site and storage_root to ensure comparison at same storage site.
         
         Parameters
@@ -296,7 +296,7 @@ class Orchestration:
             - file_ext: File extension
             - site: Storage site
             - storage_root: LTS root identifier
-            - data_state: Always 'upload_raw' for files needing conversion
+            - data_state: Always 'semifield-upload' for files needing conversion
             - size_bytes: File size
         
         Examples
@@ -332,7 +332,7 @@ class Orchestration:
             # Use pipeline gaps to find missing JPGs
             query = """
                 WITH base_names AS (
-                    -- Get base names of RAW files at upload_raw state
+                    -- Get base names of RAW files at semifield-upload state
                     SELECT DISTINCT
                         REGEXP_REPLACE(
                             REGEXP_REPLACE(file_name, '\\.(pp3|xmp)$', '', 'i'),
@@ -340,7 +340,7 @@ class Orchestration:
                         ) as base_name
                     FROM source.globus_file_index
                     WHERE batch_id = %s
-                      AND data_state = 'upload_raw'
+                      AND data_state = 'semifield-upload'
                       AND LOWER(file_ext) IN ('raw', 'arw')
                       AND entry_type = 'file'
             """
@@ -351,7 +351,7 @@ class Orchestration:
             query += """
                 ),
                 has_jpg AS (
-                    -- Get base names of JPG files at developed_jpg state
+                    -- Get base names of JPG files at semifield-developed-images state
                     SELECT DISTINCT
                         REGEXP_REPLACE(
                             REGEXP_REPLACE(file_name, '\\.(pp3|xmp)$', '', 'i'),
@@ -359,7 +359,7 @@ class Orchestration:
                         ) as base_name
                     FROM source.globus_file_index
                     WHERE batch_id = %s
-                      AND data_state = 'developed_jpg'
+                      AND data_state = 'semifield-developed-images'
                       AND LOWER(file_ext) IN ('jpg', 'jpeg')
                       AND entry_type = 'file'
             """
@@ -393,7 +393,7 @@ class Orchestration:
                         '\\.(raw|arw|dng|jpg|jpeg|tif|tiff)$', '', 'i'
                     ) = g.base_name
                 WHERE f.batch_id = %s
-                  AND f.data_state = 'upload_raw'
+                  AND f.data_state = 'semifield-upload'
                   AND LOWER(f.file_ext) IN ('raw', 'arw')
                   AND f.entry_type = 'file'
             """
@@ -414,7 +414,7 @@ class Orchestration:
             params = tuple(base_params * 3)
             
         else:
-            # Get all RAW files at upload_raw state
+            # Get all RAW files at semifield-upload state
             query = """
                 SELECT
                     REGEXP_REPLACE(
@@ -431,7 +431,7 @@ class Orchestration:
                     size_bytes
                 FROM source.globus_file_index
                 WHERE batch_id = %s
-                  AND data_state = 'upload_raw'
+                  AND data_state = 'semifield-upload'
                   AND LOWER(file_ext) IN ('raw', 'arw')
                   AND entry_type = 'file'
             """
@@ -454,10 +454,10 @@ class Orchestration:
                        (f" at {site}" if site else "") +
                        (f" in {storage_root}" if storage_root else ""))
             
-            # Verify all files are at upload_raw state
+            # Verify all files are at semifield-upload state
             if files and check_existing:
                 for file in files:
-                    assert file['data_state'] == 'upload_raw', \
+                    assert file['data_state'] == 'semifield-upload', \
                         f"File {file['file_name']} has wrong data_state: {file['data_state']}"
             
             return files
@@ -469,7 +469,7 @@ class Orchestration:
     def get_batch_storage_sites(
         self,
         batch_id: str,
-        data_state: str = 'upload_raw'
+        data_state: str = 'semifield-upload'
     ) -> List[Dict]:
         """
         Get all storage sites (site + storage_root combinations) where a batch has RAW files.
@@ -482,7 +482,7 @@ class Orchestration:
         batch_id : str
             Batch to check
         data_state : str, optional
-            Data state to check (default: 'upload_raw')
+            Data state to check (default: 'semifield-upload')
         
         Returns
         -------
@@ -974,12 +974,12 @@ def choose_primary_source(connection: ConnectionManager, batch_id: str) -> tuple
             site,
             storage_root,
             COUNT(*) FILTER (
-                WHERE data_state = 'upload_raw' 
+                WHERE data_state = 'semifield-upload' 
                   AND LOWER(file_ext) IN ('raw', 'arw')
                   AND entry_type = 'file'
             ) as raw_count,
             COUNT(*) FILTER (
-                WHERE data_state = 'developed_jpg' 
+                WHERE data_state = 'semifield-developed-images' 
                   AND LOWER(file_ext) IN ('jpg', 'jpeg')
                   AND entry_type = 'file'
             ) as jpg_count
@@ -987,7 +987,7 @@ def choose_primary_source(connection: ConnectionManager, batch_id: str) -> tuple
         WHERE batch_id = %s
         GROUP BY site, storage_root
         HAVING COUNT(*) FILTER (
-            WHERE data_state = 'upload_raw' 
+            WHERE data_state = 'semifield-upload' 
               AND LOWER(file_ext) IN ('raw', 'arw')
               AND entry_type = 'file'
         ) > 0
@@ -1047,23 +1047,23 @@ def get_all_batch_sources(connection: ConnectionManager, batch_id: str) -> List[
             site,
             storage_root,
             COUNT(*) FILTER (
-                WHERE data_state = 'upload_raw' 
+                WHERE data_state = 'semifield-upload' 
                   AND LOWER(file_ext) IN ('raw', 'arw')
                   AND entry_type = 'file'
             ) as raw_count,
             COUNT(*) FILTER (
-                WHERE data_state = 'developed_jpg' 
+                WHERE data_state = 'semifield-developed-images' 
                   AND LOWER(file_ext) IN ('jpg', 'jpeg')
                   AND entry_type = 'file'
             ) as jpg_count,
             (
                 COUNT(*) FILTER (
-                    WHERE data_state = 'upload_raw' 
+                    WHERE data_state = 'semifield-upload' 
                       AND LOWER(file_ext) IN ('raw', 'arw')
                       AND entry_type = 'file'
                 ) - 
                 COUNT(*) FILTER (
-                    WHERE data_state = 'developed_jpg' 
+                    WHERE data_state = 'semifield-developed-images' 
                       AND LOWER(file_ext) IN ('jpg', 'jpeg')
                       AND entry_type = 'file'
                 )

@@ -669,6 +669,329 @@ class TransferManager:
             logger.error(f"Failed to get pending transfers: {e}")
             raise QueryError(f"Failed to get pending transfers: {e}") from e
         
+    def get_batches_needing_conversion_at_site(
+        self,
+        site: str,
+        limit: Optional[int] = None,
+        batch_state: Optional[str] = None,
+        storage_root: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        Get batches needing RAW→JPG conversion at a specific site.
+        
+        Uses pipeline gap views to find batches where:
+        1. RAW files exist but no corresponding JPG exists ANYWHERE
+        2. The RAW files are located at the specified site
+        
+        Parameters
+        ----------
+        site : str
+            Site/location to filter by (e.g., 'JUNO', 'NCSU', 'CERES')
+        limit : int, optional
+            Maximum number of batches to return
+        batch_state : str, optional
+            Filter by batch_state (e.g., 'MD', 'TX', 'NC')
+        storage_root : str, optional
+            Filter by storage_root (e.g., 'longterm_images', 'dash_agir')
+        
+        Returns
+        -------
+        List[Dict]
+            Batches needing conversion with:
+            - batch_id: Batch identifier
+            - batch_state: State code (MD, TX, NC)
+            - batch_date: Date of batch
+            - site: Site where RAW files exist
+            - files_needing_processing: Count of RAW files without JPGs
+            - total_bytes: Total size in bytes
+            - storage_roots: List of storage roots at this site
+            - endpoints: List of Globus endpoints
+        
+        Examples
+        --------
+        >>> # Get JUNO batches needing processing
+        >>> batches = api.get_batches_needing_conversion_at_site(
+        ...     site='JUNO',
+        ...     limit=10
+        ... )
+        >>> for batch in batches:
+        ...     print(f"{batch['batch_id']}: {batch['files_needing_processing']} files")
+        
+        >>> # Get Maryland batches at JUNO in longterm_images
+        >>> batches = api.get_batches_needing_conversion_at_site(
+        ...     site='JUNO',
+        ...     batch_state='MD',
+        ...     storage_root='longterm_images',
+        ...     limit=5
+        ... )
+        """
+        logger.info(
+            f"Getting batches needing conversion: site={site}, "
+            f"batch_state={batch_state}, storage_root={storage_root}, limit={limit}"
+        )
+        
+        query = """
+            SELECT
+                batch_id,
+                batch_state,
+                batch_date,
+                site,
+                storage_domain,
+                data_state,
+                namespace,
+                files_needing_processing,
+                total_bytes,
+                storage_roots,
+                endpoints
+            FROM report.batches_needing_raw_to_jpg_by_site
+            WHERE site = %s
+        """
+        
+        params = [site]
+        
+        if batch_state:
+            query += " AND batch_state = %s"
+            params.append(batch_state)
+        
+        if storage_root:
+            query += " AND %s = ANY(storage_roots)"
+            params.append(storage_root)
+        
+        query += " ORDER BY batch_date DESC, batch_id"
+        
+        if limit:
+            query += " LIMIT %s"
+            params.append(limit)
+        
+        try:
+            results = self.conn.fetch_all(query, tuple(params))
+            batches = [dict(row) for row in results] if results else []
+            
+            logger.info(
+                f"Found {len(batches)} batches needing conversion at {site}"
+            )
+            
+            return batches
+            
+        except Exception as e:
+            logger.error(f"Failed to get batches: {e}")
+            raise
+    
+    def get_files_for_conversion(
+        self,
+        batch_id: str,
+        site: str,
+        storage_root: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        Get specific RAW files needing conversion for a batch at a site.
+        
+        Parameters
+        ----------
+        batch_id : str
+            Batch identifier
+        site : str
+            Site where files are located
+        storage_root : str, optional
+            Filter to specific storage root
+        
+        Returns
+        -------
+        List[Dict]
+            Files needing conversion with full metadata:
+            - file_id: Database ID
+            - file_name: Name with extension
+            - rel_path: Relative path
+            - size_bytes: File size
+            - endpoint: Globus endpoint
+            - storage_root: Storage location
+            - storage_domain: Domain classification
+            - namespace: Path namespace
+        
+        Examples
+        --------
+        >>> # Get all files for a batch at JUNO
+        >>> files = api.get_files_for_conversion(
+        ...     batch_id='MD_2025-10-29',
+        ...     site='JUNO'
+        ... )
+        
+        >>> # Get files in specific storage root
+        >>> files = api.get_files_for_conversion(
+        ...     batch_id='MD_2025-10-29',
+        ...     site='JUNO',
+        ...     storage_root='longterm_images'
+        ... )
+        """
+        logger.info(
+            f"Getting files for conversion: batch={batch_id}, "
+            f"site={site}, storage_root={storage_root}"
+        )
+        
+        query = """
+            SELECT
+                file_id,
+                batch_id,
+                endpoint,
+                site,
+                storage_domain,
+                storage_root,
+                namespace,
+                rel_path,
+                parent_dir,
+                file_name,
+                file_ext,
+                size_bytes,
+                checksum,
+                batch_state,
+                batch_date,
+                base_name
+            FROM report.files_needing_raw_to_jpg
+            WHERE batch_id = %s
+              AND site = %s
+        """
+        
+        params = [batch_id, site]
+        
+        if storage_root:
+            query += " AND storage_root = %s"
+            params.append(storage_root)
+        
+        query += " ORDER BY rel_path, file_name"
+        
+        try:
+            results = self.conn.fetch_all(query, tuple(params))
+            files = [dict(row) for row in results] if results else []
+            
+            logger.info(
+                f"Found {len(files)} files for {batch_id} at {site}"
+            )
+            
+            return files
+            
+        except Exception as e:
+            logger.error(f"Failed to get files: {e}")
+            raise
+    
+    def get_batch_summary_at_site(
+        self,
+        batch_id: str,
+        site: str
+    ) -> Optional[Dict]:
+        """
+        Get summary of a batch's conversion needs at a specific site.
+        
+        Parameters
+        ----------
+        batch_id : str
+            Batch identifier
+        site : str
+            Site to check
+        
+        Returns
+        -------
+        Dict or None
+            Summary with batch metadata, or None if batch doesn't need
+            processing at this site:
+            - batch_id: Batch identifier
+            - batch_state: State code
+            - batch_date: Date
+            - site: Site location
+            - files_needing_processing: Count
+            - total_bytes: Total size
+            - storage_roots: List of storage locations
+            - endpoints: List of Globus endpoints
+        
+        Examples
+        --------
+        >>> summary = api.get_batch_summary_at_site(
+        ...     batch_id='MD_2025-10-29',
+        ...     site='JUNO'
+        ... )
+        >>> if summary:
+        ...     print(f"Need to process {summary['files_needing_processing']} files")
+        """
+        logger.debug(f"Getting summary for {batch_id} at {site}")
+        
+        query = """
+            SELECT
+                batch_id,
+                batch_state,
+                batch_date,
+                site,
+                storage_domain,
+                namespace,
+                files_needing_processing,
+                total_bytes,
+                storage_roots,
+                endpoints
+            FROM report.batches_needing_raw_to_jpg_by_site
+            WHERE batch_id = %s
+              AND site = %s
+        """
+        
+        try:
+            result = self.conn.fetch_one(query, (batch_id, site))
+            return dict(result) if result else None
+            
+        except Exception as e:
+            logger.error(f"Failed to get batch summary: {e}")
+            raise
+    
+    def get_all_sites_for_batch(
+        self,
+        batch_id: str
+    ) -> List[Dict]:
+        """
+        Get all sites where a batch needs RAW→JPG processing.
+        
+        Useful for understanding where a batch exists and needs work.
+        
+        Parameters
+        ----------
+        batch_id : str
+            Batch identifier
+        
+        Returns
+        -------
+        List[Dict]
+            Sites where batch needs processing:
+            - site: Site name
+            - files_needing_processing: Count
+            - total_bytes: Size
+            - storage_roots: List of storage locations
+            - endpoints: List of endpoints
+        
+        Examples
+        --------
+        >>> sites = api.get_all_sites_for_batch('MD_2025-10-29')
+        >>> for site_info in sites:
+        ...     print(f"{site_info['site']}: {site_info['files_needing_processing']} files")
+        """
+        logger.debug(f"Getting all sites for {batch_id}")
+        
+        query = """
+            SELECT
+                
+                site,
+                files_needing_processing,
+                total_bytes,
+                storage_roots,
+                data_state,
+                endpoints
+            FROM report.batches_needing_raw_to_jpg_by_site
+            WHERE batch_id = %s
+            ORDER BY site
+        """
+        
+        try:
+            results = self.conn.fetch_all(query, (batch_id,))
+            return [dict(row) for row in results] if results else []
+            
+        except Exception as e:
+            logger.error(f"Failed to get sites: {e}")
+            raise
+
     def get_batches_needing_juno_transfer(
         self,
         source_site: Optional[str] = None,
@@ -686,7 +1009,7 @@ class TransferManager:
         source_site : str, optional
             Filter by source site (e.g., 'NCSU', 'CERES')
         data_state : str, optional
-            Filter by data_state (e.g., 'developed_jpg', 'upload_raw')
+            Filter by data_state (e.g., 'semifield-developed-images', 'semifield-upload')
         limit : int, optional
             Maximum number of batches to return
         
@@ -696,8 +1019,8 @@ class TransferManager:
             List of batches needing transfer with metadata:
             - batch_id: Batch identifier
             - site: Source site
-            - storge_root: LTS root on source
-            - data_state: Data state (upload_raw, developed_jpg, etc.)
+            - storage_root: LTS root on source
+            - data_state: Data state (semifield-upload, developed_jpg, etc.)
             - file_count: Number of files to transfer
             - total_bytes: Total size in bytes
         
@@ -729,7 +1052,7 @@ class TransferManager:
         SELECT 
             batch_id,
             site,
-            storge_root,
+            storage_root,
             data_state,
             endpoint,
             COUNT(*) AS file_count,
@@ -853,7 +1176,9 @@ class TransferManager:
         recursive: bool = True,
         dry_run: bool = False,
         label: Optional[str] = None,
-        job_id: Optional[str] = None
+        job_id: Optional[str] = None,
+        storage_domain: Optional[str] = None,
+        entry_type: Optional[str] = None
     ) -> int:
         """
         Execute a Globus transfer for a batch from source to destination.
@@ -870,7 +1195,7 @@ class TransferManager:
         batch_id : str
             Batch identifier to transfer
         data_state : str
-            Data state to transfer (e.g., 'upload_raw', 'developed_jpg')
+            Data state to transfer (e.g., 'semifield-upload', 'developed_jpg')
         dest_endpoint : str
             Globus endpoint ID for destination
         dest_root : str
@@ -928,7 +1253,7 @@ class TransferManager:
         >>> # Dry run to preview command
         >>> transfer_id = db.transfers.execute_transfer(
         ...     batch_id='MD_2025-01-01',
-        ...     data_state='upload_raw',
+        ...     data_state='semifield-upload',
         ...     dest_endpoint='904c2108-90cf-11e8-9672-0a6d4e044368',
         ...     dest_root='/LTS/project/dash_agir/semifield-upload',
         ...     dest_site='JUNO',
@@ -964,7 +1289,13 @@ class TransferManager:
         )
         
         # Query database to find source
-        source = self._get_source_for_transfer(batch_id, data_state, source_site)
+        source = self._get_source_for_transfer(
+            batch_id=batch_id, 
+            data_state=data_state, 
+            source_site=source_site,
+            storage_domain=storage_domain,
+            entry_type=entry_type
+        )
         
         if not source:
             raise QueryError(
@@ -973,7 +1304,7 @@ class TransferManager:
             )
         
         # Build paths
-        source_path = f"{source['storage_root'].rstrip('/')}/{batch_id}"
+        source_path = f"{source['storage_root'].rstrip('/')}/{source['rel_path'].rstrip('/')}"
         dest_path = f"{dest_root.rstrip('/')}/{batch_id}"
         
         # Generate label if not provided
@@ -1004,10 +1335,10 @@ class TransferManager:
                 'data_state': data_state,
                 'source_endpoint': source['endpoint'],
                 'dest_endpoint': dest_endpoint,
-                'storge_root': source.get('storge_root'),
+                'storage_root': source.get('storage_root'),
                 'command': ' '.join(cmd)
             },
-            validate_batch=False
+            validate_batch=True
         )
         
         logger.info(f"Created transfer record: transfer_id={transfer_id}")
@@ -1068,7 +1399,9 @@ class TransferManager:
         self,
         batch_id: str,
         data_state: str,
-        source_site: Optional[str] = None
+        storage_domain: str = None,
+        source_site: Optional[str] = None,
+        entry_type: str = 'file'
     ) -> Optional[Dict]:
         """
         Query database to find source details for transfer.
@@ -1087,24 +1420,31 @@ class TransferManager:
         dict or None
             Source details with keys: endpoint, site, storage_root, batch_id
         """
+        assert entry_type in ('file', 'dir'), "entry_type must be 'file' or 'directory'"
         query = """
         SELECT DISTINCT
             endpoint,
             site,
-            storge_root,
-
+            storage_domain,
+            namespace,
+            rel_path,
+            storage_root,
             batch_id
         FROM source.globus_file_index
         WHERE batch_id = %s
         AND data_state = %s
-        AND entry_type = 'file'
+        AND entry_type = %s
         """
         
-        params = [batch_id, data_state]
+        params = [batch_id, data_state, entry_type]
         
         if source_site:
             query += " AND site = %s"
             params.append(source_site)
+        if storage_domain:
+            query += " AND storage_domain = %s"
+            params.append(storage_domain)
+        
         
         query += " LIMIT 1;"
         

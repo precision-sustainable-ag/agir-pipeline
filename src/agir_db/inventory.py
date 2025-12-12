@@ -111,12 +111,14 @@ class InventorySync:
                 batch_state,
                 batch_date,
                 site,
+                storage_domain,
+                namespace,
                 storage_root,
                 COUNT(*) as file_count,
                 SUM(size_bytes) as total_bytes
             FROM source.globus_file_index
             WHERE batch_id = %s
-            GROUP BY batch_id, batch_state, batch_date, site, storage_root;
+            GROUP BY batch_id, batch_state, batch_date, site, storage_root, storage_domain, namespace;
         """
         
         try:
@@ -143,10 +145,10 @@ class InventorySync:
         else:
             batch_insert_query = """
                 INSERT INTO processed.batches (
-                    batch_id, batch_state, batch_date, site, storage_root,
+                    batch_id, batch_state, batch_date, site, storage_root, storage_domain, namespace,
                     file_count_raw, total_bytes, processing_status, first_seen_at
                 ) VALUES (
-                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, 'pending', NOW()
                 )
                 ON CONFLICT (batch_id) DO UPDATE SET
@@ -159,7 +161,7 @@ class InventorySync:
                 self.conn.execute(
                     batch_insert_query,
                     (batch_id, batch_info['batch_state'], batch_info['batch_date'],
-                     batch_info['site'], batch_info['storage_root'],
+                     batch_info['site'], batch_info['storage_root'], batch_info['storage_domain'], batch_info['namespace'],
                      batch_info['file_count'], batch_info['total_bytes'])
                 )
                 action = "Updated" if batch_existed else "Inserted"
