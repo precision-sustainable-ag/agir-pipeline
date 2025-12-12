@@ -33,6 +33,8 @@ CREATE TABLE processed.batches (
     -- site
     site TEXT,                          -- e.g., 'JUNO', 'CERES', 'NCSU'
     storage_root TEXT,                          -- LTS root identifier
+    storage_domain TEXT,                        -- Storage domain (e.g., 'juno#agir-data')
+    namespace TEXT,                            -- Namespace within storage domain
     
     -- Processing status
     processing_status TEXT CHECK (processing_status IN (

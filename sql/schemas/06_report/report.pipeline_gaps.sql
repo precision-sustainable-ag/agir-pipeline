@@ -1,17 +1,3 @@
-/* ============================================================
- * report.pipeline_gaps.sql
- *
- * Views to identify FILE-LEVEL and BATCH-LEVEL gaps in the pipeline.
- *
- * Gap detection uses "missing outputs" as source of truth:
- *  - RAW files that are missing a developed JPG
- *  - JPG files that are missing a metadata JSON
- *  - Metadata files with no cutouts yet
- *
- * This approach is self-correcting and handles edge cases gracefully.
- * ============================================================
- */
-
 CREATE SCHEMA IF NOT EXISTS report;
 
 -- Drop existing views first (in reverse dependency order)
@@ -25,20 +11,10 @@ DROP VIEW IF EXISTS report.files_needing_metadata_to_cutouts CASCADE;
 DROP VIEW IF EXISTS report.files_needing_jpg_to_metadata CASCADE;
 DROP VIEW IF EXISTS report.files_needing_raw_to_jpg CASCADE;
 
--- ------------------------------------------------------------
--- Helper note:
--- regexp_replace(file_name, '\.[^.]+$', '') strips the final
--- extension, e.g. 'MD_1234.raw' -> 'MD_1234'
--- ------------------------------------------------------------
-
-
--- ============================================================
--- FILE-LEVEL GAP VIEWS
--- ============================================================
 
 -- ------------------------------------------------------------
 -- 1) RAW files that are missing a developed JPG image
---    (upload_raw → developed_jpg/images)
+--    (semifield-upload → semifield-developed-images/images)
 -- ------------------------------------------------------------
 CREATE VIEW report.files_needing_raw_to_jpg AS
 WITH raw_files AS (
@@ -48,19 +24,19 @@ WITH raw_files AS (
     FROM source.globus_file_index f
     WHERE
         batch_id IS NOT NULL
-        AND data_state = 'upload_raw'
+        AND data_state = 'semifield-upload'
         AND entry_type = 'file'
         AND LOWER(file_ext) IN ('raw', 'arw')
 ),
 
 jpg_files AS (
-    SELECT
+    SELECT DISTINCT
         batch_id,
         regexp_replace(file_name, '\.[^.]+$', '') AS base_name
     FROM source.globus_file_index
     WHERE
         batch_id IS NOT NULL
-        AND data_state = 'developed_jpg'
+        AND data_state = 'semifield-developed-images'
         AND entry_type = 'file'
         AND LOWER(file_ext) IN ('jpg','jpeg')
         AND (
@@ -74,14 +50,19 @@ SELECT
     r.batch_id,
     r.endpoint,
     r.site,
+    r.storage_domain,
     r.storage_root,
+    r.namespace,
     r.rel_path,
     r.file_name,
     r.file_ext,
     r.size_bytes,
     r.base_name,
     r.batch_state,
-    r.batch_date
+    r.batch_date,
+    r.parent_dir,
+    r.checksum,
+    r.data_state
 FROM raw_files r
 LEFT JOIN jpg_files j
     ON  j.batch_id  = r.batch_id
@@ -89,9 +70,73 @@ LEFT JOIN jpg_files j
 WHERE j.batch_id IS NULL;   -- no matching JPG found
 
 
+
+-- ============================================================
+-- 2) BATCH-LEVEL: Batches needing RAW→JPG conversion
+-- ============================================================
+CREATE VIEW report.batches_needing_raw_to_jpg AS
+SELECT
+    batch_id,
+    batch_state,
+    batch_date,
+    
+    -- Summary by site (location)
+    jsonb_object_agg(
+        site,
+        jsonb_build_object(
+            'file_count', file_count,
+            'total_bytes', total_bytes,
+            'storage_roots', storage_roots
+        )
+    ) AS sites,
+    
+    -- Overall totals
+    SUM(file_count) AS files_needing_processing,
+    SUM(total_bytes) AS total_bytes
+    
+FROM (
+    SELECT
+        batch_id,
+        batch_state,
+        batch_date,
+        site,
+        storage_domain,
+        namespace,
+        COUNT(*) AS file_count,
+        SUM(size_bytes) AS total_bytes,
+        array_agg(DISTINCT storage_root) AS storage_roots
+    FROM report.files_needing_raw_to_jpg
+    GROUP BY batch_id, batch_state, batch_date, site, storage_domain, namespace
+) site_summary
+
+GROUP BY batch_id, batch_state, batch_date
+ORDER BY batch_date DESC, batch_id;
+
+
+-- ============================================================
+-- 3) HELPER VIEW: Get batches at specific site
+-- ============================================================
+CREATE VIEW report.batches_needing_raw_to_jpg_by_site AS
+SELECT
+    f.batch_id,
+    f.batch_state,
+    f.batch_date,
+    f.site,
+    f.storage_domain,
+    f.data_state,
+    f.namespace,
+    COUNT(*) AS files_needing_processing,
+    SUM(f.size_bytes) AS total_bytes,
+    array_agg(DISTINCT f.storage_root) AS storage_roots,
+    array_agg(DISTINCT f.endpoint) AS endpoints
+FROM report.files_needing_raw_to_jpg f
+GROUP BY f.batch_id, f.batch_state, f.batch_date, f.site, f.storage_domain, f.namespace, f.data_state
+ORDER BY f.batch_date DESC, f.batch_id;
+
+
 -- ------------------------------------------------------------
 -- 2) JPG files that are missing a metadata JSON
---    (developed_jpg/images → developed_jpg/metadata)
+--    (semifield-developed-images/images → semifield-developed-images/metadata)
 -- ------------------------------------------------------------
 CREATE VIEW report.files_needing_jpg_to_metadata AS
 WITH jpg_files AS (
@@ -101,7 +146,7 @@ WITH jpg_files AS (
     FROM source.globus_file_index f
     WHERE
         batch_id IS NOT NULL
-        AND data_state = 'developed_jpg'
+        AND data_state = 'semifield-developed-images'
         AND entry_type = 'file'
         AND LOWER(file_ext) IN ('jpg','jpeg')
         AND (
@@ -117,7 +162,7 @@ metadata_files AS (
     FROM source.globus_file_index
     WHERE
         batch_id IS NOT NULL
-        AND data_state = 'developed_jpg'
+        AND data_state = 'semifield-developed-images'
         AND entry_type = 'file'
         AND LOWER(file_ext) = 'json'
         AND (
@@ -148,7 +193,7 @@ WHERE m.batch_id IS NULL;   -- no matching JSON metadata found
 
 -- ------------------------------------------------------------
 -- 3) METADATA JSON files that are missing ANY CUTOUT files
---    (developed_jpg/metadata → cutouts)
+--    (semifield-developed-images/metadata → semifield-cutouts)
 -- ------------------------------------------------------------
 CREATE VIEW report.files_needing_metadata_to_cutouts AS
 WITH batches_with_cutouts AS (
@@ -156,7 +201,7 @@ WITH batches_with_cutouts AS (
     FROM source.globus_file_index
     WHERE
         batch_id IS NOT NULL
-        AND data_state = 'cutouts'
+        AND data_state = 'semifield-cutouts'
         AND entry_type = 'file'
 )
 
@@ -176,7 +221,7 @@ FROM source.globus_file_index m
 WHERE
     -- 1) metadata JSON files
     m.batch_id IS NOT NULL
-    AND m.data_state = 'developed_jpg'
+    AND m.data_state = 'semifield-developed-images'
     AND m.entry_type = 'file'
     AND LOWER(m.file_ext) = 'json'
     AND (
@@ -196,24 +241,6 @@ WHERE
 -- ============================================================
 
 -- ------------------------------------------------------------
--- 4) Batches needing RAW → JPG processing
---    Summary of gap at batch level
--- ------------------------------------------------------------
-CREATE VIEW report.batches_needing_raw_to_jpg AS
-SELECT
-    batch_id,
-    batch_state,
-    batch_date,
-    COUNT(*) AS files_needing_processing,
-    MIN(site) AS primary_site,
-    MIN(storage_root) AS primary_storage_root,
-    SUM(size_bytes) AS total_bytes
-FROM report.files_needing_raw_to_jpg
-GROUP BY batch_id, batch_state, batch_date
-ORDER BY batch_date DESC, batch_id;
-
-
--- ------------------------------------------------------------
 -- 5) Batches needing JPG → Metadata processing
 -- ------------------------------------------------------------
 CREATE VIEW report.batches_needing_jpg_to_metadata AS
@@ -231,7 +258,7 @@ ORDER BY batch_date DESC, batch_id;
 
 
 -- ------------------------------------------------------------
--- 6) Batches needing Metadata → Cutouts processing
+-- 6) Batches needing Metadata → semifield-cutouts processing
 -- ------------------------------------------------------------
 CREATE VIEW report.batches_needing_metadata_to_cutouts AS
 SELECT
@@ -260,10 +287,10 @@ WITH batch_files AS (
         batch_id,
         batch_state,
         batch_date,
-        COUNT(*) FILTER (WHERE data_state = 'upload_raw' AND LOWER(file_ext) IN ('raw','arw')) AS raw_count,
-        COUNT(*) FILTER (WHERE data_state = 'developed_jpg' AND LOWER(file_ext) IN ('jpg','jpeg') AND parent_dir = 'images') AS jpg_count,
-        COUNT(*) FILTER (WHERE data_state = 'developed_jpg' AND LOWER(file_ext) = 'json' AND parent_dir = 'metadata') AS metadata_count,
-        COUNT(*) FILTER (WHERE data_state = 'cutouts') AS cutout_count,
+        COUNT(*) FILTER (WHERE data_state = 'semifield-upload' AND LOWER(file_ext) IN ('raw','arw')) AS raw_count,
+        COUNT(*) FILTER (WHERE data_state = 'semifield-developed-images' AND LOWER(file_ext) IN ('jpg','jpeg') AND parent_dir = 'images') AS jpg_count,
+        COUNT(*) FILTER (WHERE data_state = 'semifield-developed-images' AND LOWER(file_ext) = 'json' AND parent_dir = 'metadata') AS metadata_count,
+        COUNT(*) FILTER (WHERE data_state = 'semifield-cutouts') AS cutout_count,
         MIN(site) AS primary_site,
         MIN(storage_root) AS primary_storage_root
     FROM source.globus_file_index

@@ -27,9 +27,9 @@ FROM source.globus_file_index;
 SELECT
     batch_id,
     site,
-    SUM(CASE WHEN data_state = 'upload_raw'    THEN 1 ELSE 0 END) AS n_upload_raw,
-    SUM(CASE WHEN data_state = 'developed_jpg' THEN 1 ELSE 0 END) AS n_developed_jpg,
-    SUM(CASE WHEN data_state = 'cutouts'       THEN 1 ELSE 0 END) AS n_cutouts
+    SUM(CASE WHEN data_state = 'semifield-upload'    THEN 1 ELSE 0 END) AS n_upload_raw,
+    SUM(CASE WHEN data_state = 'semifield-developed-images' THEN 1 ELSE 0 END) AS n_developed_jpg,
+    SUM(CASE WHEN data_state = 'semifield-cutouts'       THEN 1 ELSE 0 END) AS n_cutouts
 FROM source.globus_file_index
 WHERE batch_id IS NOT NULL
 GROUP BY batch_id, site
