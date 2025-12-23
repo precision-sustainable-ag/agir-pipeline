@@ -4,3 +4,5 @@ __pycache__/
 info/
 squashfs-root/
 RawTherapee_*
+tests_v1/
+examples/
