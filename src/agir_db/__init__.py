@@ -50,6 +50,7 @@ from .api import AgirDB
 from .connection import ConnectionManager
 
 # Domain components
+from .transfers import TransferManager
 
 # Logging utilities
 from .utils.logging_setup import setup_logging, get_logger, set_level
@@ -111,17 +112,18 @@ __all__ = [
     'AgirDB',
     'ConnectionManager',
     
-    # Domain components
-    'PipelineGaps',
-    'StageStatus',
-    'EventLogger',
-    'ImageMetadata',
-    'BatchMetadata',
-    'InventorySync',
+    # # Domain components
     'TransferManager',
-    'Analytics',
-    'Migration',
-    'Orchestration',
+    # 'PipelineGaps',
+    # 'StageStatus',
+    # 'EventLogger',
+    # 'ImageMetadata',
+    # 'BatchMetadata',
+    # 'InventorySync',
+    # 'TransferManager',
+    # 'Analytics',
+    # 'Migration',
+    # 'Orchestration',
     
     # Logging
     'setup_logging',

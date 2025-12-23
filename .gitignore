@@ -1,5 +1,7 @@
 reports/
 __pycache__/
+*.egg-info/
+*.egg
 .vscode
 info/
 squashfs-root/

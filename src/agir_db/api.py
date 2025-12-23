@@ -35,6 +35,7 @@ from .connection import ConnectionManager
 from .exceptions import AgirDBError
 
 # Domain class imports
+from .transfers import TransferManager
 
 
 logger = logging.getLogger(__name__)
@@ -124,8 +125,8 @@ class AgirDB:
         )
         
         # Initialize domain components
-        
-        
+        self.transfers = TransferManager(self._connection)
+                
         logger.info("AgirDB initialized")
     
     def connect(self) -> None:
