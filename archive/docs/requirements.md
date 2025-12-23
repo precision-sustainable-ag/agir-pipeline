@@ -93,11 +93,11 @@ All searchable fields are proper database columns.
 - Foreign keys with CASCADE for data integrity
 
 ### 9. ID Format
-String-based IDs for images and cutouts.
+String-based IDs for images and semifield-cutouts.
 
 ```python
 Images:  "MD_1683434234"
-Cutouts: "MD_1683434234_0"
+semifield-cutouts: "MD_1683434234_0"
 ```
 
 ---
@@ -197,7 +197,7 @@ Designed but not yet implemented - will be added when CV stages are needed.
 
 - `processed.detections` - Bounding boxes from object detection
 - `processed.segmentations` - Mask file paths
-- `processed.cutouts` - Extracted plant images
+- `processed.semifield-cutouts` - Extracted plant images
 - `processed.cutout_features` - Morphological/spectral features
 
 ---
@@ -242,7 +242,7 @@ Database tables and methods to store CV pipeline results.
 ```sql
 processed.detections       -- Bounding boxes from object detection
 processed.segmentations    -- Mask file paths
-processed.cutouts          -- Extracted plant images
+processed.semifield-cutouts          -- Extracted plant images
 processed.cutout_features  -- Morphological/spectral features
 ```
 
@@ -256,11 +256,11 @@ db.detections.get_by_class(class_name, min_confidence=0.8)
 db.detections.count_by_batch(batch_id)
 
 # Cutout CRUD
-db.cutouts.insert(cutout_id, image_id, bbox, cutout_path)
-db.cutouts.insert_bulk(cutout_list)
-db.cutouts.get_by_image(image_id)
-db.cutouts.get_primary(image_id)
-db.cutouts.update_species(cutout_id, species_id)
+db.semifield-cutouts.insert(cutout_id, image_id, bbox, cutout_path)
+db.semifield-cutouts.insert_bulk(cutout_list)
+db.semifield-cutouts.get_by_image(image_id)
+db.semifield-cutouts.get_primary(image_id)
+db.semifield-cutouts.update_species(cutout_id, species_id)
 
 # Segmentation CRUD
 db.segmentations.insert(cutout_id, mask_path, area_px)
@@ -277,7 +277,7 @@ db.features.search(feature_filters)
 # Work discovery for CV stages
 images = db.gaps.get_files_with_gap(batch_id, 'object_detection')
 images = db.gaps.get_files_with_gap(batch_id, 'segmentation')
-cutouts = db.gaps.get_cutouts_needing_features(batch_id)
+semifield-cutouts = db.gaps.get_semifield-cutouts_needing_features(batch_id)
 ```
 
 **Orchestration Helpers:**

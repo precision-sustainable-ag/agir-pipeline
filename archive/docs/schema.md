@@ -7,7 +7,7 @@ nav_order: 4
 # AgirDB Complete Table Reference
 
 **Database:** `agir` (PostgreSQL)  
-**Purpose:** Track agricultural image processing pipelines from RAW files through developed images, detections, and cutouts
+**Purpose:** Track agricultural image processing pipelines from RAW files through developed images, detections, and semifield-cutouts
 
 ---
 
@@ -74,7 +74,7 @@ CREATE TABLE source.globus_file_index (
     batch_date        DATE,                 -- Parsed: 2025-01-01
     
     -- Pipeline stage
-    data_state        TEXT NOT NULL,        -- 'upload_raw', 'developed_jpg', 'cutouts', etc.
+    data_state        TEXT NOT NULL,        -- 'semifield-upload', 'semifield-developed-images', 'semifield-cutouts', etc.
     
     -- Timestamps
     mtime_iso         TIMESTAMPTZ,          -- Last modified time (from Globus)
@@ -104,7 +104,7 @@ CREATE INDEX idx_globus_file_ext ON source.globus_file_index(file_ext);
 |--------|---------------|-------------|
 | `location` | `'JUNO'` | Which storage system (JUNO/CERES/NCSU) |
 | `batch_id` | `'MD_2025-09-09'` | Unique batch identifier |
-| `data_state` | `'upload_raw'` | Pipeline stage: raw, developed, cutouts |
+| `data_state` | `'semifield-upload'` | Pipeline stage: raw, developed, semifield-cutouts |
 | `file_ext` | `'RAW'` | File extension without dot |
 | `entry_type` | `'file'` | Whether file or directory |
 
@@ -114,7 +114,7 @@ CREATE INDEX idx_globus_file_ext ON source.globus_file_index(file_ext);
 -- Count RAW files per batch
 SELECT batch_id, COUNT(*) as raw_count
 FROM source.globus_file_index
-WHERE file_ext = 'RAW' AND data_state = 'upload_raw'
+WHERE file_ext = 'RAW' AND data_state = 'semifield-upload'
 GROUP BY batch_id;
 
 -- Find all files for a batch
@@ -179,7 +179,7 @@ CREATE TABLE processed.batches (
     -- Pipeline completion flags
     raw_to_jpg_complete          BOOLEAN DEFAULT FALSE,
     jpg_to_metadata_complete     BOOLEAN DEFAULT FALSE,
-    metadata_to_cutouts_complete BOOLEAN DEFAULT FALSE,
+    metadata_to_semifield-cutouts_complete BOOLEAN DEFAULT FALSE,
     
     -- Timing
     first_seen_at           TIMESTAMPTZ,      -- When batch first appeared
@@ -226,7 +226,7 @@ CREATE INDEX idx_batches_incomplete ON processed.batches(batch_id)
 - Store EXIF metadata (camera, GPS, exposure)
 - Track processing status per image
 - Store bounding box detections
-- Link images to output files (JPG, metadata, cutouts)
+- Link images to output files (JPG, metadata, semifield-cutouts)
 
 ### Schema
 
@@ -248,7 +248,7 @@ CREATE TABLE processed.images (
         'raw_to_dng',         -- RAW converted to DNG
         'dng_to_jpg',         -- DNG developed to JPG
         'metadata_extracted',  -- Metadata extracted
-        'cutouts_generated',  -- Cutouts generated
+        'semifield-cutouts_generated',  -- semifield-cutouts generated
         'completed',          -- All processing complete
         'failed'              -- Processing failed
     )),
@@ -395,7 +395,7 @@ CREATE INDEX idx_stage_status_started ON processed.stage_status(started_at DESC)
 
 - `'raw_to_jpg'` - RAW → DNG → JPG conversion
 - `'jpg_to_metadata'` - Metadata extraction
-- `'metadata_to_cutouts'` - Cutout generation
+- `'metadata_to_semifield-cutouts'` - Cutout generation
 
 ---
 
@@ -554,8 +554,8 @@ FROM source.globus_file_index raw
 LEFT JOIN source.globus_file_index jpg
     ON raw.batch_id = jpg.batch_id
     AND REPLACE(raw.file_name, '.raw', '.jpg') = jpg.file_name
-    AND jpg.data_state = 'developed_jpg'
-WHERE raw.data_state = 'upload_raw'
+    AND jpg.data_state = 'semifield-developed-images'
+WHERE raw.data_state = 'semifield-upload'
     AND raw.file_ext = 'RAW'
     AND jpg.file_id IS NULL;  -- JPG doesn't exist
 ```
@@ -586,18 +586,18 @@ SELECT
     b.batch_date,
     
     -- File counts
-    COUNT(CASE WHEN g.data_state = 'upload_raw' THEN 1 END) as raw_count,
-    COUNT(CASE WHEN g.data_state = 'developed_jpg' AND g.file_ext = 'jpg' THEN 1 END) as jpg_count,
-    COUNT(CASE WHEN g.data_state = 'developed_jpg' AND g.file_ext = 'json' THEN 1 END) as metadata_count,
-    COUNT(CASE WHEN g.data_state = 'cutouts' THEN 1 END) as cutout_count,
+    COUNT(CASE WHEN g.data_state = 'semifield-upload' THEN 1 END) as raw_count,
+    COUNT(CASE WHEN g.data_state = 'semifield-developed-images' AND g.file_ext = 'jpg' THEN 1 END) as jpg_count,
+    COUNT(CASE WHEN g.data_state = 'semifield-developed-images' AND g.file_ext = 'json' THEN 1 END) as metadata_count,
+    COUNT(CASE WHEN g.data_state = 'semifield-cutouts' THEN 1 END) as cutout_count,
     
     -- Gaps
-    COUNT(CASE WHEN g.data_state = 'upload_raw' THEN 1 END) - 
-    COUNT(CASE WHEN g.data_state = 'developed_jpg' AND g.file_ext = 'jpg' THEN 1 END) as raw_to_jpg_gap,
+    COUNT(CASE WHEN g.data_state = 'semifield-upload' THEN 1 END) - 
+    COUNT(CASE WHEN g.data_state = 'semifield-developed-images' AND g.file_ext = 'jpg' THEN 1 END) as raw_to_jpg_gap,
     
     -- Completion flags
-    (COUNT(CASE WHEN g.data_state = 'upload_raw' THEN 1 END) = 
-     COUNT(CASE WHEN g.data_state = 'developed_jpg' AND g.file_ext = 'jpg' THEN 1 END)) as raw_to_jpg_complete
+    (COUNT(CASE WHEN g.data_state = 'semifield-upload' THEN 1 END) = 
+     COUNT(CASE WHEN g.data_state = 'semifield-developed-images' AND g.file_ext = 'jpg' THEN 1 END)) as raw_to_jpg_complete
      
 FROM processed.batches b
 LEFT JOIN source.globus_file_index g ON b.batch_id = g.batch_id
@@ -624,11 +624,11 @@ SELECT
 FROM report.files_needing_jpg_to_metadata
 UNION ALL
 SELECT 
-    'metadata_to_cutouts' as stage,
+    'metadata_to_semifield-cutouts' as stage,
     COUNT(DISTINCT batch_id),
     COUNT(*),
     SUM(size_bytes)/(1024^3)
-FROM report.files_needing_metadata_to_cutouts;
+FROM report.files_needing_metadata_to_semifield-cutouts;
 ```
 
 ---
