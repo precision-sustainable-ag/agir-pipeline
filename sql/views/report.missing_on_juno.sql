@@ -114,11 +114,10 @@ SELECT
     copy_domain,
     data_state,
     batch_id,
-
-    site,
     endpoint,
+    site,
     storage_root,
-
+    parent_dir,
     COUNT(*)        AS n_files_missing_on_juno,
     SUM(size_bytes) AS n_bytes_missing_on_juno
 FROM report.files_to_copy_to_juno
@@ -128,8 +127,8 @@ GROUP BY
     batch_id,
     site,
     endpoint,
-    storage_root;
-
+    storage_root,
+    parent_dir;
 
 -- For the JUNO match (batch_id, data_state, file_name) fast lookup
 CREATE INDEX IF NOT EXISTS ix_gfi_juno_match
