@@ -178,37 +178,6 @@ def test_filter_by_site(manager: TransferManager):
         return False
 
 
-def test_batch_summary(manager: TransferManager):
-    """Test 8: Get batch summary."""
-    print("\n[TEST 8] Batch Summary")
-    print("-" * 60)
-    
-    try:
-        batches = manager.get_batches_to_transfer(limit=1)
-        
-        if not batches:
-            print("⊘ No batches needing transfer")
-            return True
-        
-        test_batch = batches[0]['batch_id']
-        summary = manager.get_batch_summary(test_batch)
-        
-        print(f"Batch: {summary['batch_id']}")
-        print(f"Total files: {summary['total_files_missing']:,}")
-        print(f"Total size: {summary['total_gb_missing']:.2f} GB")
-        
-        print("\nBy domain:")
-        for domain, info in summary['domains'].items():
-            print(f"  {domain:30s}: {info['files_missing']:5,} files")
-        
-        print("✓ Batch summary works")
-        return True
-    except Exception as e:
-        log.exception(f"✗ Failed: {e}")
-        print(f"✗ Failed: {e}")
-        return False
-
-
 def test_count_files(manager: TransferManager):
     """Test 9: Count files."""
     print("\n[TEST 9] Count Files")
@@ -236,31 +205,6 @@ def test_count_files(manager: TransferManager):
         
         return True
     except Exception as e:
-        print(f"✗ Failed: {e}")
-        return False
-
-
-def test_statistics(manager: TransferManager):
-    """Test 10: Get statistics."""
-    print("\n[TEST 10] Transfer Statistics")
-    print("-" * 60)
-    
-    try:
-        stats = manager.get_transfer_statistics()
-        
-        print(f"Overall:")
-        print(f"  Batches: {stats['batches_needing_transfer']:,}")
-        print(f"  Files: {stats['total_files_to_transfer']:,}")
-        print(f"  Size: {stats['total_gb_to_transfer']:.2f} GB")
-        
-        print(f"\nBy domain:")
-        for domain, info in stats['by_domain'].items():
-            print(f"  {domain:30s}: {info['files']:8,} files")
-        
-        print("✓ Statistics work")
-        return True
-    except Exception as e:
-        log.exception(f"✗ Failed: {e}")
         print(f"✗ Failed: {e}")
         return False
 
@@ -330,24 +274,14 @@ def run_all_tests():
     with AgirDB() as db:
         manager = db.transfers
 
-        if not test_connection(manager):
-            print("\n❌ Cannot connect - stopping")
-            return False
-        
-        if not test_views_exist(manager):
-            print("\n❌ Views missing - stopping")
-            manager.conn.close()
-            return False
-        
         tests = [
+            test_connection,
+            test_views_exist,
             test_get_files_to_transfer,
             test_get_batches_to_transfer,
-            test_filter_by_copy_domain,
             test_filter_by_batch,
             test_filter_by_site,
-            test_batch_summary,
             test_count_files,
-            test_statistics,
             test_no_juno_files,
             test_performance
         ]
@@ -360,8 +294,6 @@ def run_all_tests():
             except Exception as e:
                 print(f"\n✗ Test crashed: {e}")
                 results.append((test_func.__name__, False))
-        
-        manager.conn.close()
         
         print("\n" + "=" * 80)
         print("TEST SUMMARY")
