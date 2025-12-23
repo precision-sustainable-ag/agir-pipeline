@@ -9,12 +9,14 @@ CREATE TABLE IF NOT EXISTS source.globus_file_index (
     namespace         TEXT NOT NULL,
     storage_root      TEXT NOT NULL,
     rel_path          TEXT NOT NULL,
+    full_path         TEXT NOT NULL,
     parent_dir        TEXT,
     file_name         TEXT NOT NULL,
 
     entry_type        TEXT NOT NULL,
     file_ext          TEXT,
     size_bytes        BIGINT,
+    permissions       TEXT,
     checksum          TEXT,
 
     batch_id          TEXT,

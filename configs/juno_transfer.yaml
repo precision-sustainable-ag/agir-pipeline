@@ -5,7 +5,7 @@ report:
 
 transfer:
   # Which data_state in source.globus_file_index to move
-  data_state: upload_raw
+  data_state: semifield-upload
   # Globus destination settings
   juno_endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
   

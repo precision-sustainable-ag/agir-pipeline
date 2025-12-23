@@ -43,8 +43,8 @@ class TransferConfig:
     juno_endpoint: str
     dest_root: str
     dry_run: bool = False
-    location_priority: Optional[List[str]] = None
-    lts_root_priority: Optional[List[str]] = None
+    site_priority: Optional[List[str]] = None
+    storage_root_priority: Optional[List[str]] = None
 
 
 # ---------------------------------------------------------------------
@@ -71,8 +71,8 @@ def parse_transfer_cfg(cfg: Dict) -> TransferConfig:
         juno_endpoint=t["juno_endpoint"],
         dest_root=t["dest_root"],
         dry_run=bool(t.get("dry_run", False)),
-        location_priority=t.get("location_priority"),
-        lts_root_priority=t.get("lts_root_priority"),
+        site_priority=t.get("site_priority"),
+        storage_root_priority=t.get("storage_root_priority"),
     )
 
 
@@ -117,7 +117,7 @@ def read_batch_ids(report_cfg: ReportConfig) -> Set[str]:
 
 def fetch_batch_sources(conn, batch_ids: List[str], data_state: str) -> List[Dict]:
     """
-    Return one row per (batch_id, endpoint, root_path, location, lts_root).
+    Return one row per (batch_id, endpoint, storage_root, site, storage_root).
 
     We assume:
       - Entire batch is missing on JUNO.
@@ -127,13 +127,13 @@ def fetch_batch_sources(conn, batch_ids: List[str], data_state: str) -> List[Dic
         SELECT DISTINCT
             batch_id,
             endpoint,
-            location,
-            lts_root,
-            root_path
+            site,
+            storage_root,
+            storage_root
         FROM source.globus_file_index
         WHERE data_state = %s
           AND batch_id = ANY(%s)
-          AND location <> 'JUNO'
+          AND site <> 'JUNO'
           AND entry_type = 'file'
     """
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -143,22 +143,22 @@ def fetch_batch_sources(conn, batch_ids: List[str], data_state: str) -> List[Dic
 
 def choose_primary_sources(
     batch_sources: List[Dict],
-    location_priority: Optional[List[str]] = None,
-    lts_root_priority: Optional[List[str]] = None,
+    site_priority: Optional[List[str]] = None,
+    storage_root_priority: Optional[List[str]] = None,
 ) -> Tuple[List[Dict], Dict[str, List[Dict]]]:
     """
-    Given possibly multiple sources per batch (different locations and/or lts_roots),
+    Given possibly multiple sources per batch (different sites and/or storage_roots),
     pick EXACTLY ONE (the "best") source per batch.
     """
-    if location_priority is None:
-        location_priority = []
-    if lts_root_priority is None:
-        lts_root_priority = []
+    if site_priority is None:
+        site_priority = []
+    if storage_root_priority is None:
+        storage_root_priority = []
 
-    loc_prio = {loc: i for i, loc in enumerate(location_priority)}
-    lts_prio = {root: i for i, root in enumerate(lts_root_priority)}
-    default_loc_score = len(location_priority)
-    default_lts_score = len(lts_root_priority)
+    loc_prio = {loc: i for i, loc in enumerate(site_priority)}
+    lts_prio = {root: i for i, root in enumerate(storage_root_priority)}
+    default_loc_score = len(site_priority)
+    default_lts_score = len(storage_root_priority)
 
     best_by_batch: Dict[str, Dict] = {}
     best_score: Dict[str, Tuple[int, int]] = {}
@@ -166,8 +166,8 @@ def choose_primary_sources(
 
     for rec in batch_sources:
         batch = rec["batch_id"]
-        loc = rec.get("location")
-        root = rec.get("lts_root")
+        loc = rec.get("site")
+        root = rec.get("storage_root")
 
         loc_score = loc_prio.get(loc, default_loc_score)
         root_score = lts_prio.get(root, default_lts_score)
@@ -194,7 +194,7 @@ def choose_primary_sources(
 # ---------------------------------------------------------------------
 
 def build_batch_paths(rec: Dict, dest_root: str) -> Dict[str, str]:
-    src_dir = os.path.join(rec["root_path"].rstrip("/"), rec["batch_id"])
+    src_dir = os.path.join(rec["storage_root"].rstrip("/"), rec["batch_id"])
     dst_dir = os.path.join(dest_root.rstrip("/"), rec["batch_id"])
     return {"src_dir": src_dir, "dst_dir": dst_dir}
 
@@ -242,9 +242,9 @@ def log_batch_transfer(
         INSERT INTO logs.juno_transfers (
             batch_id,
             endpoint,
-            location,
-            lts_root,
-            root_path,
+            site,
+            storage_root,
+            storage_root,
             data_state,
             source_dir,
             destination_dir,
@@ -255,9 +255,9 @@ def log_batch_transfer(
         VALUES (
             %(batch_id)s,
             %(endpoint)s,
-            %(location)s,
-            %(lts_root)s,
-            %(root_path)s,
+            %(site)s,
+            %(storage_root)s,
+            %(storage_root)s,
             %(data_state)s,
             %(source_dir)s,
             %(destination_dir)s,
@@ -269,9 +269,9 @@ def log_batch_transfer(
     params = {
         "batch_id": rec["batch_id"],
         "endpoint": rec["endpoint"],
-        "location": rec["location"],
-        "lts_root": rec["lts_root"],
-        "root_path": rec["root_path"],
+        "site": rec["site"],
+        "storage_root": rec["storage_root"],
+        "storage_root": rec["storage_root"],
         "data_state": data_state,
         "source_dir": src_dir,
         "destination_dir": dst_dir,
@@ -318,8 +318,8 @@ def main():
 
     primary_sources, duplicates = choose_primary_sources(
         batch_sources,
-        location_priority=t_cfg.location_priority,
-        lts_root_priority=t_cfg.lts_root_priority,
+        site_priority=t_cfg.site_priority,
+        storage_root_priority=t_cfg.storage_root_priority,
     )
 
     print(

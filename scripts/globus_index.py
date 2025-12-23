@@ -236,15 +236,15 @@ def insert_rows(conn: psycopg2.extensions.connection, rows: List[Tuple], logger:
             """
             INSERT INTO source.globus_file_index (
                 endpoint, site, storage_domain, namespace, storage_root,
-                rel_path, parent_dir, file_name,
+                rel_path, full_path, parent_dir, file_name,
                 entry_type, file_ext,
-                size_bytes, checksum,
+                size_bytes, permissions, checksum,
                 batch_id, batch_state, batch_date,
                 data_state,
                 mtime_iso,
                 fname_ts_epoch, fname_ts_iso
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (endpoint, data_state, storage_root, rel_path) DO NOTHING
             """,
             rows,
@@ -364,6 +364,7 @@ def crawl_tree_mp(
                     entry_type = item.get("type", "file")  # 'file' or 'dir'
                     size_bytes = item.get("size")          # bytes from Globus
                     last_modified = item.get("last_modified")
+                    permissions = item.get("permissions")
 
                     full_path = f"{path.rstrip('/')}/{name}"
                     if entry_type == "dir":
@@ -395,11 +396,13 @@ def crawl_tree_mp(
                         namespace,
                         storage_root,
                         rel_path,
+                        full_path,
                         parent_dir,
                         name,              # file_name
                         entry_type,
                         file_ext,
                         size_bytes,
+                        permissions,
                         None,              # checksum (not available yet)
                         batch_id,
                         batch_state,

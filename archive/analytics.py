@@ -9,8 +9,8 @@ import logging
 from typing import Dict, List, Optional, Tuple
 from datetime import date, datetime, timedelta
 
-from .connection import ConnectionManager
-from .exceptions import QueryError, InvalidParameterError
+from ..src.agir_db.connection import ConnectionManager
+from ..src.agir_db.exceptions import QueryError, InvalidParameterError
 
 
 logger = logging.getLogger(__name__)
