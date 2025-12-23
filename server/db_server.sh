@@ -257,3 +257,6 @@ echo "  psql -h ${PGHOST_FQDN} -p ${PGPORT} -d ${DB_NAME} -U ${USER}"
 echo "If ~/.pgpass is in place (it is), you won't be prompted for a password."
 
 sleep infinity
+
+echo "[DAILY] Scheduling next run for day from now at the same time..."
+sbatch --begin=now+1days "$0"

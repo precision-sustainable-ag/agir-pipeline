@@ -9,7 +9,7 @@
 #SBATCH --job-name=globus_index
 #SBATCH --account=dash_agir
 #SBATCH --partition=compute          # adjust if needed
-#SBATCH --time=6:00:00
+#SBATCH --time=8:00:00
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=32G
 #SBATCH --output=/project/dash_agir/logs/weekly_globus/agir_%x_%j.out.log
@@ -238,8 +238,8 @@ echo "========================================" | tee -a "${MAIN_LOG}"
 find "${LOG_DIR}" -name "*.log" -type f -mtime +30 -delete
 
 # ------------------ Resubmit for next week -----
-echo "[WEEKLY] Scheduling next run for ~7 days from now at the same time..."
+echo "[DAILY] Scheduling next run for day from now at the same time..."
 
-sbatch --begin=now+7days "$0"
+sbatch --begin=now+1days "$0"
 
 exit 0
