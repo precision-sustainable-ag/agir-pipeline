@@ -1,0 +1,86 @@
+{
+  "run_report_version": "1.0",
+  "stage": "jpg_to_detection",
+  "stage_version": "1.0.0",
+  "run_id": "6df3d5b2-62b5-4c4b-ae9d-1a3e58f6b5a0",
+  "pipeline_run_id": null,
+  "batch_id": "TX_2024-06-01",
+  "orchestrator_id": "orch-ceres-01",
+
+  "started_at": "2025-12-18T10:12:03Z",
+  "ended_at": "2025-12-18T10:19:44Z",
+  "duration_ms": 461000,
+  "exit_code": 0,
+
+  "status": "success",
+  "scope": "image",
+
+  "provenance": {
+    "code_commit": "whatever-commit-hash",
+    "build_id": null,
+    "config_path": "conf/detection.yaml",
+    "config_hash": "sha256:...",
+    "model_id": "yolo_vX.Y",
+    "deps_id": "deps_2025-12-01",
+    "container_image": null
+  },
+
+  "inputs": {
+    "input_root": "/project/dash_agir/semifield-developed-images/TX_2024-06-01/images",
+    "n_units_discovered": 1000,
+    "unit_id_kind": "image_id",
+    "inputs_manifest_path": null
+  },
+
+  "outputs": {
+    "output_root": "/project/dash_agir/semifield-developed-images/TX_2024-06-01",
+    "run_root": "/project/dash_agir/semifield-developed-images/TX_2024-06-01/jpg_to_detection/6df3d5b2-62b5-4c4b-ae9d-1a3e58f6b5a0",
+    "artifacts_dir": ".../artifacts",
+    "report_path": ".../run_report.json",
+    "manifest_path": ".../manifest.json",
+    "schema_version": 1,
+
+    "counts": {
+      "n_units_succeeded": 520,
+      "n_units_failed": 1,
+      "n_units_skipped": 0
+    },
+
+    "artifacts": [
+      {
+        "artifact_type": "detections_json",
+        "path": ".../artifacts/detections.json",
+        "n_files": 1
+      }
+    ]
+  },
+
+  "stage_error": null,
+
+  "errors": [
+    {
+      "unit_id": "TX_1687344534",
+      "code": "DECODE_FAILED",
+      "type": "DecodeError",
+      "message": "failed to decode jpg",
+      "retryable": false,
+      "meta": {}
+    }
+  ],
+
+  "warnings": [
+    {
+      "unit_id": "TX_1687344534",
+      "code": "LOW_CONFIDENCE",
+      "type": "LowConfidence",
+      "message": "median detection confidence below threshold",
+      "meta": { "median_conf": 0.21, "threshold": 0.3 }
+    }
+  ],
+
+  "pointers": {
+    "errors_path": null,
+    "warnings_path": null,
+    "logs_path": null
+  }
+}

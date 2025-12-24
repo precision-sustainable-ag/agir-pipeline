@@ -8,4 +8,5 @@ squashfs-root/
 RawTherapee_*
 tests_v1/
 examples/
+!docs/examples
 scripts/*.txt
