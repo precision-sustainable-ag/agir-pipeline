@@ -45,12 +45,11 @@ data_options = {
 
 file_paths = []
 script_root = Path("/project/dash_agir/matthew.kutugata/repos/agir-db/scripts/")
+timestamp = int(time.time())
 for data_state, copy_domains in data_options.items():
     for copy_domain in copy_domains:
         # add a timestamp to the file path to avoid overwriting
-        timestamp = int(time.time())
         file_path = f"{script_root}/globus_transfer_{data_state}_{copy_domain}_{timestamp}.txt"
-        
         write_globus_transfer_batch_file(
             data_state=data_state,
             copy_domain=copy_domain,

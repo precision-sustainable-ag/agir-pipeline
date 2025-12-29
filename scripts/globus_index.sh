@@ -17,6 +17,11 @@
 
 set -Euo pipefail
 
+sbatch /project/dash_agir/matthew.kutugata/repos/agir-db/server/db_server.sh
+
+# wait 20 seconds for the DB server to start
+sleep 20
+
 # ----------------- Basic log setup -----------------
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_DIR="/project/dash_agir/logs/weekly_globus"
@@ -58,6 +63,15 @@ source activate /project/dash_agir/matthew.kutugata/software/miniforge3/envs/sem
 echo "[INIT] Database connection parameters loaded."
 
 PSQL="psql -v ON_ERROR_STOP=1 -h $PGHOST -p $PGPORT -d $PGDATABASE -U $PGUSER"
+
+
+# ============================================================
+#                   CLEANUP OLD RECORDS
+# ============================================================
+# vacuum the database to optimize performance
+echo "[INFO] Vacuuming database to optimize performance..."
+psql -v ON_ERROR_STOP=1 -h $PGHOST -p $PGPORT -d $PGDATABASE -U $PGUSER -c "VACUUM;"
+
 
 # ============================================================
 #                       ENDPOINTS
@@ -155,7 +169,7 @@ ENDPOINTS=(
 # Paths
 REPO_DIR="/project/dash_agir/matthew.kutugata/repos/agir-db"
 PYTHON_SCRIPT="${REPO_DIR}/scripts/globus_index.py"
-SCHEMA="${REPO_DIR}/sql/schemas/02_source/source.globus_file_index.sql"
+SCHEMA="${REPO_DIR}/sql/schemas/source.globus_file_index.sql"
 MAX_WORKERS=12
 BATCH_SIZE=5000
 # ============================================================
