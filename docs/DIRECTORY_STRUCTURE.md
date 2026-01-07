@@ -1,12 +1,11 @@
-# AGIR Monorepo Structure
+# AGIR-pipeline Structure
 
-## Recommended Layout
+## Possible Layout
 
 ```
-agir/
+agir-pipeline/
 ├── pyproject.toml                 # Root project config
 ├── README.md
-│
 ├── src/
 │   └── agir_db/                   # Core database library (installable package)
 │       ├── __init__.py
@@ -17,7 +16,7 @@ agir/
 │       └── ...
 │
 ├── orchestrator/                  # Orchestration system
-│   ├── pyproject.toml             # Optional: separate deps if needed
+│   ├── pyproject.toml             # separate deps
 │   ├── README.md
 │   ├── orchestrator/
 │   │   ├── __init__.py
@@ -29,10 +28,9 @@ agir/
 │   │   └── retry.py               # Retry/resume logic
 │   ├── scripts/
 │   │   ├── orch_daemon.py         # Main orchestrator daemon
-│   │   └── manual_trigger.py     # Manual stage trigger tool
+│   │   └── ...
 │   ├── configs/
-│   │   ├── orchestrator.yaml      # Orchestrator config
-│   │   └── slurm_profiles.yaml    # Resource profiles per stage
+│   │   └── ...
 │   └── tests/
 │       └── ...
 │
@@ -41,20 +39,19 @@ agir/
 │   ├── common/                    # Shared stage utilities
 │   │   ├── __init__.py
 │   │   ├── contracts.py           # RunReport, Manifest builders
-│   │   ├── io.py                  # Common I/O helpers
-│   │   ├── validation.py          # Input validation
-│   │   └── logging.py             # Structured logging
+│   │   ├── utils.py               # Common helpers
+│   │   └── parsers.py             # Input validation
 │   │
 │   ├── raw_to_jpg/                # Stage 1: RAW → JPG
-│   │   ├── pyproject.toml         # Stage-specific deps
 │   │   ├── README.md
 │   │   ├── cli.py                 # CLI entry point
 │   │   ├── processor.py           # Core conversion logic
+│   │   ├── raw_to_jpg.py           # RAW → DNG and DNG → JPG classes
 │   │   ├── configs/
 │   │   │   └── default.yaml
 │   │   └── tests/
 │   │       ├── test_processor.py
-│   │       └── test_integration.py
+│   │       └── ...
 │   │
 │   ├── jpg_to_det/                # Stage 2: JPG → Detections
 │   │   └── ...
@@ -76,27 +73,17 @@ agir/
 │       └── report.missing_on_juno.sql
 │
 ├── tests/                         # Integration tests
-│   ├── integration/
-│   │   ├── test_full_pipeline.py
-│   │   ├── test_orchestrator_polling.py
-│   │   ├── test_stage_submission.py
-│   │   └── test_result_ingestion.py
-│   └── fixtures/
-│       ├── sample_run_reports/
-│       └── sample_manifests/
+│   ├── test_full_pipeline.py
+│   └── ...
 │
 ├── scripts/                       # Deployment & maintenance scripts
 │   ├── deploy_schemas.sh
 │   ├── setup_dev_env.sh
 │   └── migrate_data.py
 │
-│
 └── .github/                       # CI/CD
     └── workflows/
-        ├── test_agir_db.yml
-        ├── test_stages.yml
-        ├── test_orchestrator.yml
-        └── integration_tests.yml
+        └── ...
 ```
 
 ## Key Design Principles
@@ -176,7 +163,7 @@ dependencies = [
 
 ### Development Environment
 ```bash
-git clone https://github.com/yourorg/agir.git
+git clone https://github.com/precision-sustainable-ag/agir-pipeline.git
 cd agir
 pip install -e .[dev]                 # Install agir_db with dev deps
 pip install -e ./orchestrator[dev]    # Install orchestrator

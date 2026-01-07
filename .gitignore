@@ -10,3 +10,4 @@ tests_v1/
 examples/
 !docs/examples
 scripts/*.txt
+.pytest_cache/
