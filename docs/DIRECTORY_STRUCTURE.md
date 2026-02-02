@@ -69,11 +69,11 @@ agir-pipeline/
 │   └── sql/
 │       ├── source.globus_file_index.sql
 │       ├── logs.stage_runs.sql
-│       ├── logs.stage_run_items.sql
+│       ├── logs.transfer_requests.sql
 │       └── report.missing_on_juno.sql
 │
-├── tests/                         # Integration tests
-│   ├── test_full_pipeline.py
+├── tests/                         # Old tests
+│   ├── test_p1.py
 │   └── ...
 │
 ├── scripts/                       # Deployment & maintenance scripts
