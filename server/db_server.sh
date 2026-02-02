@@ -190,11 +190,13 @@ fi
 echo "[PG-SERVER] Ensuring schemas exist in '${DB_NAME}'"
 
 psql "host=${PGHOST_FQDN} port=${PGPORT} dbname=${DB_NAME} user=$USER" <<'SQL'
-CREATE SCHEMA IF NOT EXISTS core;
 CREATE SCHEMA IF NOT EXISTS source;
 CREATE SCHEMA IF NOT EXISTS processed;
 CREATE SCHEMA IF NOT EXISTS release;
 CREATE SCHEMA IF NOT EXISTS logs;
+CREATE SCHEMA IF NOT EXISTS registry;
+CREATE SCHEMA IF NOT EXISTS report;
+CREATE SCHEMA IF NOT EXISTS ops;
 SQL
 
 echo "[PG-SERVER] Schemas ensured."
@@ -257,3 +259,6 @@ echo "  psql -h ${PGHOST_FQDN} -p ${PGPORT} -d ${DB_NAME} -U ${USER}"
 echo "If ~/.pgpass is in place (it is), you won't be prompted for a password."
 
 sleep infinity
+
+echo "[DAILY] Scheduling next run for day from now at the same time..."
+sbatch --begin=now+1days "$0"

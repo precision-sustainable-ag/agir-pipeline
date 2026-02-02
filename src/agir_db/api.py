@@ -35,16 +35,7 @@ from .connection import ConnectionManager
 from .exceptions import AgirDBError
 
 # Domain class imports
-from .gaps import PipelineGaps
-from .stages import StageStatus
-from .events import EventLogger
-from .images import ImageMetadata
-from .batches import BatchMetadata
-from .inventory import InventorySync
 from .transfers import TransferManager
-from .analytics import Analytics
-from .migration import Migration
-from .orchestration import Orchestration
 
 
 logger = logging.getLogger(__name__)
@@ -134,36 +125,8 @@ class AgirDB:
         )
         
         # Initialize domain components
-        
-        # Pipeline Gaps
-        self.gaps = PipelineGaps(self._connection)
-        
-        # Stage Status
-        self.stages = StageStatus(self._connection)
-        
-        # Event Logging
-        self.events = EventLogger(self._connection)
-        
-        # Image & Batch Metadata
-        self.images = ImageMetadata(self._connection)
-        self.batches = BatchMetadata(self._connection)
-        
-        # Inventory Sync
-        self.inventory = InventorySync(self._connection)
-        
-        # Transfer Management
         self.transfers = TransferManager(self._connection)
-        
-        # Analytics
-        self.analytics = Analytics(self._connection)
-        
-        # Migration Tools
-        self.migration = Migration(self._connection)
-        
-        # Orchestration Helpers
-        self.orchestration = Orchestration(self._connection)
-        
-        
+                
         logger.info("AgirDB initialized")
     
     def connect(self) -> None:

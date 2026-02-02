@@ -1,0 +1,47 @@
+{
+  "stage": "jpg_to_segmentation",
+  "stage_version": "1.2.0",
+  "run_id": "6df3d5b2-62b5-4c4b-ae9d-1a3e58f6b5a0",
+  "batch_id": "TX_2024-06-01",
+  "schema_version": 1,
+
+  "artifacts_root": "/project/dash_agir/semifield-developed-images/TX_2024-06-01/jpg_to_segmentation/6df3d5b2-62b5-4c4b-ae9d-1a3e58f6b5a0/artifacts",
+
+  "items": [
+    {
+      "image_id": "TX_1687344534",
+      "status": "ok",
+      "artifacts": {
+        "mask_path": "masks/TX_1687344534_mask.png"
+      },
+      "checksum": {
+        "mask_path": "sha256:8c4f1e..."
+      },
+      "size_bytes": {
+        "mask_path": 182334
+      }
+    },
+    {
+      "image_id": "TX_1687344535",
+      "status": "failed",
+      "error": {
+        "error_type": "ModelInferenceError",
+        "message": "CUDA out of memory",
+        "retryable": true
+      }
+    },
+    {
+      "image_id": "TX_1687344536",
+      "status": "ok",
+      "artifacts": {
+        "mask_path": "masks/TX_1687344536_mask.png"
+      },
+      "checksum": {
+        "mask_path": "sha256:19ad77..."
+      },
+      "size_bytes": {
+        "mask_path": 176908
+      }
+    }
+  ]
+}

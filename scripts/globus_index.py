@@ -4,7 +4,7 @@ Multiprocessing Globus file indexer for PostgreSQL.
 
 Changes from SQLite version:
 - Uses PostgreSQL (psycopg2) instead of SQLite
-- Adds location parameter (JUNO/NCSU/CERES)
+- Adds site parameter (JUNO/NCSU/CERES)
 - Separates file_name from rel_path
 - Stores file_ext without dot
 - Uses DATE type for batch_date
@@ -215,7 +215,7 @@ def get_parent_folder(rel_path: str, entry_type: str) -> Optional[str]:
     # Drop any trailing slash just in case
     path = rel_path.rstrip("/")
 
-    # If there is no slash, the file lives directly under root_path
+    # If there is no slash, the file lives directly under storage_root
     if "/" not in path:
         return None
 
@@ -235,24 +235,49 @@ def insert_rows(conn: psycopg2.extensions.connection, rows: List[Tuple], logger:
             cur,
             """
             INSERT INTO source.globus_file_index (
-                endpoint, location, lts_root,
-                root_path, rel_path, parent_dir, file_name,
+                endpoint, site, storage_domain, namespace, storage_root,
+                rel_path, full_path, parent_dir, file_name,
                 entry_type, file_ext,
-                size_bytes, checksum,
+                size_bytes, permissions, checksum,
                 batch_id, batch_state, batch_date,
                 data_state,
                 mtime_iso,
                 fname_ts_epoch, fname_ts_iso
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (endpoint, data_state, root_path, rel_path) DO NOTHING
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (endpoint, data_state, storage_root, rel_path) DO NOTHING
             """,
             rows,
         )
         conn.commit()
         logger.info("Inserted %d rows into source.globus_file_index", len(rows))
 
-
+def clear_site_index(
+    conn: psycopg2.extensions.connection,
+    endpoint: str,
+    site: str,
+    data_state: str,
+    storage_root: str,
+    logger: logging.Logger
+) -> int:
+    """
+    Clear existing index entries for a specific site before re-indexing.
+    Returns number of rows deleted.
+    """
+    delete_query = """
+        DELETE FROM source.globus_file_index
+        WHERE endpoint = %s
+        AND site = %s
+        AND data_state = %s
+        AND storage_root = %s;
+    """
+    
+    with conn.cursor() as cur:
+        cur.execute(delete_query, (endpoint, site, data_state, storage_root))
+        deleted_count = cur.rowcount
+        conn.commit()
+        logger.info(f"Cleared {deleted_count} existing records for {site}/{data_state}")
+        return deleted_count
 
 # ============================================================
 #                     GLOBUS WORKER
@@ -285,9 +310,10 @@ def ls_worker(args) -> Tuple[str, List[Dict]]:
 def crawl_tree_mp(
     conn: psycopg2.extensions.connection,
     endpoint: str,
-    location: str,
-    root_path: str,
-    lts_root: str,
+    site: str,
+    storage_domain: str,
+    namespace: str,
+    storage_root: str,
     data_state: str,
     batch_size: int,
     max_workers: int,
@@ -299,14 +325,14 @@ def crawl_tree_mp(
     - ProcessPoolExecutor to run globus-ls in parallel
     - Main process parses results and writes to PostgreSQL
     """
-
-    dir_queue = deque([root_path])
+    data_dir = Path(storage_root) / data_state
+    dir_queue = deque([str(data_dir)])
     futures = {}
     rows: List[Tuple] = []
     total_seen = 0
     max_inflight = max_workers * 4
 
-    logger.info(f"Starting multiprocessing crawl at root: {root_path}")
+    logger.info(f"Starting multiprocessing crawl at root: {data_dir}")
     logger.info(f"max_workers={max_workers}, max_inflight={max_inflight}")
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -338,12 +364,13 @@ def crawl_tree_mp(
                     entry_type = item.get("type", "file")  # 'file' or 'dir'
                     size_bytes = item.get("size")          # bytes from Globus
                     last_modified = item.get("last_modified")
+                    permissions = item.get("permissions")
 
                     full_path = f"{path.rstrip('/')}/{name}"
                     if entry_type == "dir":
                         full_path += "/"
 
-                    rel_path = full_path[len(root_path):].lstrip("/")
+                    rel_path = full_path[len(storage_root):].lstrip("/")
                     batch_id = extract_batch_id(full_path)
 
                     if batch_id:
@@ -364,15 +391,18 @@ def crawl_tree_mp(
 
                     rows.append((
                         endpoint,
-                        location,
-                        lts_root,
-                        root_path,
+                        site,
+                        storage_domain,
+                        namespace,
+                        storage_root,
                         rel_path,
+                        full_path,
                         parent_dir,
                         name,              # file_name
                         entry_type,
                         file_ext,
                         size_bytes,
+                        permissions,
                         None,              # checksum (not available yet)
                         batch_id,
                         batch_state,
@@ -413,18 +443,15 @@ def main() -> None:
     parser.add_argument("--user", required=True, help="PostgreSQL username.")
     parser.add_argument("--password", help="PostgreSQL password (optional, use .pgpass if not provided).")
     parser.add_argument("--endpoint", required=True, help="Globus endpoint ID.")
-    parser.add_argument("--location", required=True, choices=["JUNO", "NCSU", "CERES"], 
-                        help="Physical location of the endpoint.")
-    parser.add_argument("--root", required=True, help="Root directory on endpoint to crawl.")
-    parser.add_argument("--lts-root", required=True, help="Logical LTS root tag.")
-    parser.add_argument(
-        "--state",
-        required=True,
-        help="Logical data-state label for this tree (e.g. upload_raw, developed_jpg).",
-    )
+    parser.add_argument("--site", required=True, choices=["JUNO", "NCSU", "CERES"], help="Physical site of the endpoint.")
+    parser.add_argument("--storage-domain", required=True, choices=["screberg", "dash_agir", "national_plant_image_repository"], help="Logical storage domain tag.")
+    parser.add_argument("--namespace", required=True, help="Logical namespace tag.")
+    parser.add_argument("--storage-root", required=True, help="Logical storage root tag.")
+    parser.add_argument("--state",required=True,choices=["semifield-upload", "semifield-developed-images", "semifield-cutouts"], help="Logical data-state label for this tree.")
     parser.add_argument("--batch-size", type=int, default=2000, help="Insert batch size.")
     parser.add_argument("--max-workers", type=int, default=8, help="Number of worker processes.")
     parser.add_argument("--log-file", default="./globus_index_pg.log", help="Log file path (default: ./globus_index_pg.log)")
+    parser.add_argument("--clean-slate", action="store_true", help="Clear existing records before indexing (ensures DB matches filesystem)")
     args = parser.parse_args()
 
     log_file = args.log_file or "./globus_index_pg.log"
@@ -435,9 +462,10 @@ def main() -> None:
     logger.info("========================================")
     logger.info(f"Database: {args.dbname}@{args.host}:{args.port}")
     logger.info(f"Endpoint: {args.endpoint}")
-    logger.info(f"Location: {args.location}")
-    logger.info(f"Root: {args.root}")
-    logger.info(f"LTS Root: {args.lts_root}")
+    logger.info(f"Site: {args.site}")
+    logger.info(f"Storage domain: {args.storage_domain}")
+    logger.info(f"Namespace: {args.namespace}")
+    logger.info(f"Storage root: {args.storage_root}")
     logger.info(f"Data state: {args.state}")
     logger.info(f"Batch size: {args.batch_size}")
     logger.info(f"Max workers: {args.max_workers}")
@@ -455,12 +483,29 @@ def main() -> None:
     conn = init_db(conn_params, schema_path, logger)
 
     try:
+        if args.clean_slate:
+            deleted = clear_site_index(
+                conn, 
+                args.endpoint,
+                args.site,
+                args.state,
+                args.storage_root,
+                logger
+            )
+            logger.info(f"Clean slate mode: removed {deleted} old records")
+    except Exception as e:
+        logger.error(f"Error during clean slate operation: {e}")
+        conn.close()
+        return
+
+    try:
         crawl_tree_mp(
             conn=conn,
             endpoint=args.endpoint,
-            location=args.location,
-            root_path=args.root.rstrip("/"),
-            lts_root=args.lts_root,
+            site=args.site,
+            storage_domain=args.storage_domain,
+            namespace=args.namespace,
+            storage_root=args.storage_root.rstrip("/"),
             data_state=args.state,
             batch_size=args.batch_size,
             max_workers=args.max_workers,

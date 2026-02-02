@@ -3,19 +3,52 @@
 # Weekly Globus Indexer - Wrapper Script
 # Run this via cron for automated weekly indexing
 #
-# Usage: ./weekly_globus_index.sh
+# Usage: ./globus_index.sh
 
 #!/usr/bin/env bash
 #SBATCH --job-name=globus_index
 #SBATCH --account=dash_agir
 #SBATCH --partition=compute          # adjust if needed
-#SBATCH --time=6:00:00
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=16G
+#SBATCH --time=8:00:00
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32G
 #SBATCH --output=/project/dash_agir/logs/weekly_globus/agir_%x_%j.out.log
 #SBATCH --error=/project/dash_agir/logs/weekly_globus/agir_%x_%j.err.log
 
-set -euo pipefail
+set -Euo pipefail
+
+sbatch /project/dash_agir/matthew.kutugata/repos/agir-db/server/db_server.sh
+
+# wait 20 seconds for the DB server to start
+sleep 20
+
+# ----------------- Basic log setup -----------------
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LOG_DIR="/project/dash_agir/logs/weekly_globus"
+mkdir -p "${LOG_DIR}"
+MAIN_LOG="${LOG_DIR}/agir_${TIMESTAMP}.log"
+
+# Send *all* stdout/stderr to MAIN_LOG (plus SLURM out/err)
+exec > >(tee -a "${MAIN_LOG}") 2>&1
+
+echo "[INFO] Weekly Globus Indexing Job started on $(hostname) at $(date)"
+echo "[INFO] Main log: ${MAIN_LOG}"
+
+# Error trap: log any failing command with line + exit code
+log_error() {
+    local exit_code=$?
+    # BASH_COMMAND is the command that caused the error
+    echo "[ERROR] Exit=${exit_code} at line ${BASH_LINENO[0]}: ${BASH_COMMAND}"
+}
+trap log_error ERR
+
+# Exit trap: always log final status
+on_exit() {
+    local exit_code=$?
+    echo "[INFO] Script exiting with code ${exit_code} at $(date)"
+}
+trap on_exit EXIT
+
 echo "[INFO] Weekly Globus Indexing Job started on $(hostname) at $(date)"
 
 # ============================================================
@@ -27,99 +60,131 @@ echo "[INIT] Loading database connection parameters..."
 source /project/dash_agir/postgres/pg_coords.env
 module load miniconda
 source activate /project/dash_agir/matthew.kutugata/software/miniforge3/envs/semif_prep
-pip install psycopg2-binary
 echo "[INIT] Database connection parameters loaded."
 
 PSQL="psql -v ON_ERROR_STOP=1 -h $PGHOST -p $PGPORT -d $PGDATABASE -U $PGUSER"
 
+
 # ============================================================
-#                ENDPOINT AND PATH DEFINITIONS
+#                   CLEANUP OLD RECORDS
+# ============================================================
+# vacuum the database to optimize performance
+echo "[INFO] Vacuuming database to optimize performance..."
+psql -v ON_ERROR_STOP=1 -h $PGHOST -p $PGPORT -d $PGDATABASE -U $PGUSER -c "VACUUM;"
+
+
+# ============================================================
+#                       ENDPOINTS
 # ============================================================
 JUNO_EP="904c2108-90cf-11e8-9672-0a6d4e044368"
 CERES_EP="f45a24f8-09ba-11ec-b342-1feaf93e3729"
-# NCSU_EP="f5897c0b-97a9-4340-abbe-800343b79b02"
 NCSU_EP="2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
+# ============================================================
+#                     STORAGE ROOTS
+# ============================================================
+NCSU_NFS_LI_SROOT="/rsstu/users/s/screberg/longterm_images"
+NCSU_NFS_LI2_SROOT="/rsstu/users/s/screberg/longterm_images2"
+NCSU_NFS_GD_SROOT="/rsstu/users/s/screberg/GROW_DATA"
 
-# Base root for NCSU
-NCSU_BASE="/rsstu/users/s/screberg"
+JUNO_LTS_DASH_SROOT="/LTS/project/dash_agir"
+JUNO_LTS_NPIR_SROOT="/LTS/project/national_plant_image_repository"
 
-# Logical LTS root labels (your internal tags)
-NCSU_ROOT_1="longterm_images2"
-NCSU_ROOT_2="longterm_images"
-NCSU_ROOT_3="GROW_DATA"
-JUNO_NPIR_ROOT="npir"
-JUNO_ROOT="dash_agir"
-CERES_ROOT="dash_agir"
+CERES_90D_DASH_SROOT="/90daydata/dash_agir"
+CERES_90D_NPIR_SROOT="/90daydata/national_plant_image_repository"
 
-UPLOAD_ds="upload_raw"
-DEVELOPED_ds="developed_jpg"
-CUTOUT_ds="cutouts"
-
+CERES_PROJECT_DASH_SROOT="/project/dash_agir"
+CERES_PROJECT_NPIR_SROOT="/project/national_plant_image_repository"
+# ============================================================
+#                        SITE
+# ============================================================
+NCSU_LOC="NCSU"
+JUNO_LOC="JUNO"
+CERES_LOC="CERES"
+# ============================================================
+#                    STORAGE DOMAIN
+# ============================================================
+SCREB="screberg"
+DASH="dash_agir"
+NPIR="national_plant_image_repository"
+# ============================================================
+#                         NAMESPACE
+# ============================================================
+NCSU_LI="longterm_images"
+NCSU_LI2="longterm_images2"
+NCSU_LI3="GROW_DATA"
+SCINET_90D="90daydata"
+SCINET_PROJ="project"
+SCINET_JUNO_PROJ="LTS"
+# ============================================================
+#                        DATA STATES
+# ============================================================
+DATA_STATE_UP="semifield-upload"
+DATA_STATE_DEV="semifield-developed-images"
+DATA_STATE_CUT="semifield-cutouts"
 # ============================================================
 #                   CONFIGURATION
 # ============================================================
-
-# Globus endpoints to index
-# Format: "endpoint_id|location|root_path|lts_root|data_state"
-# Includes: CERES (90-day + LTS), JUNO (LTS), NCSU (various LTS)
+# Format: endpoint_id | site| storage_domain | namespace | storage_root| data_state
 ENDPOINTS=(
-    "${CERES_EP}|CERES|/project/${CERES_ROOT}/semifield-upload|${CERES_ROOT}|${UPLOAD_ds}"
-    "${CERES_EP}|CERES|/project/${CERES_ROOT}/semifield-developed-images|${CERES_ROOT}|${DEVELOPED_ds}"
-    "${CERES_EP}|CERES|/project/${CERES_ROOT}/semifield-cutouts|${CERES_ROOT}|${CUTOUT_ds}"
+"${NCSU_EP}|${NCSU_LOC}|${SCREB}|${NCSU_LI}|${NCSU_NFS_LI_SROOT}|${DATA_STATE_UP}"
+"${NCSU_EP}|${NCSU_LOC}|${SCREB}|${NCSU_LI}|${NCSU_NFS_LI_SROOT}|${DATA_STATE_DEV}"
+"${NCSU_EP}|${NCSU_LOC}|${SCREB}|${NCSU_LI}|${NCSU_NFS_LI_SROOT}|${DATA_STATE_CUT}"
 
-    "${CERES_EP}|CERES|/90daydata/${CERES_ROOT}/semifield-upload|${CERES_ROOT}|${UPLOAD_ds}"
-    "${CERES_EP}|CERES|/90daydata/${CERES_ROOT}/semifield-developed-images|${CERES_ROOT}|${DEVELOPED_ds}"
-    "${CERES_EP}|CERES|/90daydata/${CERES_ROOT}/semifield-cutouts|${CERES_ROOT}|${CUTOUT_ds}"
+"${NCSU_EP}|${NCSU_LOC}|${SCREB}|${NCSU_LI2}|${NCSU_NFS_LI2_SROOT}|${DATA_STATE_UP}"
+"${NCSU_EP}|${NCSU_LOC}|${SCREB}|${NCSU_LI2}|${NCSU_NFS_LI2_SROOT}|${DATA_STATE_DEV}"
+"${NCSU_EP}|${NCSU_LOC}|${SCREB}|${NCSU_LI2}|${NCSU_NFS_LI2_SROOT}|${DATA_STATE_CUT}"
 
-    "${JUNO_EP}|JUNO|/LTS/project/${JUNO_ROOT}/semifield-upload|${JUNO_ROOT}|${UPLOAD_ds}"
-    "${JUNO_EP}|JUNO|/LTS/project/${JUNO_ROOT}/semifield-developed-images|${JUNO_ROOT}|${DEVELOPED_ds}"
-    "${JUNO_EP}|JUNO|/LTS/project/${JUNO_ROOT}/semifield-cutouts|${JUNO_ROOT}|${CUTOUT_ds}"
+"${NCSU_EP}|${NCSU_LOC}|${SCREB}|${NCSU_LI3}|${NCSU_NFS_GD_SROOT}|${DATA_STATE_UP}"
+"${NCSU_EP}|${NCSU_LOC}|${SCREB}|${NCSU_LI3}|${NCSU_NFS_GD_SROOT}|${DATA_STATE_DEV}"
+"${NCSU_EP}|${NCSU_LOC}|${SCREB}|${NCSU_LI3}|${NCSU_NFS_GD_SROOT}|${DATA_STATE_CUT}"
 
-    "${JUNO_EP}|JUNO|/LTS/project/national_plant_image_repository/semifield-upload|${JUNO_NPIR_ROOT}|${UPLOAD_ds}"
-    "${JUNO_EP}|JUNO|/LTS/project/national_plant_image_repository/semifield-developed-images|${JUNO_NPIR_ROOT}|${DEVELOPED_ds}" 
-    "${JUNO_EP}|JUNO|/LTS/project/national_plant_image_repository/semifield-cutouts|${JUNO_NPIR_ROOT}|${CUTOUT_ds}" 
+"${JUNO_EP}|${JUNO_LOC}|${DASH}|${SCINET_JUNO_PROJ}|${JUNO_LTS_DASH_SROOT}|${DATA_STATE_UP}"
+"${JUNO_EP}|${JUNO_LOC}|${DASH}|${SCINET_JUNO_PROJ}|${JUNO_LTS_DASH_SROOT}|${DATA_STATE_DEV}"
+"${JUNO_EP}|${JUNO_LOC}|${DASH}|${SCINET_JUNO_PROJ}|${JUNO_LTS_DASH_SROOT}|${DATA_STATE_CUT}"
+
+"${JUNO_EP}|${JUNO_LOC}|${NPIR}|${SCINET_JUNO_PROJ}|${JUNO_LTS_NPIR_SROOT}|${DATA_STATE_UP}"
+"${JUNO_EP}|${JUNO_LOC}|${NPIR}|${SCINET_JUNO_PROJ}|${JUNO_LTS_NPIR_SROOT}|${DATA_STATE_DEV}"
+"${JUNO_EP}|${JUNO_LOC}|${NPIR}|${SCINET_JUNO_PROJ}|${JUNO_LTS_NPIR_SROOT}|${DATA_STATE_CUT}"
     
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_1}/semifield-upload|${NCSU_ROOT_1}|${UPLOAD_ds}"
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_2}/semifield-upload|${NCSU_ROOT_2}|${UPLOAD_ds}"
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_3}/semifield-upload|${NCSU_ROOT_3}|${UPLOAD_ds}"
+"${CERES_EP}|${CERES_LOC}|${DASH}|${SCINET_90D}|${CERES_90D_DASH_SROOT}|${DATA_STATE_UP}"
+"${CERES_EP}|${CERES_LOC}|${DASH}|${SCINET_90D}|${CERES_90D_DASH_SROOT}|${DATA_STATE_DEV}"
+"${CERES_EP}|${CERES_LOC}|${DASH}|${SCINET_90D}|${CERES_90D_DASH_SROOT}|${DATA_STATE_CUT}"
 
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_1}/semifield-developed-images|${NCSU_ROOT_1}|${DEVELOPED_ds}"
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_2}/semifield-developed-images|${NCSU_ROOT_2}|${DEVELOPED_ds}"
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_3}/semifield-developed-images|${NCSU_ROOT_3}|${DEVELOPED_ds}"
+"${CERES_EP}|${CERES_LOC}|${DASH}|${SCINET_PROJ}|${CERES_PROJECT_DASH_SROOT}|${DATA_STATE_UP}"
+"${CERES_EP}|${CERES_LOC}|${DASH}|${SCINET_PROJ}|${CERES_PROJECT_DASH_SROOT}|${DATA_STATE_DEV}"
+"${CERES_EP}|${CERES_LOC}|${DASH}|${SCINET_PROJ}|${CERES_PROJECT_DASH_SROOT}|${DATA_STATE_CUT}"
 
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_1}/semifield-cutouts|${NCSU_ROOT_1}|${CUTOUT_ds}"
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_2}/semifield-cutouts|${NCSU_ROOT_2}|${CUTOUT_ds}"
-    "${NCSU_EP}|NCSU|${NCSU_BASE}/${NCSU_ROOT_3}/semifield-cutouts|${NCSU_ROOT_3}|${CUTOUT_ds}"
+"${CERES_EP}|${CERES_LOC}|${NPIR}|${SCINET_90D}|${CERES_90D_NPIR_SROOT}|${DATA_STATE_UP}"
+"${CERES_EP}|${CERES_LOC}|${NPIR}|${SCINET_90D}|${CERES_90D_NPIR_SROOT}|${DATA_STATE_DEV}"
+"${CERES_EP}|${CERES_LOC}|${NPIR}|${SCINET_90D}|${CERES_90D_NPIR_SROOT}|${DATA_STATE_CUT}"
+
+"${CERES_EP}|${CERES_LOC}|${NPIR}|${SCINET_PROJ}|${CERES_PROJECT_NPIR_SROOT}|${DATA_STATE_UP}"
+"${CERES_EP}|${CERES_LOC}|${NPIR}|${SCINET_PROJ}|${CERES_PROJECT_NPIR_SROOT}|${DATA_STATE_DEV}"
+"${CERES_EP}|${CERES_LOC}|${NPIR}|${SCINET_PROJ}|${CERES_PROJECT_NPIR_SROOT}|${DATA_STATE_CUT}"
 )
 
-# Script settings
+# ============================================================
+#                       SETUP
+# ============================================================
+# Paths
 REPO_DIR="/project/dash_agir/matthew.kutugata/repos/agir-db"
 PYTHON_SCRIPT="${REPO_DIR}/scripts/globus_index.py"
-SCHEMA="${REPO_DIR}/sql/schemas/02_source/source.globus_file_index.sql"
-
-# check of pyhton script exists
-if [ ! -f "${PYTHON_SCRIPT}" ]; then
-    echo "[ERROR] Python script not found: ${PYTHON_SCRIPT}"
+SCHEMA="${REPO_DIR}/sql/schemas/source.globus_file_index.sql"
+MAX_WORKERS=12
+BATCH_SIZE=5000
+# ============================================================
+#                       PATH CHECKS
+# ============================================================
+# check that the python script exists
+if [ ! -f "${PYTHON_SCRIPT}" ] || [ ! -f "${SCHEMA}" ]; then
+    echo "[ERROR] Required file(s) not found:" | tee -a "${MAIN_LOG}"
+    [ ! -f "${PYTHON_SCRIPT}" ] && echo "  - Python script: ${PYTHON_SCRIPT}" | tee -a "${MAIN_LOG}"
+    [ ! -f "${SCHEMA}" ] && echo "  - Schema file: ${SCHEMA}" | tee -a "${MAIN_LOG}"
     exit 1
 fi
-
-LOG_DIR="/project/dash_agir/logs/weekly_globus"
-MAX_WORKERS=8
-BATCH_SIZE=5000
-
-# Update behavior: set to "--update-existing" to update modified files,
-# or leave empty to only insert new files
-
 # ============================================================
-#                    SETUP
+#                        INTRO
 # ============================================================
-
-mkdir -p "${LOG_DIR}"
-
-# Log with timestamp
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-MAIN_LOG="${LOG_DIR}/weekly_run_${TIMESTAMP}.log"
-
 echo "========================================" | tee -a "${MAIN_LOG}"
 echo "Weekly Globus Indexing Started" | tee -a "${MAIN_LOG}"
 echo "Timestamp: $(date)" | tee -a "${MAIN_LOG}"
@@ -129,17 +194,17 @@ echo "" | tee -a "${MAIN_LOG}"
 # ============================================================
 #                    INDEX EACH ENDPOINT
 # ============================================================
-
+# Format: "endpoint_id | site | storage_domain | namespace | storage_root | data_state "
 TOTAL_SUCCESS=0
 TOTAL_FAILED=0
 
 for endpoint_config in "${ENDPOINTS[@]}"; do
-    IFS='|' read -r endpoint location root lts_root state <<< "$endpoint_config"
+    IFS='|' read -r endpoint site storage_domain namespace storage_root state <<< "$endpoint_config"
     
-    echo "Processing: $location / $state / $root" | tee -a "${MAIN_LOG}"
+    echo "Processing: $site / $state / $storage_root" | tee -a "${MAIN_LOG}"
     
     # Individual log for this endpoint
-    ENDPOINT_LOG="${LOG_DIR}/${location}_${state}_${TIMESTAMP}.log"
+    ENDPOINT_LOG="${LOG_DIR}/${site}_${state}_${TIMESTAMP}.log"
     
     # Run the indexer
     if python3 "${PYTHON_SCRIPT}" \
@@ -149,12 +214,14 @@ for endpoint_config in "${ENDPOINTS[@]}"; do
         --dbname "${PGDATABASE}" \
         --user "${PGUSER}" \
         --endpoint "${endpoint}" \
-        --location "${location}" \
-        --root "${root}" \
-        --lts-root "${lts_root}" \
+        --site "${site}" \
+        --storage-domain "${storage_domain}" \
+        --namespace "${namespace}" \
+        --storage-root "${storage_root}" \
         --state "${state}" \
         --batch-size "${BATCH_SIZE}" \
         --max-workers "${MAX_WORKERS}" \
+        --clean-slate \
         --log-file "${ENDPOINT_LOG}" 2>&1 | tee -a "${MAIN_LOG}"; then
         
         echo "✓ Success: $location / $state" | tee -a "${MAIN_LOG}"
@@ -183,5 +250,10 @@ echo "========================================" | tee -a "${MAIN_LOG}"
 
 # Clean up old logs (keep last 30 days)
 find "${LOG_DIR}" -name "*.log" -type f -mtime +30 -delete
+
+# ------------------ Resubmit for next week -----
+echo "[DAILY] Scheduling next run for day from now at the same time..."
+
+sbatch --begin=now+1days "$0"
 
 exit 0
