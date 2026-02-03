@@ -2,12 +2,112 @@
 name = "agir-pipeline"
 version = "0.1.0"
 description = "AgIR pipeline"
+license = { text = "MIT" }
 requires-python = ">=3.12"
+
+# Core deps: only what "agir_db" truly needs at runtime.
 dependencies = [
-  "psycopg2-binary",
-  "pyyaml",
+  "psycopg2-binary>=2.9.0",
+  "pyyaml>=6.0",
 ]
 
+[project.optional-dependencies]
+# -----------------------------
+# Developer tooling
+# -----------------------------
+dev = [
+  "pytest>=7.4.0",
+  "pytest-cov>=4.1.0",
+  "pytest-mock>=3.11.0",
+  "black>=23.7.0",
+  "isort>=5.12.0",
+  "flake8>=6.1.0",
+  "mypy>=1.5.0",
+  "ipython>=8.14.0",
+  "ipdb>=0.13.13",
+]
+
+# -----------------------------
+# CV / imaging + ML stack
+# -----------------------------
+cv = [
+  "numpy>=1.24.0",
+  "pidng>=4.0.9",
+  "pillow>=10.0.0",
+  "scikit-image>=0.21.0",
+  "opencv-python>=4.8.0",
+]
+
+ml = [
+  "torch>=2.0.0",
+  "torchvision>=0.15.0",
+  "ultralytics>=8.0.0",
+]
+
+# Everything (dev + docs + cv + ml + hpc)
+all = [
+  "pytest>=7.4.0",
+  "pytest-cov>=4.1.0",
+  "pytest-mock>=3.11.0",
+  "black>=23.7.0",
+  "isort>=5.12.0",
+  "flake8>=6.1.0",
+  "mypy>=1.5.0",
+  "ipython>=8.14.0",
+  "ipdb>=0.13.13",
+  "numpy>=1.24.0",
+  "pidng>=4.0.9",
+  "pillow>=10.0.0",
+  "scikit-image>=0.21.0",
+  "opencv-python>=4.8.0",
+  "torch>=2.0.0",
+  "torchvision>=0.15.0",
+  "ultralytics>=8.0.0",
+]
+
+# =============================================================================
+# BUILD SYSTEM
+# =============================================================================
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["agir_db"]
+
+[tool.setuptools.package-data]
+agir_db = ["py.typed"]
+
+# =============================================================================
+# CODE FORMATTING & LINTING
+# =============================================================================
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+    \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+  | squashfs-root
+  | RawTherapee_.*
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+skip_glob = ["*/RawTherapee_*", "*/squashfs-root/*"]
