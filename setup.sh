@@ -1,454 +1,228 @@
 #!/usr/bin/env bash
 #
 # AGIR Pipeline Setup Script (uv edition)
-# Automates common setup tasks for development and HPC environments
 #
 # Usage:
-#   ./setup.sh --dev          # Development setup (creates/reuses env; auto-detects HPC)
-#   ./setup.sh --all          # Full install (creates/reuses env; auto-detects HPC)
-#   ./setup.sh --hpc          # Force HPC/SciNet mode (HPC env + cache on /project)
-#   ./setup.sh --local        # Force local mode (repo-local env)
-#   ./setup.sh --schema-only  # Only apply database schemas
-#   ./setup.sh --test-only    # Only run verification tests
+#   ./setup.sh --dev | --all
+#   ./setup.sh --hpc --dev
+#   ./setup.sh --local --all
+#   ./setup.sh --schema-only
+#   ./setup.sh --test-only
 #
-# Recreate environment (non-interactive):
+# Recreate env (non-interactive):
 #   AGIR_RECREATE_ENV=1 ./setup.sh --dev
-#   AGIR_RECREATE_ENV=1 ./setup.sh --hpc
 #
-# Notes:
-# - Uses uv + pyproject.toml (no conda/mamba).
-# - Auto-detects HPC and adjusts venv + UV cache locations.
-# - On HPC, prefers /project/dash_agir/$USER for venv + UV_CACHE_DIR to avoid $HOME quotas.
-
 set -euo pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+# -----------------------------
+# Defaults
+# -----------------------------
+ENV_NAME="${ENV_NAME:-agir_pipeline}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
+AGIR_MODE="${AGIR_MODE:-auto}"            # auto|hpc|local
+AGIR_RECREATE_ENV="${AGIR_RECREATE_ENV:-0}"
 
-# Script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# -----------------------------
-# Global defaults
-# -----------------------------
-ENV_NAME="agir_pipeline"
-
-# uv binary install location (user-local, no sudo)
 UV_BIN_DIR="${HOME}/.local/bin"
 UV_BIN="${UV_BIN_DIR}/uv"
 
-# Local (repo-local) env
-LOCAL_VENV_PATH="${SCRIPT_DIR}/.venv"
-LOCAL_CACHE_DIR="${SCRIPT_DIR}/.uv-cache"
+LOCAL_ROOT="/home/${USER}"
+HPC_ROOT="/project/dash_agir/${USER}"
 
-# HPC (SciNet) env defaults (preferred)
-HPC_PROJECT_ROOT="/project/dash_agir/${USER}"
-HPC_VENV_ROOT="${HPC_PROJECT_ROOT}/software/uv/venvs"
-HPC_VENV_PATH="${HPC_VENV_ROOT}/${ENV_NAME}"
-HPC_CACHE_DIR="${HPC_PROJECT_ROOT}/uv-cache"
+LOCAL_VENV="${LOCAL_ROOT}/software/uv/venvs/${ENV_NAME}"
+HPC_VENV="${HPC_ROOT}/software/uv/venvs/${ENV_NAME}"
 
-# Non-interactive recreate toggle
-AGIR_RECREATE_ENV="${AGIR_RECREATE_ENV:-0}"
-
-# Mode override: auto | hpc | local
-AGIR_MODE="${AGIR_MODE:-auto}"
-
-# Desired Python version for venvs
-PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
-PYTHON_SPEC="python${PYTHON_VERSION}"
+LOCAL_CACHE="${LOCAL_ROOT}/uv-cache"
+HPC_CACHE="${HPC_ROOT}/uv-cache"
 
 # -----------------------------
-# Logging helpers
+# Logging
 # -----------------------------
-log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
+log()      { echo -e "${GREEN}[INFO]${NC} $*"; }
+warn()     { echo -e "${YELLOW}[WARN]${NC} $*"; }
+err()      { echo -e "${RED}[ERROR]${NC} $*"; }
+
+die() { err "$*"; exit 1; }
 
 # -----------------------------
-# HPC detection + configuration
+# Mode detection / config
 # -----------------------------
 detect_hpc() {
-    # Heuristics:
-    # - SCINet often provides /project
-    # - Your AGIR project root: /project/dash_agir
-    # - HPC has module command
-    # - Hostnames sometimes include ceres/atlas (not relied upon)
-    if [ -d "/project/dash_agir" ]; then
-        return 0
-    fi
-    if command -v module &>/dev/null && [ -d "/project" ]; then
-        return 0
-    fi
-    return 1
+  [[ -d "/project/dash_agir" ]] && return 0
+  command -v module &>/dev/null && [[ -d "/project" ]] && return 0
+  return 1
 }
 
 configure_mode() {
-    local mode="${1:-auto}"
+  case "${AGIR_MODE}" in
+    auto)
+      if detect_hpc; then AGIR_MODE="hpc"; else AGIR_MODE="local"; fi
+      ;;
+    hpc|local) ;;
+    *) die "Invalid AGIR_MODE=${AGIR_MODE} (expected auto|hpc|local)";;
+  esac
 
-    case "${mode}" in
-        auto)
-            if detect_hpc; then
-                AGIR_MODE="hpc"
-            else
-                AGIR_MODE="local"
-            fi
-            ;;
-        hpc|local)
-            AGIR_MODE="${mode}"
-            ;;
-        *)
-            log_error "Invalid AGIR_MODE: ${mode} (expected auto|hpc|local)"
-            return 1
-            ;;
-    esac
+  if [[ "${AGIR_MODE}" == "hpc" ]]; then
+    VENV_PATH="${HPC_VENV}"
+    CACHE_DIR="${HPC_CACHE}"
+  else
+    VENV_PATH="${LOCAL_VENV}"
+    CACHE_DIR="${LOCAL_CACHE}"
+  fi
 
-    if [ "${AGIR_MODE}" = "hpc" ]; then
-        VENV_PATH="${HPC_VENV_PATH}"
-        CACHE_DIR="${HPC_CACHE_DIR}"
-    else
-        VENV_PATH="${LOCAL_VENV_PATH}"
-        CACHE_DIR="${LOCAL_CACHE_DIR}"
-    fi
-
-    log_info "Mode: ${AGIR_MODE}"
-    log_info "Venv path: ${VENV_PATH}"
-    log_info "UV cache: ${CACHE_DIR}"
+  log "Mode: ${AGIR_MODE}"
+  log "Venv: ${VENV_PATH}"
+  log "UV cache: ${CACHE_DIR}"
 }
 
 # -----------------------------
-# Checks / utilities
+# uv / python / venv
 # -----------------------------
-ensure_python_for_uv() {
-    # On local machines, we want the venv to be 3.12 even if system python isn't.
-    # Prefer an existing python3.12, otherwise ask uv to install it.
-    if command -v "${PYTHON_SPEC}" >/dev/null 2>&1; then
-        log_info "Found ${PYTHON_SPEC} on PATH: $(command -v "${PYTHON_SPEC}")"
-        return 0
-    fi
-
-    # If uv can manage Python, install it.
-    log_warn "${PYTHON_SPEC} not found on PATH; attempting to install via uv..."
-    uv python install "${PYTHON_VERSION}" || {
-        log_error "Failed to install Python ${PYTHON_VERSION} via uv."
-        log_error "Options:"
-        log_error "  - Install python3.12 system-wide (brew/apt/pyenv), or"
-        log_error "  - Ensure uv can download Python (network access), then retry."
-        return 1
-    }
-
-    log_info "uv installed Python ${PYTHON_VERSION}"
-}
-
 ensure_uv() {
-    # Ensure uv exists; install user-local if missing.
-    if [ -x "${UV_BIN}" ]; then
-        export PATH="${UV_BIN_DIR}:${PATH}"
-        log_info "uv found: ${UV_BIN} ($( ${UV_BIN} --version 2>/dev/null || true ))"
-        return 0
-    fi
-
-    if command -v uv >/dev/null 2>&1; then
-        log_info "uv found on PATH: $(command -v uv) ($(uv --version))"
-        return 0
-    fi
-
-    log_warn "uv not found; installing to ${UV_BIN_DIR} (no sudo)..."
-    mkdir -p "${UV_BIN_DIR}"
-
-    if ! command -v curl >/dev/null 2>&1; then
-        log_error "curl not found; cannot install uv automatically."
-        log_error "Install uv manually or ensure curl is available."
-        return 1
-    fi
-
-    curl -LsSf https://astral.sh/uv/install.sh \
-      | env UV_INSTALL_DIR="${UV_BIN_DIR}" UV_NO_MODIFY_PATH=1 sh
-
-    if [ ! -x "${UV_BIN}" ]; then
-        log_error "uv installation did not produce ${UV_BIN}"
-        return 1
-    fi
-
+  if [[ -x "${UV_BIN}" ]]; then
     export PATH="${UV_BIN_DIR}:${PATH}"
-    log_info "uv installed: ${UV_BIN} ($(uv --version))"
+    return 0
+  fi
+  if command -v uv &>/dev/null; then
+    return 0
+  fi
+
+  command -v curl &>/dev/null || die "curl not found; cannot install uv automatically."
+  mkdir -p "${UV_BIN_DIR}"
+  log "Installing uv -> ${UV_BIN_DIR} (no sudo)"
+  curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="${UV_BIN_DIR}" UV_NO_MODIFY_PATH=1 sh
+  [[ -x "${UV_BIN}" ]] || die "uv install failed: ${UV_BIN} not found"
+  export PATH="${UV_BIN_DIR}:${PATH}"
 }
 
-set_uv_cache_dir() {
-    local cache_dir="${1:-}"
-    if [ -n "${cache_dir}" ]; then
-        mkdir -p "${cache_dir}"
-        export UV_CACHE_DIR="${cache_dir}"
-        log_info "UV_CACHE_DIR set: ${UV_CACHE_DIR}"
-    fi
+ensure_uv_python() {
+  # Prefer system python${PYTHON_VERSION}; otherwise let uv install it
+  if command -v "python${PYTHON_VERSION}" &>/dev/null; then
+    return 0
+  fi
+  warn "python${PYTHON_VERSION} not found; trying: uv python install ${PYTHON_VERSION}"
+  uv python install "${PYTHON_VERSION}" || die "Failed to install Python ${PYTHON_VERSION} via uv"
 }
 
+activate_or_create_venv() {
+  ensure_uv
+  ensure_uv_python
+
+  mkdir -p "${CACHE_DIR}"
+  export UV_CACHE_DIR="${CACHE_DIR}"
+
+  if [[ -d "${VENV_PATH}" && "${AGIR_RECREATE_ENV}" == "1" ]]; then
+    warn "AGIR_RECREATE_ENV=1 -> removing ${VENV_PATH}"
+    rm -rf "${VENV_PATH}"
+  fi
+
+  if [[ ! -d "${VENV_PATH}" ]]; then
+    log "Creating venv (Python ${PYTHON_VERSION}) -> ${VENV_PATH}"
+    uv venv --python "${PYTHON_VERSION}" "${VENV_PATH}" || die "uv venv failed"
+  else
+    log "Reusing existing venv -> ${VENV_PATH}"
+  fi
+
+  # shellcheck disable=SC1091
+  source "${VENV_PATH}/bin/activate"
+  python -c "import sys; assert sys.version_info >= (3,12), sys.version" \
+    || die "Venv python is not 3.12+ (got: $(python --version 2>&1))"
+}
+
+# -----------------------------
+# Install / verify
+# -----------------------------
+install_agir() {
+  local extras="${1:-}"  # "", "dev", "all"
+
+  cd "${SCRIPT_DIR}"
+
+  if [[ -n "${extras}" ]]; then
+    log "Installing editable: .[${extras}]"
+    uv pip install -e ".[${extras}]"
+  else
+    log "Installing editable: ."
+    uv pip install -e .
+  fi
+}
+
+verify_agir() {
+  python -c "from agir_db import AgirDB; print('✓ AgirDB import OK')" \
+    || die "Package import failed (agir_db)"
+}
+
+# -----------------------------
+# DB helpers
+# -----------------------------
 maybe_load_hpc_modules() {
-    # Only attempt module loads if in HPC mode.
-    if [ "${AGIR_MODE}" != "hpc" ]; then
-        return 0
-    fi
-
-    if ! command -v module &>/dev/null; then
-        log_warn "module command not found (HPC mode). Continuing without module loads."
-        return 0
-    fi
-
-    log_info "HPC mode: attempting module loads..."
-
-    # PostgreSQL client
-    module load postgresql || log_warn "Could not load postgresql module"
+  [[ "${AGIR_MODE}" == "hpc" ]] || return 0
+  command -v module &>/dev/null || return 0
+  module load postgresql || true
 }
 
-check_postgres() {
-    log_info "Checking PostgreSQL access..."
-
-    if [ -z "${PGHOST:-}" ]; then
-        log_info "PGHOST not set."
-
-        if [ "${AGIR_MODE}" = "hpc" ] && [ -f "/project/dash_agir/postgres/pg_coords.env" ]; then
-            log_info "HPC mode; sourcing pg_coords.env for PGHOST..."
-            # shellcheck disable=SC1091
-            source /project/dash_agir/postgres/pg_coords.env
-            if [ -n "${PGHOST:-}" ]; then
-                log_info "PGHOST set from pg_coords.env: ${PGHOST}"
-                # do not return 0 here; still need psql + connectivity
-            fi
-        else
-            log_warn "PGHOST must be set manually."
-        fi
-    fi
-
-    if ! command -v psql &>/dev/null; then
-        log_warn "psql not found."
-        if [ "${AGIR_MODE}" = "hpc" ]; then
-            log_info "Attempting to load PostgreSQL module..."
-            maybe_load_hpc_modules
-        fi
-    fi
-
-    if ! command -v psql &>/dev/null; then
-        log_warn "psql still not available. Install PostgreSQL client tools."
-        return 1
-    fi
-
-    if [ -z "${PGHOST:-}" ]; then
-        log_warn "PGHOST is still not set; skipping DB connect test."
-        return 1
-    fi
-
-    if psql -c "SELECT 1;" &>/dev/null; then
-        log_info "PostgreSQL connection OK"
-        return 0
-    else
-        log_warn "Cannot connect to PostgreSQL. Check connection settings."
-        return 1
-    fi
-}
-
-# -----------------------------
-# Environment setup (uv venv)
-# -----------------------------
-create_or_recreate_venv() {
-    local venv_path="$1"
-
-    ensure_uv
-
-    # For local mode, make sure uv has Python 3.12 available (even if system python is older)
-    if [ "${AGIR_MODE}" = "local" ]; then
-        ensure_python_for_uv
-        PYTHON_ARG="${PYTHON_VERSION}"
-    else
-        # On HPC you usually have python modules; still prefer 3.12 if available
-        ensure_python_for_uv
-        PYTHON_ARG="${PYTHON_VERSION}"
-        if ! command -v "${PYTHON_ARG}" >/dev/null 2>&1; then
-            # fallback to python3 if site provides it (but we'll still validate)
-            PYTHON_ARG="python3"
-        fi
-    fi
-
-    # If env exists, reuse unless forced recreate
-    if [ -d "${venv_path}" ]; then
-        log_info "venv already exists at: ${venv_path}"
-        if [ "${AGIR_RECREATE_ENV}" = "1" ]; then
-            log_warn "AGIR_RECREATE_ENV=1 set; recreating venv..."
-            rm -rf "${venv_path}"
-        fi
-    fi
-
-    if [ ! -d "${venv_path}" ]; then
-        log_info "Creating uv venv at: ${venv_path} (Python: ${PYTHON_ARG})"
-        uv venv --python "${PYTHON_ARG}" "${venv_path}" || {
-            log_error "Failed to create venv with uv"
-            return 1
-        }
-    fi
-
-    # Activate for the rest of the script
+source_pg_coords_if_present() {
+  if [[ "${AGIR_MODE}" == "hpc" && -f "/project/dash_agir/postgres/pg_coords.env" ]]; then
     # shellcheck disable=SC1091
-    source "${venv_path}/bin/activate"
-
-    log_info "Activated venv: ${venv_path}"
-    log_info "Python: $(which python)"
-    log_info "Python version: $(python --version 2>&1)"
-
-    # Hard assert the venv python is 3.12+
-    python -c "import sys; sys.exit(0 if sys.version_info >= (3,12) else 1)" || {
-        log_error "Venv Python is not 3.12+. Something went wrong."
-        return 1
-    }
+    source /project/dash_agir/postgres/pg_coords.env
+  elif [[ -f "${SCRIPT_DIR}/pg_coords.env" ]]; then
+    # shellcheck disable=SC1091
+    source "${SCRIPT_DIR}/pg_coords.env
+  " || true
+  fi
 }
 
+check_db() {
+  source_pg_coords_if_present
+  maybe_load_hpc_modules
 
-setup_env_auto() {
-    configure_mode "${AGIR_MODE}"
-    maybe_load_hpc_modules
-    set_uv_cache_dir "${CACHE_DIR}"
-    create_or_recreate_venv "${VENV_PATH}" "python3"
-
-    # Convenience: source pg_coords.env if present and in HPC mode
-    if [ "${AGIR_MODE}" = "hpc" ] && [ -f "/project/dash_agir/postgres/pg_coords.env" ]; then
-        log_info "HPC mode; sourcing pg_coords.env (if needed)..."
-        # shellcheck disable=SC1091
-        source /project/dash_agir/postgres/pg_coords.env
-    fi
+  command -v psql &>/dev/null || return 1
+  [[ -n "${PGHOST:-}" ]] || return 1
+  psql -c "SELECT 1;" &>/dev/null
 }
 
-setup_dev_env() {
-    log_info "Setting up development environment..."
-    local LOG_DIR="${HOME}/.agir/logs"
-    mkdir -p "${LOG_DIR}"
-    log_info "Created log directory: ${LOG_DIR}"
-}
-
-# -----------------------------
-# Install / verify (pyproject.toml)
-# -----------------------------
-is_agir_installed() {
-    python - <<'EOF'
-import importlib.util
-import sys
-spec = importlib.util.find_spec("agir_db")
-sys.exit(0 if spec is not None else 1)
-EOF
-}
-
-install_package() {
-    log_info "Installing agir-pipeline (uv)..."
-    cd "${SCRIPT_DIR}"
-
-    if is_agir_installed; then
-        log_info "agir-pipeline already importable in this environment"
-        log_info "Reinstalling to ensure dependencies and entry points are up to date"
-    else
-        log_info "agir-pipeline not detected; performing fresh install"
-    fi
-
-    if [ "${1:-}" = "--dev" ]; then
-        uv pip install -e ".[dev]"
-    elif [ "${1:-}" = "--all" ]; then
-        uv pip install -e ".[all]"
-    else
-        uv pip install -e .
-    fi
-
-    log_info "Installation step complete"
-}
-
-verify_installation() {
-    log_info "Verifying installation..."
-
-    if python -c "from agir_db import AgirDB; print('✓ AgirDB imported successfully')" 2>/dev/null; then
-        log_info "Package verification OK"
-        return 0
-    else
-        log_error "Package verification failed"
-        return 1
-    fi
-}
-
-# -----------------------------
-# DB schemas / tests
-# -----------------------------
 apply_schemas() {
-    log_info "Applying database schemas..."
+  local SCHEMA_DIR="${SCRIPT_DIR}/schemas"
+  [[ -d "${SCHEMA_DIR}" ]] || die "Missing schema dir: ${SCHEMA_DIR}"
 
-    if ! check_postgres; then
-        log_error "Cannot connect to database. Set PGHOST, PGPORT, PGDATABASE, PGUSER (or source pg_coords.env on HPC)."
-        exit 1
-    fi
+  check_db || die "DB not reachable. Set PG* env vars or source pg_coords.env; ensure psql exists."
 
-    local SCHEMA_DIR="${SCRIPT_DIR}/schemas"
-
-    log_info "Applying source schema..."
-    psql -f "${SCHEMA_DIR}/sql/source.globus_file_index.sql" || {
-        log_error "Failed to apply source schema"
-        exit 1
-    }
-
-    log_info "Applying logs schemas..."
-    psql -f "${SCHEMA_DIR}/sql/logs.transfer_requests.sql" || true
-
-    if [ -f "${SCHEMA_DIR}/sql/logs.transfer_runs.sql" ]; then
-        psql -f "${SCHEMA_DIR}/sql/logs.transfer_runs.sql" || true
-    fi
-
-    log_info "Applying report views..."
-    psql -f "${SCHEMA_DIR}/views/report.missing_on_juno.sql" || {
-        log_error "Failed to apply report views"
-        exit 1
-    }
-
-    log_info "Schema application complete"
+  log "Applying schemas..."
+  psql -f "${SCHEMA_DIR}/sql/source.globus_file_index.sql" || die "Failed: source schema"
+  psql -f "${SCHEMA_DIR}/sql/logs.transfer_requests.sql" || true
+  [[ -f "${SCHEMA_DIR}/sql/logs.transfer_runs.sql" ]] && psql -f "${SCHEMA_DIR}/sql/logs.transfer_runs.sql" || true
+  psql -f "${SCHEMA_DIR}/views/report.missing_on_juno.sql" || die "Failed: report views"
 }
 
 run_tests() {
-    log_info "Running verification tests..."
-    cd "${SCRIPT_DIR}"
-
-    if [ -f "tests/test_p1.py" ]; then
-        log_info "Running Phase 1 tests..."
-        python tests/test_p1.py || {
-            log_warn "Phase 1 tests failed"
-            return 1
-        }
-    fi
-
-    log_info "Tests complete"
+  cd "${SCRIPT_DIR}"
+  [[ -f "tests/test_p1.py" ]] || { warn "No tests/test_p1.py found; skipping"; return 0; }
+  log "Running tests/test_p1.py"
+  python tests/test_p1.py
 }
 
 # -----------------------------
-# CLI / help
+# CLI
 # -----------------------------
-print_usage() {
-    cat << EOF
-AGIR Pipeline Setup Script (uv)
-
-Usage:
-    $0 [OPTIONS]
+usage() {
+  cat <<EOF
+AGIR Pipeline Setup (uv)
 
 Options:
-    --dev           Dev install (auto-detects HPC vs local unless overridden)
-    --all           Full install (auto-detects HPC vs local unless overridden)
-    --hpc           Force HPC/SciNet mode (venv + UV cache under /project/dash_agir/\$USER)
-    --local         Force local mode (repo-local venv + cache)
-    --schema-only   Only apply database schemas (requires DB connectivity)
-    --test-only     Only run verification tests
-    --help          Show this help message
+  --dev            Install with dev extras
+  --all            Install with all extras
+  --hpc            Force HPC mode
+  --local          Force local mode
+  --schema-only    Apply DB schemas only (no venv/install)
+  --test-only      Run tests only (assumes env already active)
+  --help
 
-Environment recreation:
-    AGIR_RECREATE_ENV=1 $0 --dev
-    AGIR_RECREATE_ENV=1 $0 --hpc
-
-Mode override via env var:
-    AGIR_MODE=auto|hpc|local
-
-DB env vars:
-    PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD
-
+Env vars:
+  AGIR_MODE=auto|hpc|local
+  AGIR_RECREATE_ENV=1
+  PYTHON_VERSION=3.12
+  PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD
 EOF
 }
 
@@ -456,104 +230,83 @@ EOF
 # Main
 # -----------------------------
 main() {
-    echo "=========================================="
-    echo "AGIR Pipeline Setup (uv)"
-    echo "=========================================="
-    echo ""
+  local install_extras=""     # "", "dev", "all"
+  local do_install=1
+  local do_verify=1
+  local do_schemas=1
+  local do_tests=1
+  local schema_only=0
+  local test_only=0
 
-    case "${1:-}" in
-        --hpc)
-            AGIR_MODE="hpc"
-            setup_dev_env
-            setup_env_auto
-            install_package
-            verify_installation
-            if check_postgres; then
-                apply_schemas
-            else
-                log_warn "Database not running or not reachable."
-                log_warn "If on SciNet, start with: sbatch server/db_server.sh"
-            fi
-            ;;
-
-        --local)
-            AGIR_MODE="local"
-            setup_dev_env
-            setup_env_auto
-            install_package
-            verify_installation
-            if check_postgres; then
-                apply_schemas
-                run_tests
-            else
-                log_warn "Database not available. Skipping schema and tests."
-            fi
-            ;;
-
-        --dev)
-            log_info "Starting DEVELOPMENT setup..."
-            setup_dev_env
-            setup_env_auto
-            install_package --dev
-            verify_installation
-            if check_postgres; then
-                apply_schemas
-                run_tests
-            else
-                log_warn "Database not available. Skipping schema and tests."
-            fi
-            ;;
-
-        --all)
-            log_info "Starting FULL installation (all dependencies)..."
-            setup_dev_env
-            setup_env_auto
-            install_package --all
-            verify_installation
-            if check_postgres; then
-                apply_schemas
-                run_tests
-            else
-                log_warn "Database not available. Skipping schema and tests."
-            fi
-            ;;
-
-        --schema-only)
-            log_info "Applying database schemas only..."
-            # Do NOT set up env here; assume user has psql + env vars
-            apply_schemas
-            ;;
-
-        --test-only)
-            log_info "Running tests only..."
-            run_tests
-            ;;
-
-        --help)
-            print_usage
-            exit 0
-            ;;
-
-        *)
-            log_error "Invalid option: ${1:-none}"
-            echo ""
-            print_usage
-            exit 1
-            ;;
+  # Parse args (order-independent)
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dev)  install_extras="dev" ;;
+      --all)  install_extras="all" ;;
+      --hpc)  AGIR_MODE="hpc" ;;
+      --local) AGIR_MODE="local" ;;
+      --schema-only) schema_only=1; do_install=0; do_verify=0; do_tests=0 ;;
+      --test-only)   test_only=1; do_install=0; do_verify=0; do_schemas=0 ;;
+      --help) usage; exit 0 ;;
+      *) die "Unknown option: $1" ;;
     esac
+    shift
+  done
 
-    echo ""
-    echo "=========================================="
-    log_info "Setup complete!"
-    echo "=========================================="
-    echo ""
-    echo "Next steps:"
-    echo "  1. Activate your environment manually if needed:"
-    echo "     # Current mode (${AGIR_MODE}):"
-    echo "     source ${VENV_PATH}/bin/activate"
-    echo "  2. Test DB connection (if configured):"
-    echo "     python -c \"from agir_db import AgirDB; db=AgirDB(); db.connect(); print(db.is_connected)\""
-    echo ""
+  echo "=========================================="
+  echo "AGIR Pipeline Setup (uv)"
+  echo "=========================================="
+
+  configure_mode
+
+  if [[ "${schema_only}" == "1" ]]; then
+    apply_schemas
+    log "Done."
+    exit 0
+  fi
+
+  if [[ "${test_only}" == "1" ]]; then
+    run_tests
+    log "Done."
+    exit 0
+  fi
+
+  # Normal path
+  activate_or_create_venv
+
+  if [[ "${do_install}" == "1" ]]; then
+    install_agir "${install_extras}"
+  fi
+  if [[ "${do_verify}" == "1" ]]; then
+    verify_agir
+  fi
+
+  if [[ "${do_schemas}" == "1" ]]; then
+    if check_db; then
+      apply_schemas
+    else
+      warn "DB not reachable; skipping schema apply."
+      warn "If on SciNet: start DB with your sbatch workflow, then rerun --schema-only."
+    fi
+  fi
+
+  if [[ "${do_tests}" == "1" ]]; then
+    if check_db; then
+      run_tests || warn "Tests failed"
+    else
+      warn "DB not reachable; skipping tests."
+    fi
+  fi
+
+  echo ""
+  log "Setup complete!"
+  echo ""
+  echo "Sanity check:"
+  echo "python -c 'from agir_db import AgirDB; db=AgirDB(); db.connect(); print(db.is_connected)'"
+  echo ""
+  echo "Next:"
+  echo "  source ${VENV_PATH}/bin/activate"
+  
 }
 
 main "$@"
