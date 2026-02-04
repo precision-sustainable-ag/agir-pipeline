@@ -69,7 +69,7 @@ all = [
 # BUILD SYSTEM
 # =============================================================================
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -111,3 +111,4 @@ force_grid_wrap = 0
 use_parentheses = true
 ensure_newline_before_comments = true
 skip_glob = ["*/RawTherapee_*", "*/squashfs-root/*"]
+
