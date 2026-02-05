@@ -4,7 +4,7 @@ RAW -> DNG -> JPG processing pipeline.
 
 from pathlib import Path
 from typing import Iterable, List
-from raw_to_jpg import RawToDng, DngToJpg
+from .raw_to_jpg import RawToDng, DngToJpg
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import yaml
 import numpy as np
