@@ -39,7 +39,7 @@ def load_config(config_path: Path) -> dict:
 
 
 
-class RawImageProcessor:
+class Processor:
     """
     Image Processor to Communicate with the CLI and Conversion parts.
     """
