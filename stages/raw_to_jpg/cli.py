@@ -57,7 +57,7 @@ def main():
     processor = Processor(args.c)
 
     # Gather raw files
-    raw_files = args.i.glob("*.raw") + args.i.glob("*.RAW")
+    raw_files = args.i.glob("*.RAW")
     if not raw_files:
         print(f"No RAW files found in {args.i}")
         return
