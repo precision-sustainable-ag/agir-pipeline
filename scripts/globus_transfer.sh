@@ -17,6 +17,6 @@
 
 set -Euo pipefail
 
-python /project/dash_agir/matthew.kutugata/repos/agir-db/scripts/globus_transfer.py
+python /project/dash_agir/matthew.kutugata/repos/agir-pipeline/scripts/globus_transfer.py
 
 sbatch --begin=now+2days "$0"

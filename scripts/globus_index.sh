@@ -8,7 +8,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=globus_index
 #SBATCH --account=dash_agir
-#SBATCH --partition=compute          # adjust if needed
 #SBATCH --time=8:00:00
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=32G
@@ -17,7 +16,7 @@
 
 set -Euo pipefail
 
-sbatch /project/dash_agir/matthew.kutugata/repos/agir-db/server/db_server.sh
+sbatch /project/dash_agir/matthew.kutugata/repos/agir-pipeline/server/db_server.sh
 
 # wait 20 seconds for the DB server to start
 sleep 20
@@ -58,8 +57,7 @@ echo "[INFO] Weekly Globus Indexing Job started on $(hostname) at $(date)"
 module load postgresql
 echo "[INIT] Loading database connection parameters..."
 source /project/dash_agir/postgres/pg_coords.env
-module load miniconda
-source activate /project/dash_agir/matthew.kutugata/software/miniforge3/envs/semif_prep
+source /project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/activate
 echo "[INIT] Database connection parameters loaded."
 
 PSQL="psql -v ON_ERROR_STOP=1 -h $PGHOST -p $PGPORT -d $PGDATABASE -U $PGUSER"
@@ -167,9 +165,9 @@ ENDPOINTS=(
 #                       SETUP
 # ============================================================
 # Paths
-REPO_DIR="/project/dash_agir/matthew.kutugata/repos/agir-db"
+REPO_DIR="/project/dash_agir/matthew.kutugata/repos/agir-pipeline"
 PYTHON_SCRIPT="${REPO_DIR}/scripts/globus_index.py"
-SCHEMA="${REPO_DIR}/sql/schemas/source.globus_file_index.sql"
+SCHEMA="${REPO_DIR}/schemas/sql/source.globus_file_index.sql"
 MAX_WORKERS=12
 BATCH_SIZE=5000
 # ============================================================
