@@ -7,8 +7,7 @@ import argparse
 from pathlib import Path
 import sqlite3
 from datetime import datetime
-from processor import Processor
-
+from .processor import Processor
 
 LOG_DB_PATH = Path("logs.db")
 

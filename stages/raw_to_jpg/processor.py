@@ -1,90 +1,138 @@
-#!/usr/bin/env python3
 """
-CLI for RAW -> DNG -> JPG processing pipeline.
-Supports processing a single file or a directory of RAW images.
+RAW -> DNG -> JPG processing pipeline.
 """
 
-import argparse
 from pathlib import Path
-from processor import Processor
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Process RAW images to DNG and then to JPG using a camera config."
-    )
-    parser.add_argument(
-        "--c",
-        type=Path,
-        required=True,
-        help="Path to camera YAML configuration file."
-    )
-
-    # Mutually exclusive group for directory or single file
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
-        "--i",
-        type=Path,
-        help="Directory containing RAW images to process."
-    )
-    group.add_argument(
-        "--f",
-        type=Path,
-        help="Single RAW file to process."
-    )
-
-    parser.add_argument(
-        "--o",
-        type=Path,
-        required=True,
-        help="Directory where JPG images will be saved."
-    )
-    parser.add_argument(
-        "--t",
-        type=int,
-        default=0,
-        help="Number of parallel threads. Default 0 = sequential processing."
-    )
-    parser.add_argument(
-        "--fs",
-        action="store_true",
-        help="Stop processing on first failure."
-    )
-
-    args = parser.parse_args()
-
-    # Validate output directory
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-
-    # initialize processor
-    processor = Processor(args.c)
-
-    # gather raw files
-    if args.i:
-        if not args.i.exists():
-            raise FileNotFoundError(f"Input directory does not exist: {args.i}")
-        raw_files = sorted(args.i.glob("*.raw"))
-        if not raw_files:
-            print(f"No RAW files found in {args.i}")
-            return
-    else:
-        if not args.f.exists():
-            raise FileNotFoundError(f"RAW file does not exist: {args.f}")
-        raw_files = [args.f]
-
-    print(f"Processing {len(raw_files)} RAW files to {args.o} ...")
-
-    # Process batch
-    results = processor.process_batch(
-        raw_images=raw_files,
-        output_dir=args.o,
-        fail_stop=args.fs,
-        max_workers=args.t
-    )
-
-    print(f"Finished processing {len(results)} files.")
-    for f in results:
-        print(f" - {f}")
+from typing import Iterable, List
+from raw_to_jpg import RawToDng, DngToJpg
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import yaml
+import numpy as np
 
 
-if __name__ == "__main__":
-    main()
+def load_config(config_path: Path) -> dict:
+    """
+    Load camera configuration from YAML file.
+    
+    Args:
+        config_path: Path to YAML config file
+        
+    Returns:
+        dict with camera settings and color_matrix as numpy array
+    """
+    config_path = Path(config_path)
+    
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    
+    # Load color matrix if specified
+    if 'color_matrix' in config['paths']:
+        matrix_path = config_path.parent / config['paths']['color_matrix']
+        config['color_matrix'] = np.load(matrix_path, allow_pickle=True)
+
+    if 'svs_tags' in config['paths']:
+        tags_path = config_path.parent / config['paths']['svs_tags']
+        with open(tags_path) as f:
+            config['dng_tags'] = yaml.safe_load(f)
+    
+    return config
+
+
+
+class RawImageProcessor:
+    """
+    Image Processor to Communicate with the CLI and Conversion parts.
+    """
+
+    def __init__(
+        self,
+        config_path: Path,
+    ):
+        self.config = load_config(config_path)
+        self.raw_to_dng = RawToDng(self.config)
+        self.dng_to_jpg = DngToJpg(self.config)
+
+
+    def process_image(self, raw_path: Path, output_dir: Path) -> Path:
+        """
+        Process a single RAW image to JPG.
+        """
+        raw_path = Path(raw_path)
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+
+        dng_path = None
+        try:
+            # Raw to DNG conversion
+            dng_path = self.raw_to_dng.convert(raw_path)
+
+            # DNG to JPG conversion
+            jpg_path = output_dir / raw_path.with_suffix(".jpg").name
+            self.dng_to_jpg.develop(dng_path, jpg_path)
+        except Exception as e:
+            raise RuntimeError(f"Failed to convert DNG to JPG for {raw_path}: {e}")
+        finally:
+            # Clean up intermediate DNG file
+            if dng_path and dng_path.exists():
+                dng_path.unlink()
+                
+        return jpg_path
+
+    def process_batch(
+        self,
+        raw_images: Iterable[Path],
+        output_dir: Path,
+        fail_stop: bool = True,
+        max_workers: int = 0,
+    ) -> List[Path]:
+        """
+        Process multiple RAW images, optionally in parallel.
+
+        Args:
+            raw_images: iterable of RAW paths
+            output_dir: output directory for JPGs
+            fail_stop: stop on first failure if True
+            max_workers: number of parallel threads (default 0 = sequential)
+
+        Returns:
+            List of successfully generated JPG paths
+        """
+        results: List[Path] = []
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Sequential processing with no threading (default)
+        if max_workers <= 1:
+            for raw_path in raw_images:
+                try:
+                    jpg_path = self.process_image(raw_path, output_dir)
+                    results.append(jpg_path)
+                except Exception as e:
+                    print(f"Failed processing {raw_path}: {e}")
+                    if fail_stop:
+                        raise
+                    else:
+                        continue
+        else:
+            # Parallel processing using threads
+            futures = {}
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # threaded submission of tasks
+                for raw_path in raw_images:
+                    future = executor.submit(self.process_image, raw_path, output_dir)
+                    futures[future] = raw_path
+
+                # sequential running of results verification
+                for future in as_completed(futures):
+                    raw_path = futures[future]
+                    try:
+                        jpg_path = future.result()
+                        results.append(jpg_path)
+                    except Exception as e:
+                        print(f"Failed processing {raw_path}: {e}")
+                        if fail_stop:
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            raise
+
+        return results
