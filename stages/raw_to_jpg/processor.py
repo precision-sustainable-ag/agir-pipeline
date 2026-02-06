@@ -68,8 +68,8 @@ class Processor:
             dng_path = self.raw_to_dng.convert(raw_path)
 
             # DNG to JPG conversion
+            self.dng_to_jpg.develop(dng_path, output_dir)
             jpg_path = output_dir / raw_path.with_suffix(".jpg").name
-            self.dng_to_jpg.develop(dng_path, jpg_path)
         except Exception as e:
             raise RuntimeError(f"Failed to convert DNG to JPG for {raw_path}: {e}")
         finally:
