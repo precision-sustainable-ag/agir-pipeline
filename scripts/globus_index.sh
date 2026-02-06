@@ -202,7 +202,9 @@ for endpoint_config in "${ENDPOINTS[@]}"; do
     echo "Processing: $site / $state / $storage_root" | tee -a "${MAIN_LOG}"
     
     # Individual log for this endpoint
-    ENDPOINT_LOG="${LOG_DIR}/${site}_${state}_${TIMESTAMP}.log"
+    ENDPOINT_LOG="${LOG_DIR}/${site}/${state}/${TIMESTAMP}.log"
+    # Make endpoint-specific log directory
+    mkdir -p "$(dirname "${ENDPOINT_LOG}")"
     
     # Run the indexer
     if python3 "${PYTHON_SCRIPT}" \
@@ -222,10 +224,10 @@ for endpoint_config in "${ENDPOINTS[@]}"; do
         --clean-slate \
         --log-file "${ENDPOINT_LOG}" 2>&1 | tee -a "${MAIN_LOG}"; then
         
-        echo "✓ Success: $location / $state" | tee -a "${MAIN_LOG}"
+        echo "✓ Success: $site / $state" | tee -a "${MAIN_LOG}"
         TOTAL_SUCCESS=$((TOTAL_SUCCESS + 1))
     else
-        echo "✗ Failed: $location / $state" | tee -a "${MAIN_LOG}"
+        echo "✗ Failed: $site / $state" | tee -a "${MAIN_LOG}"
         TOTAL_FAILED=$((TOTAL_FAILED + 1))
     fi
     
