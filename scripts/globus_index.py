@@ -443,7 +443,7 @@ def main() -> None:
     parser.add_argument("--user", required=True, help="PostgreSQL username.")
     parser.add_argument("--password", help="PostgreSQL password (optional, use .pgpass if not provided).")
     parser.add_argument("--endpoint", required=True, help="Globus endpoint ID.")
-    parser.add_argument("--site", required=True, choices=["JUNO", "NCSU", "CERES"], help="Physical site of the endpoint.")
+    parser.add_argument("--site", required=True, choices=["JUNO", "NCSU", "CERES", "ATLAS"], help="Physical site of the endpoint.")
     parser.add_argument("--storage-domain", required=True, choices=["screberg", "dash_agir", "national_plant_image_repository"], help="Logical storage domain tag.")
     parser.add_argument("--namespace", required=True, help="Logical namespace tag.")
     parser.add_argument("--storage-root", required=True, help="Logical storage root tag.")

@@ -9,8 +9,8 @@
 #SBATCH --job-name=globus_index
 #SBATCH --account=dash_agir
 #SBATCH --time=8:00:00
-#SBATCH --cpus-per-task=12
-#SBATCH --mem=32G
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=8G
 #SBATCH --output=/project/dash_agir/logs/weekly_globus/agir_%x_%j.out.log
 #SBATCH --error=/project/dash_agir/logs/weekly_globus/agir_%x_%j.err.log
 
@@ -76,6 +76,7 @@ psql -v ON_ERROR_STOP=1 -h $PGHOST -p $PGPORT -d $PGDATABASE -U $PGUSER -c "VACU
 # ============================================================
 JUNO_EP="904c2108-90cf-11e8-9672-0a6d4e044368"
 CERES_EP="f45a24f8-09ba-11ec-b342-1feaf93e3729"
+ATLAS_EP="c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
 NCSU_EP="2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
 # ============================================================
 #                     STORAGE ROOTS
@@ -92,12 +93,19 @@ CERES_90D_NPIR_SROOT="/90daydata/national_plant_image_repository"
 
 CERES_PROJECT_DASH_SROOT="/project/dash_agir"
 CERES_PROJECT_NPIR_SROOT="/project/national_plant_image_repository"
+
+ATLAS_90D_DASH_SROOT="/90daydata/dash_agir"
+ATLAS_90D_NPIR_SROOT="/90daydata/national_plant_image_repository"
+
+ATLAS_PROJECT_DASH_SROOT="/project/dash_agir"
+ATLAS_PROJECT_NPIR_SROOT="/project/national_plant_image_repository"
 # ============================================================
 #                        SITE
 # ============================================================
 NCSU_LOC="NCSU"
 JUNO_LOC="JUNO"
 CERES_LOC="CERES"
+ATLAS_LOC="ATLAS"
 # ============================================================
 #                    STORAGE DOMAIN
 # ============================================================
@@ -159,6 +167,22 @@ ENDPOINTS=(
 "${CERES_EP}|${CERES_LOC}|${NPIR}|${SCINET_PROJ}|${CERES_PROJECT_NPIR_SROOT}|${DATA_STATE_UP}"
 "${CERES_EP}|${CERES_LOC}|${NPIR}|${SCINET_PROJ}|${CERES_PROJECT_NPIR_SROOT}|${DATA_STATE_DEV}"
 "${CERES_EP}|${CERES_LOC}|${NPIR}|${SCINET_PROJ}|${CERES_PROJECT_NPIR_SROOT}|${DATA_STATE_CUT}"
+
+"${ATLAS_EP}|${ATLAS_LOC}|${DASH}|${SCINET_90D}|${ATLAS_90D_DASH_SROOT}|${DATA_STATE_UP}"
+"${ATLAS_EP}|${ATLAS_LOC}|${DASH}|${SCINET_90D}|${ATLAS_90D_DASH_SROOT}|${DATA_STATE_DEV}"
+"${ATLAS_EP}|${ATLAS_LOC}|${DASH}|${SCINET_90D}|${ATLAS_90D_DASH_SROOT}|${DATA_STATE_CUT}"
+
+"${ATLAS_EP}|${ATLAS_LOC}|${DASH}|${SCINET_PROJ}|${ATLAS_PROJECT_DASH_SROOT}|${DATA_STATE_UP}"
+"${ATLAS_EP}|${ATLAS_LOC}|${DASH}|${SCINET_PROJ}|${ATLAS_PROJECT_DASH_SROOT}|${DATA_STATE_DEV}"
+"${ATLAS_EP}|${ATLAS_LOC}|${DASH}|${SCINET_PROJ}|${ATLAS_PROJECT_DASH_SROOT}|${DATA_STATE_CUT}"
+
+"${ATLAS_EP}|${ATLAS_LOC}|${NPIR}|${SCINET_90D}|${ATLAS_90D_NPIR_SROOT}|${DATA_STATE_UP}"
+"${ATLAS_EP}|${ATLAS_LOC}|${NPIR}|${SCINET_90D}|${ATLAS_90D_NPIR_SROOT}|${DATA_STATE_DEV}"
+"${ATLAS_EP}|${ATLAS_LOC}|${NPIR}|${SCINET_90D}|${ATLAS_90D_NPIR_SROOT}|${DATA_STATE_CUT}"
+
+"${ATLAS_EP}|${ATLAS_LOC}|${NPIR}|${SCINET_PROJ}|${ATLAS_PROJECT_NPIR_SROOT}|${DATA_STATE_UP}"
+"${ATLAS_EP}|${ATLAS_LOC}|${NPIR}|${SCINET_PROJ}|${ATLAS_PROJECT_NPIR_SROOT}|${DATA_STATE_DEV}"
+"${ATLAS_EP}|${ATLAS_LOC}|${NPIR}|${SCINET_PROJ}|${ATLAS_PROJECT_NPIR_SROOT}|${DATA_STATE_CUT}"
 )
 
 # ============================================================
