@@ -2,12 +2,72 @@
 name = "agir-db"
 version = "1.2.0"
 description = "AgIR pipeline"
+license = { text = "MIT" }
 requires-python = ">=3.12"
+
+# Core deps: only what "agir_db" truly needs at runtime.
 dependencies = [
-  "psycopg2-binary",
-  "pyyaml",
+  "psycopg2-binary>=2.9.0",
+  "pyyaml>=6.0",
 ]
 
+[project.optional-dependencies]
+# -----------------------------
+# Developer tooling
+# -----------------------------
+dev = [
+  "pytest>=7.4.0",
+  "pytest-cov>=4.1.0",
+  "pytest-mock>=3.11.0",
+  "black>=23.7.0",
+  "isort>=5.12.0",
+  "flake8>=6.1.0",
+  "mypy>=1.5.0",
+  "ipython>=8.14.0",
+  "ipdb>=0.13.13",
+]
+
+# -----------------------------
+# CV / imaging + ML stack
+# -----------------------------
+cv = [
+  "numpy>=1.24.0",
+  "pidng>=4.0.9",
+  "pillow>=10.0.0",
+  "scikit-image>=0.21.0",
+  "opencv-python>=4.8.0",
+]
+
+ml = [
+  "torch>=2.0.0",
+  "torchvision>=0.15.0",
+  "ultralytics>=8.0.0",
+]
+
+# Everything (dev + docs + cv + ml + hpc)
+all = [
+  "pytest>=7.4.0",
+  "pytest-cov>=4.1.0",
+  "pytest-mock>=3.11.0",
+  "black>=23.7.0",
+  "isort>=5.12.0",
+  "flake8>=6.1.0",
+  "mypy>=1.5.0",
+  "ipython>=8.14.0",
+  "ipdb>=0.13.13",
+  "numpy>=1.24.0",
+  "pidng>=4.0.9",
+  "pillow>=10.0.0",
+  "scikit-image>=0.21.0",
+  "opencv-python>=4.8.0",
+  "torch>=2.0.0",
+  "torchvision>=0.15.0",
+  "ultralytics>=8.0.0",
+]
+
+# =============================================================================
+# BUILD SYSTEM
+# =============================================================================
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
