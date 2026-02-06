@@ -6,7 +6,7 @@ CLI for RAW -> DNG -> JPG processing pipeline with automatic batch logging.
 import argparse
 from pathlib import Path
 import sqlite3
-from datetime import datetime
+import datetime
 from .processor import Processor
 
 LOG_DB_PATH = Path("logs.db")
@@ -31,7 +31,7 @@ def log_batch_run(num_files: int, output_dir: Path, success: bool):
     c.execute("""
         INSERT INTO stage_runs (timestamp, num_files, output_dir, success)
         VALUES (?, ?, ?, ?)
-    """, (datetime.utcnow().isoformat(), num_files, str(output_dir), int(success)))
+    """, (datetime.datetime.now(datetime.UTC).isoformat(), num_files, str(output_dir), int(success)))
     conn.commit()
     conn.close()
 

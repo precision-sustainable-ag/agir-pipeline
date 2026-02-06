@@ -156,16 +156,22 @@ Command-line entry point for the raw_to_jpg stage.
 
 
 ## Sample Run Commands
-python3 -m stages.raw_to_jpg.cli   --c /home/btfarre2/checker/test.yaml   --i /mnt/research-projects/s/screberg/longterm_images2/semifield-upload/NC_2025-08-25/   --o ./processed_jpgsg   --t 8
+```sh
+python3 -m stages.raw_to_jpg.cli \
+  --c /home/btfarre2/checker/test.yaml \
+  --i /mnt/research-projects/s/screberg/longterm_images2/semifield-upload/NC_2025-08-25/ \
+  --o ./processed_jpgsg \
+  --t 8
+```
 
 
 # Sample config yaml
+```yaml
 paths:
  color_matrix: /home/btfarre2/checker/MD_calibration_matrix_optimized.npy
  pp3_profile: /home/btfarre2/checker/MD_shr661_raw16.pp3
  temp_dng_dir: /home/btfarre2/agir_dng
  rawtherapee_cli: /home/btfarre2/tools/squashfs-root/usr/bin/rawtherapee-cli
-
 
 
 dng_tags:
@@ -208,3 +214,4 @@ dng_tags:
 
  exif:
   TimeZoneOffset: -4
+```
