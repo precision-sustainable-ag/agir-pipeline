@@ -4,7 +4,7 @@
 
 The AgIR Orchestrator is the control-plane component responsible for coordinating
 batch-based image processing stages in the AgIR pipeline. It determines *what*
-work should run, *when* it should run, and *where* it should run, while ensuring
+work should run, claim that work, *when* it should run, and *where* it should run, while ensuring
 that execution is exclusive, auditable, resumable, and scalable across multiple
 compute environments.
 
@@ -40,28 +40,36 @@ The orchestrator explicitly does **not**:
 
 ## 4. High-Level Architecture
 
-```text
+
+```
 ┌──────────────────────────┐
 │       Orchestrator       │
 │   (Python control plane) │
-└──────────┬───────────────┘
-           │
-           ▼
-┌──────────────────────────┐
-│        agir-db API       │
-│ (readiness, leases,      │
-│  ingestion, provenance)  │
-└──────────┬───────────────┘
-           │
-           ▼
-┌──────────────────────────┐
-│        Stage CLIs        │
-│ (raw_to_jpg, det, seg)   │
-└──────────────────────────┘
+└───────┬─────────┬────────┘
+        │         │
+        ▼         ▼
+┌───────────────────┐   ┌───────────────────┐
+│    Stage Workers  │   │   Transfer Jobs   │
+│  (raw_to_jpg, ...)│   │ (Globus copy, ...)│
+└─────────┬─────────┘   └─────────┬─────────┘
+          │                       │
+          ▼                       ▼
+        (write reports/artifacts) (write transfer reports)
+                    \             /
+                     \           /
+                      ▼         ▼
+               ┌────────────────────┐
+               │      agir_db API   │
+               │ readiness + leases │
+               │ ingestion + state  │
+               └─────────┬──────────┘
+                         ▼
+                    ┌────────┐
+                    │Postgres│
+                    └────────┘
 ```
 
-The orchestrator communicates only with agir-db and stage executables.
-All authoritative pipeline state is maintained by agir-db.
+>[!NOTE]The orchestrator constructs and submits stage worker jobs and transfer jobs. agir_db is the only component that interprets reports and updates authoritative pipeline state in the postgres instance.
 
 ---
 
@@ -81,24 +89,61 @@ Sharding logic is resolved by agir-db and expressed via the run context.
 
 ## 6. Orchestrator Responsibilities
 
-### 6.1 Core Responsibilities
+The orchestrator answers three questions:
+
+### 6.1. What should run?
+
+* Query report.* readiness views
+* Respect dependencies and priorities
+* Skip completed or leased work
+
+---
+
+### 6.2 When should it run?
+
+* As soon as dependencies + transfers are complete
+* Loop every ~xx minutes
+* Resubmit itself before SLURM timeout
+
+---
+
+### 6.3 Where / how should it run?
+
+Choose execution backend:
+* Local (dev)
+* SLURM (production)
+
+Construct job specs:
+* CPUs, memory, time
+* Partition/account
+* Command + arguments
+* Submit jobs (sbatch or subprocess)
+
+### 6.4 Core Responsibilities
 
 - Query agir-db for eligible work (readiness/backlog)
-- Claim exclusive leases for work items
+- Claim exclusive leases for work items (batch_id, stage)
+- Decide where and how work runs (execution backend + resource profile)
+- Construct and submit execution jobs (e.g. SLURM sbatch, local subprocess)
+- Submit data transfer jobs when artifacts require promotion to LTS
+- Clean up stale or expired leases
+- Resubmit itself before reaching execution time limits
 - Launch stage executables with resolved run contexts
-- Monitor execution and capture runtime metadata
-- Validate presence of required output artifacts
-- Submit run bundles for ingestion
 - Apply retry and backoff policies
 - Emit structured logs and metrics
+- ~~Monitor execution and capture runtime metadata~~ The orchestrator does not track job state beyond submission.
+- ~~Validate presence of required output artifacts~~ Validation belongs in `agir_db` ingestion, not the control plane.
+- ~~Submit run bundles for ingestion~~ The orchestrator hands off paths/references; ingestion logic lives entirely in `agir_db`.
 
-### 6.2 Explicit Limitations
+### 6.5 Explicit Limitations
 
 The orchestrator must not:
 
-- Perform file transfers
+- Perform image processing or data transformation
+- Perform file transfers or storage cleanup
 - Validate scientific correctness of outputs
 - Inspect raw file inventories
+- Infer state from the filesystem
 - Mutate pipeline state tables directly
 
 ---
@@ -112,16 +157,19 @@ orchestrator/
 ├── core.py # Main control loop
 ├── polling.py # Readiness/backlog interface
 ├── leasing.py # Lease/claim management
-├── submission.py # Stage launch backends
-├── ingestion.py # Run bundle validation + submit
+├── submission.py # Stage launch backends (Slurm/local)
+├── transfers.py     # Submit transfer jobs
 ├── retry.py # Retry and backoff policy
 └── init.py # Public Orchestrator export
 ```
 
+>[!NOTE] There is intentionally **no ingestion or validation module** here.
+
 ---
 
 ## 8. Module Responsibilities
-
+>[!NOTE] Let's hold off on defining these yet. I want to make sure we really have the foundational concepts down first.
+<!--
 ### 8.1 `core.py`
 
 - Owns the main orchestration loop
@@ -194,13 +242,14 @@ Interface:
 
 Interface:
 - `decide(leased_work, execution_result|exception) -> RetryDecision`
-- `backoff_seconds(attempt)`
+- `backoff_seconds(attempt)` -->
 
 ---
 
 ## 9. Run Context Contract
 
-Each stage is launched with a resolved `run_context.json` containing:
+>[!NOTE] Again these are details that can come later
+<!-- Each stage is launched with a resolved `run_context.json` containing:
 
 - Identifiers: `lease_id`, `run_id`, `batch_id`, `stage`, `attempt`
 - Input paths or URIs
@@ -213,7 +262,7 @@ Stages must:
 - Read only from the run context
 - Write outputs only to specified locations
 - Produce `run_report.json` and `manifest.json`
-- Exit with standardized exit codes
+- Exit with standardized exit codes -->
 
 ---
 
@@ -221,15 +270,16 @@ Stages must:
 
 For each work item:
 
-1. Poll agir-db for candidates
-2. Atomically claim a lease
-3. Launch stage with run context
-4. Wait for completion
-5. Validate run outputs
-6. Submit run bundle for ingestion
-7. Release lease or apply retry policy
-
-All pipeline state transitions occur inside agir-db during ingestion.
+1. Orchestrator queries readiness views
+2. Orchestrator claims a lease
+3. Orchestrator submits a stage worker job
+4. Stage worker executes and writes reports
+5. `agir_db` ingests the stage run report updates pipeline state
+6. Orchestrator queries for completed stages requiring transfer
+7. Orchestrator constructs and submits transfer jobs (if needed)
+8. Transfer job executes and writes a transfer report
+9. `agir_db` ingests the transfer report and updates artifact locations
+10. Orchestrator resubmits itself and repeats until stopped or limited
 
 ---
 
@@ -274,9 +324,14 @@ Retry policy is configurable and enforced centrally.
 
 ## 13. Observability and Auditability
 
-- Structured logs include: `batch_id`, `stage`, `lease_id`, `run_id`, `attempt`
-- Metrics may include backlog size, throughput, failure rates, runtimes
-- Full execution history is preserved in agir-db
+* All authoritative state lives in DB
+* Structured logs include:
+
+  * `batch_id`
+  * `stage`
+  * `run_id`
+  * `lease_id`
+* Pipeline health is derived via `report.*` views
 
 ---
 
@@ -284,17 +339,17 @@ Retry policy is configurable and enforced centrally.
 
 ### 14.1 Prerequisites
 
-- agir-db API deployed and reachable
+<!-- - agir-db API deployed and reachable
 - Postgres cluster configured
 - Stage CLIs available on execution nodes
 - Scratch and output storage mounted
-- Slurm configured (if using Slurm backend)
+- Slurm configured (if using Slurm backend) -->
 
 ### 14.2 Startup
 
-- Configure orchestrator via versioned config
+<!-- - Configure orchestrator via versioned config
 - Assign unique `owner_id` per orchestrator instance
-- Start orchestrator as a long-running service or batch job
+- Start orchestrator as a long-running service or batch job -->
 
 ---
 
@@ -306,7 +361,9 @@ The orchestrator is considered functional when:
 - Crashes do not cause permanent job loss
 - Failed stages are retried or quarantined correctly
 - All runs are auditable via agir-db
+- Transfers occur automatically
 - No pipeline state is inferred from filesystem state
+- Full batches flow end-to-end without manual steps
 
 ---
 
@@ -322,7 +379,4 @@ The orchestrator is considered functional when:
 
 ## 17. Summary
 
-The AgIR Orchestrator is intentionally minimal: a reliable, auditable, and
-stateless control-plane process. By delegating authority to agir-db and enforcing
-strict stage contracts, it enables scalable and maintainable pipeline execution
-across environments without entangling execution logic, state, or data movement.
+The AgIR Orchestrator is intentionally minimal. It does not process data, move files, or infer meaning. It simply reacts to database state, submits work, and enforces exclusivity.
