@@ -226,8 +226,8 @@ dng_tags:
   CFARepeatPatternDim: [2,2]
   CFAPattern: [0, 1, 1, 2]
   RowsPerStrip: 9528
-  TileWidth: 0    # Set to 0 if unused
-  TileLength: 0    # Set to 0 if unused
+  TileWidth: 0
+  TileLength: 0
 
  camera:
   Make: SVS_VISTEK
@@ -248,7 +248,7 @@ dng_tags:
   BlackLevel: 368
   BlackLevel_12bit: 23
   WhiteLevel: 65535
-  AsShotNeutral: [1,1,1]     # Neutral default
+  AsShotNeutral: [1,1,1]
   BaselineExposure: [-150, 100]
   CalibrationIlluminant1: 21
   PreviewColorSpace: 2
