@@ -2,12 +2,24 @@
 RAW -> DNG -> JPG processing pipeline.
 """
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 from .raw_to_jpg import RawToDng, DngToJpg
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import yaml
 import numpy as np
+
+
+@dataclass
+class ImageResult:
+    """Result of processing a single image."""
+    image_id: str
+    status: str
+    jpg_path: Optional[Path] = None
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    retryable: bool = False
 
 
 def load_config(config_path: Path) -> dict:
@@ -85,7 +97,7 @@ class Processor:
         output_dir: Path,
         fail_stop: bool = True,
         max_workers: int = 0,
-    ) -> List[Path]:
+    ) -> List[ImageResult]:
         """
         Process multiple RAW images, optionally in parallel.
 
@@ -96,9 +108,9 @@ class Processor:
             max_workers: number of parallel threads (default 0 = sequential)
 
         Returns:
-            List of successfully generated JPG paths
+            List of ImageResult for each processed image
         """
-        results: List[Path] = []
+        results: List[ImageResult] = []
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -107,9 +119,20 @@ class Processor:
             for raw_path in raw_images:
                 try:
                     jpg_path = self.process_image(raw_path, output_dir)
-                    results.append(jpg_path)
+                    results.append(ImageResult(
+                        image_id=raw_path.stem,
+                        status="ok",
+                        jpg_path=jpg_path,
+                    ))
                 except Exception as e:
                     print(f"Failed processing {raw_path}: {e}")
+                    results.append(ImageResult(
+                        image_id=raw_path.stem,
+                        status="failed",
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                        retryable=True,
+                    ))
                     if fail_stop:
                         raise
                     else:
@@ -128,9 +151,20 @@ class Processor:
                     raw_path = futures[future]
                     try:
                         jpg_path = future.result()
-                        results.append(jpg_path)
+                        results.append(ImageResult(
+                            image_id=raw_path.stem,
+                            status="ok",
+                            jpg_path=jpg_path,
+                        ))
                     except Exception as e:
                         print(f"Failed processing {raw_path}: {e}")
+                        results.append(ImageResult(
+                            image_id=raw_path.stem,
+                            status="failed",
+                            error_type=type(e).__name__,
+                            error_message=str(e),
+                            retryable=True,
+                        ))
                         if fail_stop:
                             executor.shutdown(wait=False, cancel_futures=True)
                             raise
