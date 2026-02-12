@@ -128,6 +128,7 @@ Orchestrator polling loop (immediately after Q1 candidate selection)
 - `stage`
 - `expires_at`
 - `attempt`
+- `leased_by`
 
 **Rules**
 - Claim must be atomic (single call checks + writes)
@@ -146,13 +147,14 @@ FROM agir_db.claim_stage_lease(
   stage := :stage,
   orchestrator_id := :orchestrator_id,
   ttl_seconds := :ttl_seconds,
-  attempt := :attempt
+  attempt := :attempt,
+  leased_by := :leased_by
 );
 ```
 
-**Open questions (if any)**
+**Open questions/notes (if any)**
 - Should `attempt` always be managed server-side (recommended)?
-
+- Orchestrator provides the inputs for `agir_db` for writing to db
 ---
 
 ## Q3: Release lease
@@ -193,8 +195,9 @@ FROM agir_db.release_stage_lease(
 );
 ```
 
-**Open questions (if any)**
+**Open questions/notes (if any)**
 - Should non-owner release be hard-fail or soft no-op?
+- Orchestrator provides the inputs for `agir_db` for writing to db
 
 ---
 
@@ -217,6 +220,7 @@ Periodic orchestrator maintenance/cleanup step
 - `orchestrator_id`
 - `expires_at`
 - `attempt`
+- `leased_by`
 
 **Rules**
 - Stale lease = `state='active'` and `expires_at < as_of_ts`
@@ -227,7 +231,7 @@ Periodic orchestrator maintenance/cleanup step
 **Pseudo-query**
 
 ```sql
-SELECT lease_id, batch_id, stage, orchestrator_id, expires_at, attempt
+SELECT lease_id, batch_id, stage, orchestrator_id, expires_at, attempt, leased_by
 FROM report.stale_stage_leases
 WHERE expires_at < COALESCE(:as_of_ts, NOW())
 ORDER BY expires_at ASC
@@ -259,6 +263,8 @@ Transfer scheduling loop in orchestrator
 - `transfer_priority`
 - `transfer_profile_id`
 - `artifact_ref`
+- `src_tmp`
+- `dst_lts`
 
 **Rules**
 - Stage run status must be transfer-eligible (e.g., success/partial per policy)
@@ -269,7 +275,7 @@ Transfer scheduling loop in orchestrator
 **Pseudo-query**
 
 ```sql
-SELECT run_id, batch_id, stage, transfer_priority, transfer_profile_id, artifact_ref
+SELECT run_id, batch_id, stage, transfer_priority, transfer_profile_id, artifact_ref, src_tmp, dst_lts
 FROM report.runs_needing_transfer
 WHERE (:stages IS NULL OR stage = ANY(:stages))
   AND (:min_priority IS NULL OR transfer_priority >= :min_priority)
@@ -292,11 +298,14 @@ Stage launch path (after successful lease claim, before or immediately after sch
 
 **Inputs**
 - `lease_id`
+- `batch_id`
+- `stage`
 - `run_id`
 - `backend` (`local` or `slurm`)
 - `resource_profile_id` *(or explicit cpus/mem/time fields)*
 - `command_ref` *(or rendered command hash)*
 - `submitted_at` (optional; defaults server time)
+- `config_id`
 
 **Returns**
 - `accepted` (bool)
@@ -322,11 +331,15 @@ FROM agir_db.record_stage_submission(
   backend := :backend,
   resource_profile_id := :resource_profile_id,
   command_ref := :command_ref,
-  submitted_at := :submitted_at
+  submitted_at := :submitted_at,
+  config_id := config_id
 );
 ```
 
 *(Note: actual sbatch happens in orchestrator code; this call is just optional logging.)*
+
+**Open questions/notes (if any)**
+- submits call to stages
 
 ---
 
