@@ -6,61 +6,7 @@ This is not a SQL design doc. You can think of it as a query contracts where we 
 
 ---
 
-## Instructions
-
-You are writing query "contracts" by thinking of specific questions the orchestrator will ask:   
-**Question → Inputs → Returns → Rules → 5–10 line pseudo-query**
-
-1. One screen per query (≈ 20–25 lines max). If it’s longer, it’s too detailed
-2. Returns: 5–8 fields max. If you need more, you’re probably mixing responsibilities.
-3. No join logic. Put complexity behind a placeholder view or API call (e.g., report.ready_work).
-4. Rules > SQL. If it’s complicated, describe it as a rule bullet.
-5. Use placeholder names freely. Tables/views don’t have to exist yet.
-
-These may reference placeholder surfaces like:
-
-* `report.ready_work`
-* `report.runs_needing_transfer`
-* `ops.stage_leases`
-* `agir_db.*` API calls
-
-Those do not need to exist yet. But we'll know we need to implement them in the future.
-
----
-
-## Template (Copy for Every Query)
-
-````md
-## Q#: <Short name>
-
-**Question**  
-(One sentence)
-
-**Used by**  
-<Orchestrator loop / leasing / transfer scheduling / etc.>
-
-**Inputs**
-- ...
-
-**Returns**
-- ...
-
-**Rules**
-- ...
-
-**Pseudo-query**
-```sql
-<5–10 lines; may reference views or API calls that don’t exist yet>
-```
-
-**Open questions (if any)**
-- ...
-
-````
-
----
-
-## Worked Example (Q1 done correctly)
+# Query Questions
 
 ## Q1: Get ready work
 
@@ -81,30 +27,28 @@ Orchestrator polling loop
 - `priority`
 - `resource_profile_id` *(or cpus/mem/time)*
 - `config_id`
+- `staging_input_ref`  <-- path on `/90daydata`
 
 **Rules**
 - Stage enabled
-- Required inputs exist
+- Required inputs already exist on `/90daydata`
 - Dependencies satisfied **and transferred**
 - Not already completed successfully
 - Not currently leased
+- Retry policy allows execution
 
 **Pseudo-query**
+
 ```sql
-SELECT batch_id, stage, priority, resource_profile_id, config_id
+SELECT batch_id, stage, priority, resource_profile_id, config_id, staging_input_ref
 FROM report.ready_work
 WHERE (:stages IS NULL OR stage = ANY(:stages))
+  AND (:min_priority IS NULL OR priority >= :min_priority)
 ORDER BY priority DESC, batch_date ASC
 LIMIT :limit;
 ```
 
 ---
-
-<br>
-<br>
-
-# Queries You Must Fill In (Q2–Q6)
-These are a minimal first pass, not necessarily the final finished set. If you think of more or disagree with what I have, change and justify. 
 
 ## Q2: Claim lease (atomic)
 
@@ -119,7 +63,7 @@ Orchestrator polling loop (immediately after Q1 candidate selection)
 - `stage` (text)
 - `orchestrator_id` (text)
 - `ttl_seconds` (int)
-- ~~`attempt` (optional int override)~~ Removing this for now to simplify
+- `attempt`
 
 **Returns**
 - `claimed` (bool)
@@ -128,7 +72,7 @@ Orchestrator polling loop (immediately after Q1 candidate selection)
 - `stage`
 - `expires_at`
 - `attempt`
-- `leased_by`
+- `job_workdir_policy`(e.g., use_tmp=true, tmp_root=/tmp/agir)
 
 **Rules**
 - Claim must be atomic (single call checks + writes)
@@ -137,33 +81,27 @@ Orchestrator polling loop (immediately after Q1 candidate selection)
 - Expired lease may be reclaimed
 - `attempt` increments on successful claim/reclaim
 - If claim fails, return `claimed=false` and no lease side effects
+- Inputs are already in 90daydata (not just LTS)
 
 **Pseudo-query**
 
 ```sql
-SELECT claimed, lease_id, batch_id, stage, expires_at, attempt
+SELECT claimed, lease_id, batch_id, stage, expires_at, attempt, job_workdir_policy
 FROM agir_db.claim_stage_lease(
   batch_id := :batch_id,
   stage := :stage,
   orchestrator_id := :orchestrator_id,
   ttl_seconds := :ttl_seconds,
   attempt := :attempt,
-  leased_by := :leased_by
 );
 ```
 
-**Open questions/notes (if any)**
-- Should `attempt` always be managed server-side (recommended)?
-- Orchestrator provides the inputs for `agir_db` for writing to db
 ---
 
 ## Q3: Release lease
 
 **Question**  
 How does the orchestrator mark a lease as no longer active when work completes, fails, or is abandoned?
-
-**Used by**  
-Post-submission cleanup path and failure handling path
 
 **Inputs**
 - `lease_id`
@@ -182,8 +120,6 @@ Post-submission cleanup path and failure handling path
 - Release is idempotent (repeat call does not error)
 - Releasing an already expired lease is allowed for audit closure
 - `release_reason` is required and stored
-
-**Pseudo-query**
 
 ```sql
 SELECT released, lease_id, released_at, release_reason
@@ -246,10 +182,7 @@ LIMIT :limit;
 ## Q5: Get runs needing transfer
 
 **Question**  
-Which successful stage runs now require artifact transfer job submission?
-
-**Used by**  
-Transfer scheduling loop in orchestrator
+Which successful stage runs need artifact promotion from `/90daydata` to LTS?
 
 **Inputs**
 - `limit` (int)
@@ -262,21 +195,19 @@ Transfer scheduling loop in orchestrator
 - `stage`
 - `transfer_priority`
 - `transfer_profile_id`
-- `artifact_ref`
-- `src_tmp`
-- `dst_lts`
+- `src_run_dir`
+- `dst_lts_ref`
 
 **Rules**
 - Stage run status must be transfer-eligible (e.g., success/partial per policy)
 - Transfer must not already be active/completed for this `run_id` + destination
 - Destination/promotion policy must be satisfied
 - Ordering should prioritize urgent transfers first
-
-**Pseudo-query**
+- Outputs exist in `/90daydata/.../stage_runs/<run_id>/`
 
 ```sql
-SELECT run_id, batch_id, stage, transfer_priority, transfer_profile_id, artifact_ref, src_tmp, dst_lts
-FROM report.runs_needing_transfer
+SELECT run_id, batch_id, stage, transfer_priority, transfer_profile_id, artifact_ref, src_run_dir, dst_lts_ref
+FROM report.runs_needing_promotion
 WHERE (:stages IS NULL OR stage = ANY(:stages))
   AND (:min_priority IS NULL OR transfer_priority >= :min_priority)
 ORDER BY transfer_priority DESC, completed_at ASC
@@ -359,6 +290,7 @@ Stage completion path (after job exits, before lease release and/or transfer sch
 - `ended_at` (optional; defaults server time)
 - `metrics_ref` (optional reference/hash)
 - `outputs_ref` (optional artifact reference)
+- `copied_out` (bool)
 
 **Returns**
 - `accepted` (bool)
@@ -395,12 +327,132 @@ FROM agir_db.finalize_stage_run(
 - Finalization should not release lease automatically. Let's keep this separate from Q3.
 - Should certain exit codes (e.g., config/data errors) auto-mark run as non-retryable?
 
-# Stage Lifecycle Summary
+---
 
-1. Q1 -> get ready work
-2. Q2 -> claim lease
-3. Q6 -> record submission
-4. (stage runs)
-5. Q7 -> finalize stage run
-6. Q3 -> release lease
-7. Q5 -> schedule transfer
+# Q8: Find batches needing input staging (LTS -> /90daydata)
+
+**Question**
+Which batches require input transfer from LTS to `/90daydata`?
+
+**Inputs**
+- `limit` (int, required)
+- `stages` (optional list[text])
+- `min_priority` (optional int)
+- `as_of_ts` (optional timestamptz; defaults now)
+
+**Returns**
+
+- `batch_id`
+- `stage`
+- `transfer_profile_id`
+- `src_lts_ref`
+- `dst_staging_ref`
+- `priority`
+
+**Rules**
+- Inputs exist in LTS
+- Inputs do NOT exist on /90daydata
+- No active transfer already in progress for (batch_id, stage)
+- Retry policy allows staging
+- Ordered by priority DESC, batch_date ASC
+
+```sql
+SELECT *
+FROM report.batches_needing_input_staging
+ORDER BY priority DESC, batch_date ASC
+LIMIT :limit;
+```
+
+---
+
+# Q9: Record input transfer request (LTS -> /90daydata)
+
+**Question**
+Can we atomically record (and dedupe) an input staging transfer request for a (batch_id, stage) from LTS to `/90daydata`?
+
+**Used by**
+Input staging loop (after selecting candidates from Q8)
+
+**Inputs**
+- `batch_id`
+- `stage`
+- `transfer_profile_id`
+- `src_lts_ref`
+- `dst_staging_ref`
+- `priortity`
+- `request_ts`
+
+**Returns**
+- `transfer_id`
+- `accepted`
+- `state`
+- `requested_at`
+
+**Rules**
+- Atomic: one call does “check + create” without races.
+- Idempotent: repeated calls for same effective request do not create duplicates.
+- Deduping: an existing active transfer request for the same (direction='input_stage', batch_id, stage, dst_staging_ref) prevents creating a new one.
+- Already completed behavior: if inputs are already staged (or transfer already marked completed), return state='already_completed' (still accepted=true).
+- No execution side effects: this is just recording/scheduling. Another component can perform the actual Globus transfer.
+
+```sql
+SELECT accepted, transfer_id, state, requested_at
+FROM agir_db.request_input_transfer(
+  batch_id := :batch_id,
+  stage := :stage,
+  transfer_profile_id := :transfer_profile_id,
+  src_lts_ref := :src_lts_ref,
+  dst_staging_ref := :dst_staging_ref,
+  requested_by := :requested_by,
+  priority := :priority,
+  dedupe_key := :dedupe_key,
+  request_ts := :request_ts
+);
+```
+
+---
+
+# Q10: Record promotion transfer request (/90daydata -> LTS)
+
+**Question**
+Record/schedule output promotion transfer.
+
+**Question**
+Can we atomically record (and dedupe) an output promotion transfer request for a completed run_id, moving artifacts from /90daydata to LTS?
+
+**Used by**
+Output promotion loop (after selecting candidates from Q5)
+
+**Inputs**
+- `run_id` (text, required)
+- `transfer_profile_id` (text, required)
+- `src_run_dir` (text, required)
+- `dst_lts_ref` (text, required)
+- `requested_by` (text, optional)
+- `priority` (int, optional)
+- `request_ts` (timestamptz, optional; default now)
+- `expected_manifest_ref` (text, optional)  
+
+**Returns**
+- `accepted` (bool)
+- `transfer_id` (text)
+- `state` (text)
+- `requested_at` (timestamptz)
+
+**Rules**
+- Atomic + idempotent.
+- No duplicates: only one active promotion transfer per (run_id, dst_lts_ref) (or per dedupe_key).
+- If a promotion transfer is already active -> return state='already_active'.
+- If promotion already completed (run outputs already in LTS per logs/processed pointers) -> return state='already_completed'.
+- Promotion requests are only valid if the run is in a terminal transfer-eligible state (usually success, optionally partial by policy).
+- This call records intent only; it does not perform the transfer.
+
+```sql
+SELECT *
+FROM agir_db.request_promotion_transfer(
+  run_id := :run_id,
+  transfer_profile_id := :transfer_profile_id,
+  src_run_dir := :src_run_dir,
+  dst_lts_ref := :dst_lts_ref
+);
+```
