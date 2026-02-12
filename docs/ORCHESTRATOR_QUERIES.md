@@ -119,7 +119,7 @@ Orchestrator polling loop (immediately after Q1 candidate selection)
 - `stage` (text)
 - `orchestrator_id` (text)
 - `ttl_seconds` (int)
-- `attempt` (optional int override)
+- ~~`attempt` (optional int override)~~ Removing this for now to simplify
 
 **Returns**
 - `claimed` (bool)
@@ -225,7 +225,7 @@ Periodic orchestrator maintenance/cleanup step
 **Rules**
 - Stale lease = `state='active'` and `expires_at < as_of_ts`
 - Return oldest expirations first
-- Read-only discovery query; mutation happens in separate claim/release calls
+- Read-only discovery query; mutation happens in separate claim/release calls via `agir_db`
 - Must be safe when multiple orchestrators run cleanup concurrently
 
 **Pseudo-query**
@@ -391,6 +391,16 @@ FROM agir_db.finalize_stage_run(
 ```
 
 **Open questions (if any)**
-- Should finalization implicitly release the lease (combine with Q3), or remain separate?
+- ~~Should finalization implicitly release the lease (combine with Q3), or remain separate?~~
+- Finalization should not release lease automatically. Let's keep this separate from Q3.
 - Should certain exit codes (e.g., config/data errors) auto-mark run as non-retryable?
 
+# Stage Lifecycle Summary
+
+1. Q1 -> get ready work
+2. Q2 -> claim lease
+3. Q6 -> record submission
+4. (stage runs)
+5. Q7 -> finalize stage run
+6. Q3 -> release lease
+7. Q5 -> schedule transfer
