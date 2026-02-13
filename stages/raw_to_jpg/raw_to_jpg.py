@@ -8,6 +8,7 @@ DNG to JPG developer using RawTherapee.
 Simple wrapper around RawTherapee CLI.
 """
 
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -16,6 +17,8 @@ from datetime import datetime, timezone
 
 import numpy as np
 from pidng.core import RAW2DNG, DNGTags, Tag
+
+logger = logging.getLogger(__name__)
 
 class RawToDng:
     """
@@ -188,8 +191,8 @@ class RawToDng:
         raw_path = Path(raw_path)
         output_path = Path(self.cfg['paths']['temp_dng_dir']) / raw_path.with_suffix('.dng').name
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-            
+        logger.debug("Converting RAW -> DNG: %s -> %s", raw_path.name, output_path.name)
+
         expected_size = (
             self.profile['image']['SVCamImageHeight'],
             self.profile['image']['SVCamImageWidth']
@@ -232,8 +235,7 @@ class DngToJpg:
         self.rt_cli = Path(cfg["paths"]["rawtherapee_cli"])
         self.pp3_profile = Path(cfg["paths"]["pp3_profile"]) if cfg["paths"].get("pp3_profile") else None
         self.validate_script = Path(cfg["paths"]["rawtherapee_validate_script"]) if cfg["paths"].get("rawtherapee_validate_script") else None
-        from pprint import pprint
-        pprint(cfg)
+        logger.debug("DngToJpg config: rt_cli=%s, pp3=%s", self.rt_cli, self.pp3_profile)
         if not self.validate_installation():
             self.install_rawtherapee()
         
@@ -254,7 +256,8 @@ class DngToJpg:
         
         if not dng_path.exists():
             raise FileNotFoundError(f"DNG not found: {dng_path}")
-        
+
+        logger.debug("Developing DNG -> JPG: %s -> %s", dng_path.name, jpg_path)
         try:
             # Build command
             cmd = [
@@ -304,8 +307,10 @@ class DngToJpg:
         """Use the script in ./scripts/validate_rawtherapee.sh to install and unpack RawTherapee if needed."""
         if not self.validate_script or not self.validate_script.exists():
             raise FileNotFoundError("Validation script not found.")
-        
+
+        logger.info("Installing RawTherapee via %s", self.validate_script)
         result = subprocess.run([str(self.validate_script)], capture_output=True, text=True)
-        
+
         if result.returncode != 0:
             raise RuntimeError(f"RawTherapee installation failed: {result.stderr}")
+        logger.info("RawTherapee installed successfully")

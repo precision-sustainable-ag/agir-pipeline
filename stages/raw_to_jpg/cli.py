@@ -6,11 +6,15 @@ Outputs run_report.json and manifest.json — no database interaction.
 """
 
 import argparse
+import logging
 from pathlib import Path
-from . import STAGE, STAGE_VERSION
+
+from . import STAGE, STAGE_VERSION, ERROR_CFG_VALIDATION_FAILED, ERROR_UNKNOWN
 from .processor import Processor
-from stages import EXIT_SUCCESS, EXIT_PARTIAL, EXIT_FAILURE, EXIT_CONFIG_ERROR
-from stages.common import RunReportBuilder, ManifestBuilder, parse_batch_id
+from stages import EXIT_SUCCESS, EXIT_PARTIAL, EXIT_FAILURE, EXIT_CONFIG_ERROR, ITEM_OK
+from stages.common import RunReportBuilder, ManifestBuilder, parse_batch_id, setup_logging
+
+logger = logging.getLogger(__name__)
 
 
 def main() -> int:
@@ -29,29 +33,14 @@ def main() -> int:
     # Resolve batch_id: explicit flag or inferred from input path
     batch_id = args.batch_id or parse_batch_id(str(args.i))
     if not batch_id:
-        print(f"Could not determine batch_id. Pass --batch-id or use a path containing XX_YYYY-MM-DD.")
+        logger.error("Could not determine batch_id. Pass --batch-id or use a path containing XX_YYYY-MM-DD.")
         return EXIT_CONFIG_ERROR
 
     # Validate directories
     if not args.i.exists():
-        print(f"Input directory does not exist: {args.i}")
+        logger.error("Input directory does not exist: %s", args.i)
         return EXIT_CONFIG_ERROR
     args.o.mkdir(parents=True, exist_ok=True)
-
-    # Initialize processor
-    try:
-        processor = Processor(args.c)
-    except Exception as e:
-        print(f"Failed to load config: {e}")
-        return EXIT_CONFIG_ERROR
-
-    # Gather raw files
-    raw_files = list(args.i.glob("*.RAW"))
-    if not raw_files:
-        print(f"No RAW files found in {args.i}")
-        return EXIT_CONFIG_ERROR
-
-    print(f"Processing {len(raw_files)} RAW files to {args.o} ...")
 
     # set up builders
     report = RunReportBuilder(
@@ -65,6 +54,39 @@ def main() -> int:
     run_dir = args.o / STAGE / run_id
     artifacts_dir = run_dir / "artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    # Set up logging into run folder
+    log_path = setup_logging(run_dir)
+    logger.info("Run %s started for batch %s", run_id, batch_id)
+
+    # Initialize processor
+    try:
+        processor = Processor(args.c)
+    except Exception as e:
+        logger.error("Failed to load config: %s", e)
+        report.set_stage_error(f"Config load failed: {e}")
+        report.add_error(
+            unit_id="__stage__",
+            code=ERROR_CFG_VALIDATION_FAILED,
+            error_type=type(e).__name__,
+            message=str(e),
+        )
+        report.stop(EXIT_CONFIG_ERROR)
+        report.set_pointers(logs_path=str(log_path))
+        report.write(run_dir / "run_report.json")
+        return EXIT_CONFIG_ERROR
+
+    # Gather raw files
+    raw_files = list(args.i.glob("*.RAW"))
+    if not raw_files:
+        logger.error("No RAW files found in %s", args.i)
+        report.set_stage_error(f"No RAW files found in {args.i}")
+        report.stop(EXIT_CONFIG_ERROR)
+        report.set_pointers(logs_path=str(log_path))
+        report.write(run_dir / "run_report.json")
+        return EXIT_CONFIG_ERROR
+
+    logger.info("Processing %d RAW files to %s", len(raw_files), artifacts_dir)
 
     manifest = ManifestBuilder(
         stage=STAGE,
@@ -89,7 +111,14 @@ def main() -> int:
             max_workers=args.t
         )
     except Exception as e:
-        print(f"Batch processing failed: {e}")
+        logger.error("Batch processing failed: %s", e)
+        report.set_stage_error(f"Batch processing failed: {e}")
+        report.add_error(
+            unit_id="__stage__",
+            code=ERROR_UNKNOWN,
+            error_type=type(e).__name__,
+            message=str(e),
+        )
         results = []
 
     # Populate manifest and report errors
@@ -97,7 +126,7 @@ def main() -> int:
     num_failed = 0
 
     for r in results:
-        if r.status == "ok":
+        if r.status == ITEM_OK:
             num_succeeded += 1
             jpg_rel = str(r.jpg_path.relative_to(artifacts_dir)) if r.jpg_path else None
             manifest.add_ok_item(
@@ -106,6 +135,7 @@ def main() -> int:
             )
         else:
             num_failed += 1
+            logger.error("Image %s failed: [%s] %s", r.image_id, r.error_code, r.error_message)
             manifest.add_failed_item(
                 image_id=r.image_id,
                 error_type=r.error_type,
@@ -114,13 +144,13 @@ def main() -> int:
             )
             report.add_error(
                 unit_id=r.image_id,
-                code="CONVERSION_FAILED",
+                code=r.error_code,
                 error_type=r.error_type,
                 message=r.error_message,
                 retryable=r.retryable,
             )
 
-    # Determine exit code 
+    # Determine exit code
     num_total = len(raw_files)
     if num_succeeded == num_total:
         exit_code = EXIT_SUCCESS
@@ -129,7 +159,7 @@ def main() -> int:
     else:
         exit_code = EXIT_FAILURE
 
-    print(f"Finished: {num_succeeded}/{num_total} files processed successfully.")
+    logger.info("Finished: %d/%d files processed successfully", num_succeeded, num_total)
 
     # Finalize report
     report.stop(exit_code)
@@ -145,13 +175,14 @@ def main() -> int:
         path=str(artifacts_dir),
         n_files=num_succeeded,
     )
+    report.set_pointers(logs_path=str(log_path))
 
-    # Write output json filess
+    # Write output json files
     report_path = report.write(run_dir / "run_report.json")
     manifest_path = manifest.write(run_dir / "manifest.json")
 
-    print(f"Report:   {report_path}")
-    print(f"Manifest: {manifest_path}")
+    logger.info("Report:   %s", report_path)
+    logger.info("Manifest: %s", manifest_path)
 
     return exit_code
 
