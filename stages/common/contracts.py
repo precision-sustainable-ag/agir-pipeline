@@ -19,6 +19,8 @@ import uuid
 import datetime
 from pathlib import Path
 
+from stages import EXIT_CODE_TO_STATUS
+
 
 class RunReportBuilder:
     """
@@ -116,8 +118,9 @@ class RunReportBuilder:
             ).total_seconds()
             * 1000
         )
-        # exit_code → status mapping (matches stages/__init__.py)
-        self._status = {0: "success", 1: "partial"}.get(exit_code, "failure")
+
+        # default to failure if the exit code is not valid
+        self._status = EXIT_CODE_TO_STATUS.get(exit_code, "failure")
         return self
 
     # Set Provenance (config, code, model, etc)

@@ -7,6 +7,7 @@ Outputs run_report.json and manifest.json — no database interaction.
 
 import argparse
 import logging
+import subprocess
 from pathlib import Path
 
 from . import STAGE, STAGE_VERSION, ERROR_CFG_VALIDATION_FAILED, ERROR_UNKNOWN
@@ -15,6 +16,22 @@ from stages import EXIT_SUCCESS, EXIT_PARTIAL, EXIT_FAILURE, EXIT_CONFIG_ERROR, 
 from stages.common import RunReportBuilder, ManifestBuilder, parse_batch_id, setup_logging
 
 logger = logging.getLogger(__name__)
+
+
+def get_git_commit() -> str:
+    """Get the current git commit hash."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).parent.parent.parent,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        return result.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        logger.warning("Could not determine git commit hash")
+        return None
 
 
 def main() -> int:
