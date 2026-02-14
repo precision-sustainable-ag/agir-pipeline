@@ -113,7 +113,10 @@ def main() -> int:
         batch_id=batch_id,
     )
 
-    report.set_provenance(config_path=args.c)
+    report.set_provenance(
+        config_path=args.c,
+        code_commit=get_git_commit()
+    )
     report.set_inputs(
         input_root=str(raw_files[0].parent) if raw_files else None,
         n_units_discovered=len(raw_files),
