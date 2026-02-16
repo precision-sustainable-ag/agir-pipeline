@@ -6,6 +6,7 @@ Outputs run_report.json and manifest.json — no database interaction.
 """
 
 import argparse
+import hashlib
 import logging
 import subprocess
 from pathlib import Path
@@ -16,6 +17,15 @@ from stages import EXIT_SUCCESS, EXIT_PARTIAL, EXIT_FAILURE, EXIT_CONFIG_ERROR, 
 from stages.common import RunReportBuilder, ManifestBuilder, parse_batch_id, setup_logging
 
 logger = logging.getLogger(__name__)
+
+
+def calculate_sha256(file_path: Path) -> str:
+    """Calculate SHA256 checksum of a file."""
+    sha256_hash = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for byte_block in iter(lambda: f.read(4096), b""):
+            sha256_hash.update(byte_block)
+    return "sha256:" + sha256_hash.hexdigest()
 
 
 def get_git_commit() -> str:
@@ -149,9 +159,19 @@ def main() -> int:
         if r.status == ITEM_OK:
             num_succeeded += 1
             jpg_rel = str(r.jpg_path.relative_to(artifacts_dir)) if r.jpg_path else None
+
+            # Calculate checksum and size for the JPG
+            checksum = {}
+            size_bytes = {}
+            if r.jpg_path and r.jpg_path.exists():
+                checksum = {"jpg_path": calculate_sha256(r.jpg_path)}
+                size_bytes = {"jpg_path": r.jpg_path.stat().st_size}
+
             manifest.add_ok_item(
                 image_id=r.image_id,
                 artifacts={"jpg_path": jpg_rel},
+                checksum=checksum,
+                size_bytes=size_bytes,
             )
         else:
             num_failed += 1
