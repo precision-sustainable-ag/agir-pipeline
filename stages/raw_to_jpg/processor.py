@@ -56,6 +56,80 @@ def _classify_error(exc: Exception) -> str:
     return ERROR_UNKNOWN
 
 
+def validate_config(config: dict, config_path: Path) -> None:
+    """
+    Validate camera configuration has all required fields.
+
+    Args:
+        config: Configuration dictionary
+        config_path: Path to config file (for relative path resolution)
+
+    Raises:
+        ValueError: If required fields are missing or invalid
+    """
+    # Check top-level required keys
+    if 'paths' not in config:
+        raise ValueError("Config missing required 'paths' section")
+
+    paths = config['paths']
+
+    # Required path fields
+    required_paths = [
+        'rawtherapee_cli',
+        'temp_dng_dir',
+        'color_matrix',
+        'svs_tags',
+    ]
+
+    for key in required_paths:
+        if key not in paths:
+            raise ValueError(f"Config missing required field: paths.{key}")
+        if not paths[key]:
+            raise ValueError(f"Config field paths.{key} cannot be empty")
+
+    # Optional path fields (but log if missing)
+    optional_paths = ['pp3_profile', 'rawtherapee_validate_script']
+    for key in optional_paths:
+        if key not in paths or not paths[key]:
+            logger.warning("Config field paths.%s is not specified", key)
+
+    # Validate files exist or can be created
+    config_dir = Path(config_path).parent
+
+    # Check color matrix file exists
+    color_matrix_path = config_dir / paths['color_matrix']
+    if not color_matrix_path.exists():
+        raise ValueError(f"Color matrix file not found: {color_matrix_path}")
+
+    # Check SVS tags file exists
+    svs_tags_path = config_dir / paths['svs_tags']
+    if not svs_tags_path.exists():
+        raise ValueError(f"SVS tags file not found: {svs_tags_path}")
+
+    # Check RawTherapee CLI exists
+    rt_cli_path = Path(paths['rawtherapee_cli'])
+    if not rt_cli_path.exists():
+        logger.warning("RawTherapee CLI not found at %s (will attempt auto-install)", rt_cli_path)
+
+    # Validate temp directory can be created
+    try:
+        temp_dir = Path(paths['temp_dng_dir'])
+        temp_dir.mkdir(parents=True, exist_ok=True)
+    except (OSError, PermissionError) as e:
+        raise ValueError(f"Cannot create temp directory {paths['temp_dng_dir']}: {e}")
+
+    # Check optional files if specified
+    if paths.get('pp3_profile'):
+        pp3_path = config_dir / paths['pp3_profile']
+        if not pp3_path.exists():
+            logger.warning("PP3 profile not found: %s", pp3_path)
+
+    if paths.get('rawtherapee_validate_script'):
+        script_path = Path(paths['rawtherapee_validate_script'])
+        if not script_path.exists():
+            logger.warning("RawTherapee validation script not found: %s", script_path)
+
+
 def load_config(config_path: Path) -> dict:
     """
     Load camera configuration from YAML file.
@@ -65,21 +139,45 @@ def load_config(config_path: Path) -> dict:
 
     Returns:
         dict with camera settings and color_matrix as numpy array
+
+    Raises:
+        ValueError: If config validation fails
+        FileNotFoundError: If config file not found
     """
     config_path = Path(config_path)
+
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
 
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
-    # Load color matrix if specified
-    if 'color_matrix' in config['paths']:
+    if config is None:
+        raise ValueError(f"Config file is empty or invalid: {config_path}")
+
+    # Validate config structure
+    validate_config(config, config_path)
+
+    # Load color matrix
+    try:
         matrix_path = config_path.parent / config['paths']['color_matrix']
         config['color_matrix'] = np.load(matrix_path, allow_pickle=True)
+        logger.debug("Loaded color matrix from %s", matrix_path)
+    except Exception as e:
+        raise ValueError(f"Failed to load color matrix from {matrix_path}: {e}")
 
-    if 'svs_tags' in config['paths']:
+    # Load SVS tags
+    try:
         tags_path = config_path.parent / config['paths']['svs_tags']
         with open(tags_path) as f:
             config['dng_tags'] = yaml.safe_load(f)
+
+        if config['dng_tags'] is None:
+            raise ValueError("SVS tags file is empty")
+
+        logger.debug("Loaded DNG tags from %s", tags_path)
+    except Exception as e:
+        raise ValueError(f"Failed to load SVS tags from {tags_path}: {e}")
 
     return config
 

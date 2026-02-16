@@ -268,10 +268,11 @@ class DngToJpg:
                 "-c", str(dng_path),
             ]
 
+            # Get threads per image from config
             threads_per_instance = self.cfg.get("processing", {}).get("threads_per_image", 1)
-            max_threads = 50  # Total number of threads to use
-            num_instances = 12  # Expected number of parallel threads
-            threads_per_instance = max(1, max_threads // num_instances) #
+            threads_per_instance = max(1, int(threads_per_instance))
+
+            # Prepare environment with OMP thread settings
             env = {
                 **os.environ,
                 "LANG": "en_US.UTF-8",
@@ -279,6 +280,7 @@ class DngToJpg:
                 "OMP_DYNAMIC": "TRUE",  # Allows OpenMP to optimize thread count
                 "OMP_NESTED": "FALSE"  # Disables nested parallelism
             }
+            logger.debug("RawTherapee thread config: OMP_NUM_THREADS=%d", threads_per_instance)
             
             # Run
             jpg_path.parent.mkdir(parents=True, exist_ok=True)

@@ -4,7 +4,7 @@ EXIT_PARTIAL = 1       # Some images failed
 EXIT_FAILURE = 2       # All images failed
 EXIT_CONFIG_ERROR = 3  # Setup/config error
 
-# Exit code to status string mapping (used in run reports)
+# Exit code to status string mapping for run reports
 EXIT_CODE_TO_STATUS = {
     EXIT_SUCCESS: "success",
     EXIT_PARTIAL: "partial",
