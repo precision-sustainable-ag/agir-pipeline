@@ -28,6 +28,24 @@ Converts proprietary RAW camera images to JPG through a two-step pipeline: RAW �
 
 ---
 
+## Error Codes
+
+Per-image error codes are recorded in `run_report.json` and `manifest.json` when processing fails. These are standardized across the stage.
+
+| Code | Meaning |
+|------|---------|
+| `RAW_READ_FAILED` | Failed to read or parse RAW file |
+| `CFG_VALIDATION_FAILED` | Configuration validation error |
+| `DNG_CONVERSION_FAILED` | RAW -> DNG conversion failed |
+| `JPG_DEVELOPMENT_FAILED` | DNG -> JPG development failed |
+| `RAWTHERAPEE_TIMEOUT` | RawTherapee exceeded 300s timeout |
+| `RAWTHERAPEE_NOT_FOUND` | RawTherapee CLI not available |
+| `FILE_NOT_FOUND` | Input or output file not found |
+| `INVALID_RAW_FORMAT` | RAW file format incompatible or corrupted |
+| `UNKNOWN` | Error that doesn't match any category |
+
+---
+
 ## `raw_to_jpg.py`
 
 ### Class: `RawToDng`
@@ -77,18 +95,22 @@ Develops DNG files to JPG format using RawTherapee CLI.
 - Validates RawTherapee installation
 
 **Method: `develop(self, dng_path: Path, jpg_path: Path, quality: int = 100) -> Path`**
-- Turns DNG to JPG
+- Converts DNG to JPG using RawTherapee CLI
 - Builds `rawtherapee-cli` command with:
   - `-O`: output path
   - `-p`: PP3 processing profile
-  - `-j{quality}`: JPEG quality (0-100)
-  - `-js3`: chroma subsampling
+  - `-j{quality}`: JPEG quality (0-100, default 100)
+  - `-js3`: chroma subsampling (3)
   - `-Y`: overwrite existing files
   - `-c`: input DNG file
-- Configures OpenMP threading environment variables:
-  - `OMP_NUM_THREADS`: limits threads per instance (calculated for 12 parallel instances)
-  - `OMP_DYNAMIC`: allows OpenMP to optimize thread usage
-  - `OMP_NESTED`: disables nested parallelism
+- **Threading configuration:**
+  - Reads `processing.threads_per_image` from config (default 1)
+  - Validates thread count is at least 1
+  - Configures OpenMP environment variables:
+    - `OMP_NUM_THREADS`: per-image thread limit from config
+    - `OMP_DYNAMIC=TRUE`: allows OpenMP to optimize thread count dynamically
+    - `OMP_NESTED=FALSE`: disables nested parallelism (recommended for RawTherapee)
+  - Logs the thread configuration for debugging
 - Runs rawtherapee-cli as subprocess with 300 second timeout
 - Returns Path to created JPG file
 
@@ -102,20 +124,50 @@ Develops DNG files to JPG format using RawTherapee CLI.
 
 ## `processor.py`
 
+### Function: `validate_config(config: dict, config_path: Path) -> None`
+
+Validates that camera configuration contains all required fields and that referenced files exist.
+
+**Required fields in `paths` section:**
+- `rawtherapee_cli` — path to RawTherapee CLI executable
+- `temp_dng_dir` — directory for DNG files (will be created if missing)
+- `color_matrix` — path to numpy color calibration matrix file
+- `svs_tags` — path to YAML file with DNG metadata tags
+
+**Optional fields:**
+- `pp3_profile` — RawTherapee processing profile
+- `rawtherapee_validate_script` — script for RawTherapee installationx`
+
+**Validation checks:**
+- All required path fields are present and non-empty
+- Color matrix file exists
+- SVS tags file exists
+- Temp directory can be created/written to
+- Optional files log warnings if specified but not found
+
+**Raises:**
+- `ValueError` if any required field is missing or invalid
+- `ValueError` if color matrix or SVS tags files don't exist
+- `ValueError` if temp directory cannot be created
+
+---
+
 ### Function: `load_config(config_path: Path) -> dict`
 
-Loads camera configuration from YAML file and associated resources.
+Loads and validates camera configuration from YAML file and associated resources.
 
-- Reads main config YAML with `yaml.safe_load()`
-- If `paths.color_matrix` exists:
-  - Finds color matrix from path
-  - Loads numpy array with `np.load(matrix_path, allow_pickle=True)`
-  - Stores in `config['color_matrix']`
-- If `paths.svs_tags` exists:
-  - Finds svg_tags from path
-  - Loads YAML with DNG metadata structure
-  - Stores in `config['dng_tags']`
-- Returns unified config dictionary containing paths, color matrix, and DNG tags
+**Flow:**
+1. Reads in config YAML
+2. Validates config structure with `validate_config()`
+3. If `paths.color_matrix` exists:
+   - Loads numpy array with `np.load(matrix_path, allow_pickle=True)`
+4. If `paths.svs_tags` exists:
+   - Loads YAML with DNG metadata structure
+5. Returns config dictionary containing paths, color matrix, and DNG tags
+
+**Raises:**
+- `FileNotFoundError` if config file not found
+- `ValueError` if config is empty/invalid or validation fails
 
 ---
 
@@ -181,6 +233,58 @@ Command-line entry point for the raw_to_jpg stage. Outputs `run_report.json` and
 
 ---
 
+## Manifest & Report Details
+
+### Manifest (`manifest.json`)
+
+For each successfully processed image, the manifest includes:
+
+```json
+{
+  "image_id": "MD_1764960482",
+  "status": "ok",
+  "artifacts": {
+    "jpg_path": "image1.jpg"
+  },
+  "checksum": {
+    "jpg_path": "sha256:a1b2c3d4..."
+  },
+  "size_bytes": {
+    "jpg_path": 2048576
+  }
+}
+```
+
+**Metrics:**
+- `checksum`: SHA256 hash of generated JPG
+- `size_bytes`: File size in bytes of generated JPG
+
+For failed images:
+```json
+{
+  "image_id": "MD_corrupted",
+  "status": "failed",
+  "error": {
+    "error_type": "ValueError",
+    "message": "RAW file dimensions mismatch",
+    "retryable": true
+  }
+}
+```
+
+### Run Report (`run_report.json`)
+
+High-level summary including:
+- **Timing:** `started_at`, `ended_at`, `duration_ms`
+- **Provenance:** `code_commit` (git hash), `config_path`, `config_hash` (SHA256)
+- **Inputs:** `input_root`, `n_units_discovered`
+- **Outputs:** `artifacts_dir`, counts (`n_units_succeeded`, `n_units_failed`, `n_units_skipped`)
+- **Errors:** List of errors with `unit_id`, `code`, `type`, `message`, `retryable`
+- **Logs:** Pointer to `logs_path`
+
+
+---
+
 ## Sample Run Command
 
 ```sh
@@ -209,11 +313,15 @@ python3 -m stages.raw_to_jpg.cli \
 
 ```yaml
 paths:
- color_matrix: /home/btfarre2/checker/MD_calibration_matrix_optimized.npy
- pp3_profile: /home/btfarre2/checker/MD_shr661_raw16.pp3
- temp_dng_dir: /home/btfarre2/agir_dng
- rawtherapee_cli: /home/btfarre2/tools/squashfs-root/usr/bin/rawtherapee-cli
+  color_matrix: /home/btfarre2/checker/MD_calibration_matrix_optimized.npy
+  svs_tags: /home/btfarre2/checker/MD_dng_tags.yaml
+  pp3_profile: /home/btfarre2/checker/MD_shr661_raw16.pp3
+  temp_dng_dir: /home/btfarre2/agir_dng
+  rawtherapee_cli: /home/btfarre2/tools/squashfs-root/usr/bin/rawtherapee-cli
+  rawtherapee_validate_script: ./scripts/validate_rawtherapee.sh
 
+processing:
+  threads_per_image: 4
 
 dng_tags:
  image:

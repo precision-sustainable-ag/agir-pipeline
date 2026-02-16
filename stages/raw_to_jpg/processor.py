@@ -18,6 +18,7 @@ from . import (
     ERROR_FILE_NOT_FOUND,
     ERROR_INVALID_RAW,
     ERROR_RT_TIMEOUT,
+    ERROR_RT_NOT_FOUND,
     ERROR_UNKNOWN,
 )
 from .raw_to_jpg import RawToDng, DngToJpg
@@ -40,11 +41,15 @@ class ImageResult:
 
 def _classify_error(exc: Exception) -> str:
     """Map an exception to a standardized error code."""
+    msg = str(exc).lower()
+
+    # Check for RawTherapee not found
+    if isinstance(exc, FileNotFoundError) and "rawtherapee" in msg:
+        return ERROR_RT_NOT_FOUND
     if isinstance(exc, FileNotFoundError):
         return ERROR_FILE_NOT_FOUND
     if isinstance(exc, ValueError):
         return ERROR_INVALID_RAW
-    msg = str(exc).lower()
     if "rawtherapee" in msg or "jpg" in msg:
         if "timeout" in msg or isinstance(exc, TimeoutError):
             return ERROR_RT_TIMEOUT
