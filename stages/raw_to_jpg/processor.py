@@ -98,30 +98,7 @@ def validate_config(config: dict, config_path: Path) -> None:
         if key not in paths or not paths[key]:
             logger.warning("Config field paths.%s is not specified", key)
 
-    # Validate files exist or can be created
-    config_dir = Path(config_path).parent
-
-    # Check color matrix file exists
-    color_matrix_path = config_dir / paths['color_matrix']
-    if not color_matrix_path.exists():
-        raise ValueError(f"Color matrix file not found: {color_matrix_path}")
-
-    # Check SVS tags file exists
-    svs_tags_path = config_dir / paths['svs_tags']
-    if not svs_tags_path.exists():
-        raise ValueError(f"SVS tags file not found: {svs_tags_path}")
-
-    # Check RawTherapee CLI exists
-    rt_cli_path = Path(paths['rawtherapee_cli'])
-    if not rt_cli_path.exists():
-        logger.warning("RawTherapee CLI not found at %s (will attempt auto-install)", rt_cli_path)
-
-    # Validate temp directory can be created
-    try:
-        temp_dir = Path(paths['temp_dng_dir'])
-        temp_dir.mkdir(parents=True, exist_ok=True)
-    except (OSError, PermissionError) as e:
-        raise ValueError(f"Cannot create temp directory {paths['temp_dng_dir']}: {e}")
+    # File existence checks are done in load_config() which properly handles both absolute and relative paths
 
     # Check optional files if specified
     if paths.get('pp3_profile'):
@@ -165,7 +142,10 @@ def load_config(config_path: Path) -> dict:
 
     # Load color matrix
     try:
-        matrix_path = config_path.parent / config['paths']['color_matrix']
+        matrix_path = Path(config['paths']['color_matrix'])
+        # check for relative path
+        if not matrix_path.is_absolute():
+            matrix_path = config_path.parent / matrix_path
         config['color_matrix'] = np.load(matrix_path, allow_pickle=True)
         logger.debug("Loaded color matrix from %s", matrix_path)
     except Exception as e:
@@ -173,7 +153,10 @@ def load_config(config_path: Path) -> dict:
 
     # Load SVS tags
     try:
-        tags_path = config_path.parent / config['paths']['svs_tags']
+        tags_path = Path(config['paths']['svs_tags'])
+        # check for relative path
+        if not tags_path.is_absolute():
+            tags_path = config_path.parent / tags_path
         with open(tags_path) as f:
             config['dng_tags'] = yaml.safe_load(f)
 
