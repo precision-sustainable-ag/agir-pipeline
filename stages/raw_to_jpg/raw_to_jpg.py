@@ -141,7 +141,7 @@ class RawToDng:
 
         t.set(Tag.CalibrationIlluminant1, dcfg['CalibrationIlluminant1'])
         t.set(Tag.PreviewColorSpace, dcfg['PreviewColorSpace'])
-        t.set(Tag.BaselineExposure, dcfg['BaselineExposure'])
+        t.set(Tag.BaselineExposure, [dcfg['BaselineExposure']])
 
         return t
     
