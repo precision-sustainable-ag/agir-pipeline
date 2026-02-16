@@ -233,11 +233,13 @@ def test_raw_to_dng_conversion():
         raw_path = create_mock_raw_file(tmp_dir)
 
         with patch("numpy.fromfile") as mock_fromfile:
-            mock_fromfile.return_value = np.zeros((3072, 4096), dtype=np.uint16)
-            config = load_config(config_path)
-            raw_to_dng = RawToDng(config)
-            dng_path = raw_to_dng.convert(raw_path)
-            assert dng_path.name == "test.dng"
+            with patch.object(DngToJpg, "validate_installation", return_value=True):
+                with patch.object(DngToJpg, "install_rawtherapee"):
+                    mock_fromfile.return_value = np.zeros((3072, 4096), dtype=np.uint16)
+                    config = load_config(config_path)
+                    raw_to_dng = RawToDng(config)
+                    dng_path = raw_to_dng.convert(raw_path)
+                    assert dng_path.name == "test.dng"
     print("RAW to DNG conversion works")
 
 
@@ -252,12 +254,13 @@ def test_dng_to_jpg_development():
         jpg_path = tmp_dir / "output" / "test.jpg"
 
         with patch.object(DngToJpg, "validate_installation", return_value=True):
-            with patch("subprocess.run") as mock_run:
-                mock_run.return_value = Mock(returncode=0)
-                config = load_config(config_path)
-                dng_to_jpg = DngToJpg(config)
-                result = dng_to_jpg.develop(dng_path, jpg_path)
-                mock_run.assert_called_once()
+            with patch.object(DngToJpg, "install_rawtherapee"):
+                with patch("subprocess.run") as mock_run:
+                    mock_run.return_value = Mock(returncode=0)
+                    config = load_config(config_path)
+                    dng_to_jpg = DngToJpg(config)
+                    result = dng_to_jpg.develop(dng_path, jpg_path)
+                    mock_run.assert_called_once()
     print("DNG to JPG development works")
 
 
@@ -273,12 +276,13 @@ def test_process_image():
 
         with patch("numpy.fromfile") as mock_fromfile:
             with patch.object(DngToJpg, "validate_installation", return_value=True):
-                with patch("subprocess.run") as mock_run:
-                    mock_run.return_value = Mock(returncode=0)
-                    mock_fromfile.return_value = np.zeros((3072, 4096), dtype=np.uint16)
-                    processor = Processor(config_path)
-                    jpg_path = processor.process_image(raw_path, output_dir)
-                    assert jpg_path.name == "test.jpg"
+                with patch.object(DngToJpg, "install_rawtherapee"):
+                    with patch("subprocess.run") as mock_run:
+                        mock_run.return_value = Mock(returncode=0)
+                        mock_fromfile.return_value = np.zeros((3072, 4096), dtype=np.uint16)
+                        processor = Processor(config_path)
+                        jpg_path = processor.process_image(raw_path, output_dir)
+                        assert jpg_path.name == "test.jpg"
     print("Single image processing works")
 
 
@@ -293,13 +297,14 @@ def test_batch_processing():
 
         with patch("numpy.fromfile") as mock_fromfile:
             with patch.object(DngToJpg, "validate_installation", return_value=True):
-                with patch("subprocess.run") as mock_run:
-                    mock_run.return_value = Mock(returncode=0)
-                    mock_fromfile.return_value = np.zeros((3072, 4096), dtype=np.uint16)
-                    processor = Processor(config_path)
-                    results = processor.process_batch(raw_files, output_dir, max_workers=2)
-                    assert len(results) == 3
-                    assert all(r.status == ITEM_OK for r in results)
+                with patch.object(DngToJpg, "install_rawtherapee"):
+                    with patch("subprocess.run") as mock_run:
+                        mock_run.return_value = Mock(returncode=0)
+                        mock_fromfile.return_value = np.zeros((3072, 4096), dtype=np.uint16)
+                        processor = Processor(config_path)
+                        results = processor.process_batch(raw_files, output_dir, max_workers=2)
+                        assert len(results) == 3
+                        assert all(r.status == ITEM_OK for r in results)
     print("Batch processing works")
 
 
@@ -315,15 +320,16 @@ def test_batch_fail_continue():
 
         with patch("numpy.fromfile") as mock_fromfile:
             with patch.object(DngToJpg, "validate_installation", return_value=True):
-                with patch("subprocess.run") as mock_run:
-                    mock_run.return_value = Mock(returncode=0)
-                    mock_fromfile.return_value = np.zeros((3072, 4096), dtype=np.uint16)
-                    processor = Processor(config_path)
-                    results = processor.process_batch(
-                        [valid_file, invalid_file], output_dir, fail_stop=False
-                    )
-                    assert len(results) == 2
-                    assert any(r.status == ITEM_FAILED for r in results)
+                with patch.object(DngToJpg, "install_rawtherapee"):
+                    with patch("subprocess.run") as mock_run:
+                        mock_run.return_value = Mock(returncode=0)
+                        mock_fromfile.return_value = np.zeros((3072, 4096), dtype=np.uint16)
+                        processor = Processor(config_path)
+                        results = processor.process_batch(
+                            [valid_file, invalid_file], output_dir, fail_stop=False
+                        )
+                        assert len(results) == 2
+                        assert any(r.status == ITEM_FAILED for r in results)
     print("Batch error handling works")
 
 
