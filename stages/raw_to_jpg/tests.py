@@ -228,7 +228,42 @@ def test_rawtherapee_validation():
         result = subprocess.run([str(script_path)], capture_output=True, text=True, timeout=300)
         if result.returncode == 0:
             print("RawTherapee validation script executed successfully")
-            print("Output:", result.stdout)
+
+            # Parse output - should contain path and export statement
+            lines = result.stdout.strip().split('\n')
+            rt_cli_path = None
+            export_statement = None
+
+            for line in lines:
+                if line.startswith('export RT_CLI_PATH='):
+                    export_statement = line
+                    # Extract path from export statement
+                    rt_cli_path = line.split("export RT_CLI_PATH='")[1].rstrip("'")
+
+            if not rt_cli_path:
+                print("ERROR: Could not extract RT_CLI_PATH from output")
+                print("Output:", result.stdout)
+                return
+
+            # Validate the path exists
+            path_obj = Path(rt_cli_path)
+            if not path_obj.exists():
+                print(f"ERROR: RawTherapee CLI path does not exist: {rt_cli_path}")
+                return
+
+            # Validate it's executable
+            if not path_obj.is_file():
+                print(f"ERROR: RawTherapee CLI path is not a file: {rt_cli_path}")
+                return
+
+            # Check executable permissions
+            import os
+            if not os.access(rt_cli_path, os.X_OK):
+                print(f"ERROR: RawTherapee CLI is not executable: {rt_cli_path}")
+                return
+
+            print(f"✓ RawTherapee CLI found and executable: {rt_cli_path}")
+            print(f"✓ Export statement: {export_statement}")
         else:
             print(f"Script failed with return code {result.returncode}")
             print("Error:", result.stderr)
@@ -246,8 +281,11 @@ def test_raw_to_dng_conversion():
         config_path = create_mock_config(tmp_dir)
         raw_path = create_mock_raw_file(tmp_dir)
 
+        # mock numpy.fromfile
         with patch("numpy.fromfile") as mock_fromfile:
+            # mock validate installation method
             with patch.object(DngToJpg, "validate_installation", return_value=True):
+                # mock install_rawtherapee to do nothing
                 with patch.object(DngToJpg, "install_rawtherapee"):
                     with patch("pathlib.Path.exists", return_value=True):
                         mock_fromfile.return_value = np.zeros((3072, 4096), dtype=np.uint16)
@@ -268,8 +306,11 @@ def test_dng_to_jpg_development():
         dng_path.touch()
         jpg_path = tmp_dir / "output" / "test.jpg"
 
+        # mock validate installation method
         with patch.object(DngToJpg, "validate_installation", return_value=True):
+            # mock install_rawtherapee to do nothing
             with patch.object(DngToJpg, "install_rawtherapee"):
+                # mock a successful RawTherapee CLI call
                 with patch("pathlib.Path.exists", return_value=True):
                     with patch("subprocess.run") as mock_run:
                         mock_run.return_value = Mock(returncode=0)
@@ -291,9 +332,14 @@ def test_process_image():
         raw_path = create_mock_raw_file(tmp_dir)
         output_dir = tmp_dir / "output"
 
+
+        # mock color matrix
         with patch("numpy.fromfile") as mock_fromfile:
+            # mock validate installation method
             with patch.object(DngToJpg, "validate_installation", return_value=True):
+                # mock install_rawtherapee to do nothing
                 with patch.object(DngToJpg, "install_rawtherapee"):
+                    # mock a successful RawTherapee CLI call
                     with patch("pathlib.Path.exists", return_value=True):
                         with patch("subprocess.run") as mock_run:
                             mock_run.return_value = Mock(returncode=0)
@@ -313,9 +359,13 @@ def test_batch_processing():
         raw_files = [create_mock_raw_file(tmp_dir, f"img{i}.raw") for i in range(3)]
         output_dir = tmp_dir / "output"
 
+        # mock color matrix
         with patch("numpy.fromfile") as mock_fromfile:
+            # mock validate installation method
             with patch.object(DngToJpg, "validate_installation", return_value=True):
+                # mock install_rawtherapee to do nothing
                 with patch.object(DngToJpg, "install_rawtherapee"):
+                    # mock a successful RawTherapee CLI call
                     with patch("pathlib.Path.exists", return_value=True):
                         with patch("subprocess.run") as mock_run:
                             mock_run.return_value = Mock(returncode=0)
@@ -352,14 +402,14 @@ for test_func in tests:
     try:
         test_func()
     except Exception as e:
-        print(f"✗ {test_func.__name__} failed: {e}")
+        print(f"{test_func.__name__} failed: {e}")
         import traceback
         traceback.print_exc()
         failed.append(test_func.__name__)
 
 print("\n" + "=" * 60)
 if failed:
-    print(f"✗ {len(failed)} test(s) failed:")
+    print(f"{len(failed)} test(s) failed:")
     for name in failed:
         print(f"  - {name}")
     sys.exit(1)

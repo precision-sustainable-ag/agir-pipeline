@@ -92,24 +92,12 @@ def validate_config(config: dict, config_path: Path) -> None:
         if not paths[key]:
             raise ValueError(f"Config field paths.{key} cannot be empty")
 
-    # Optional path fields (but log if missing)
+    # Optional path fields
     optional_paths = ['pp3_profile', 'rawtherapee_validate_script']
     for key in optional_paths:
         if key not in paths or not paths[key]:
             logger.warning("Config field paths.%s is not specified", key)
 
-    # File existence checks are done in load_config() which properly handles both absolute and relative paths
-
-    # Check optional files if specified
-    if paths.get('pp3_profile'):
-        pp3_path = config_dir / paths['pp3_profile']
-        if not pp3_path.exists():
-            logger.warning("PP3 profile not found: %s", pp3_path)
-
-    if paths.get('rawtherapee_validate_script'):
-        script_path = Path(paths['rawtherapee_validate_script'])
-        if not script_path.exists():
-            logger.warning("RawTherapee validation script not found: %s", script_path)
 
 
 def load_config(config_path: Path) -> dict:
@@ -151,21 +139,25 @@ def load_config(config_path: Path) -> dict:
     except Exception as e:
         raise ValueError(f"Failed to load color matrix from {matrix_path}: {e}")
 
-    # Load SVS tags
-    try:
-        tags_path = Path(config['paths']['svs_tags'])
-        # check for relative path
-        if not tags_path.is_absolute():
-            tags_path = config_path.parent / tags_path
-        with open(tags_path) as f:
-            config['dng_tags'] = yaml.safe_load(f)
+    # check for svs tags in the config
+    if 'dng_tags' in config and config['dng_tags']:
+        logger.debug("Using DNG tags embedded in config")
+    else:
+        # get svs tags path from config and load tags
+        try:
+            tags_path = Path(config['paths']['svs_tags'])
+            # check for relative path
+            if not tags_path.is_absolute():
+                tags_path = config_path.parent / tags_path
+            with open(tags_path) as f:
+                config['dng_tags'] = yaml.safe_load(f)
 
-        if config['dng_tags'] is None:
-            raise ValueError("SVS tags file is empty")
+            if config['dng_tags'] is None:
+                raise ValueError("SVS tags file is empty")
 
-        logger.debug("Loaded DNG tags from %s", tags_path)
-    except Exception as e:
-        raise ValueError(f"Failed to load SVS tags from {tags_path}: {e}")
+            logger.debug("Loaded DNG tags from %s", tags_path)
+        except Exception as e:
+            raise ValueError(f"Failed to load SVS tags from {tags_path}: {e}")
 
     return config
 
