@@ -1,7 +1,24 @@
 CREATE SCHEMA IF NOT EXISTS agir_db;
 CREATE SCHEMA IF NOT EXISTS logs;
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE OR REPLACE FUNCTION agir_db.uuid_v4()
+RETURNS UUID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_uuid UUID;
+BEGIN
+    IF to_regprocedure('gen_random_uuid()') IS NOT NULL THEN
+        EXECUTE 'SELECT gen_random_uuid()' INTO v_uuid;
+        RETURN v_uuid;
+    END IF;
+    IF to_regprocedure('uuid_generate_v4()') IS NOT NULL THEN
+        EXECUTE 'SELECT uuid_generate_v4()' INTO v_uuid;
+        RETURN v_uuid;
+    END IF;
+    RAISE EXCEPTION 'No UUID generator available (pgcrypto/uuid-ossp missing). Provide UUIDs from the application layer.';
+END;
+$$;
 
 CREATE OR REPLACE FUNCTION agir_db.claim_stage_lease(
     p_batch_id TEXT,
@@ -34,13 +51,13 @@ BEGIN
             released_at, release_reason, updated_at
         )
         VALUES (
-            gen_random_uuid(), p_batch_id, p_stage, p_orchestrator_id,
+            agir_db.uuid_v4(), p_batch_id, p_stage, p_orchestrator_id,
             now(), now() + make_interval(secs => p_ttl_seconds), 1, 'active',
             NULL, NULL, now()
         )
         ON CONFLICT ON CONSTRAINT stage_leases_batch_stage_key DO UPDATE
         SET
-            lease_id = gen_random_uuid(),
+            lease_id = agir_db.uuid_v4(),
             orchestrator_id = EXCLUDED.orchestrator_id,
             leased_at = now(),
             expires_at = now() + make_interval(secs => p_ttl_seconds),

@@ -1,11 +1,27 @@
 CREATE SCHEMA IF NOT EXISTS logs;
 CREATE SCHEMA IF NOT EXISTS agir_db;
 
--- Needed for gen_random_uuid()
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE OR REPLACE FUNCTION agir_db.uuid_v4()
+RETURNS UUID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_uuid UUID;
+BEGIN
+    IF to_regprocedure('gen_random_uuid()') IS NOT NULL THEN
+        EXECUTE 'SELECT gen_random_uuid()' INTO v_uuid;
+        RETURN v_uuid;
+    END IF;
+    IF to_regprocedure('uuid_generate_v4()') IS NOT NULL THEN
+        EXECUTE 'SELECT uuid_generate_v4()' INTO v_uuid;
+        RETURN v_uuid;
+    END IF;
+    RAISE EXCEPTION 'No UUID generator available (pgcrypto/uuid-ossp missing). Provide UUIDs from the application layer.';
+END;
+$$;
 
 CREATE TABLE IF NOT EXISTS logs.stage_leases (
-    lease_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    lease_id         UUID PRIMARY KEY DEFAULT agir_db.uuid_v4(),
     batch_id         TEXT NOT NULL,
     stage            TEXT NOT NULL,
     orchestrator_id  TEXT NOT NULL,

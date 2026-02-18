@@ -168,8 +168,7 @@ source_pg_coords_if_present() {
     source /project/dash_agir/postgres/pg_coords.env
   elif [[ -f "${SCRIPT_DIR}/pg_coords.env" ]]; then
     # shellcheck disable=SC1091
-    source "${SCRIPT_DIR}/pg_coords.env
-  " || true
+    source "${SCRIPT_DIR}/pg_coords.env" || true
   fi
 }
 
