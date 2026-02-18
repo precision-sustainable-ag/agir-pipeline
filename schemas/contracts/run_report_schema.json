@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "run_id",
+    "batch_id",
+    "stage",
+    "attempt",
+    "status",
+    "started_at",
+    "ended_at"
+  ],
+  "properties": {
+    "run_id": { "type": "string", "format": "uuid" },
+    "batch_id": { "type": "string", "minLength": 1 },
+    "stage": { "type": "string", "minLength": 1 },
+    "attempt": { "type": "integer", "minimum": 1 },
+    "status": { "type": "string", "enum": ["success", "partial", "failed"] },
+    "exit_code": { "type": ["integer", "null"] },
+    "started_at": { "type": "string", "format": "date-time" },
+    "ended_at": { "type": "string", "format": "date-time" },
+    "output_ref": { "type": ["string", "null"] }
+  },
+  "additionalProperties": true
+}

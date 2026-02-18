@@ -193,6 +193,10 @@ apply_schemas() {
   psql -f "${SCHEMA_DIR}/sql/logs.transfer_requests.sql" || true
   [[ -f "${SCHEMA_DIR}/sql/logs.transfer_runs.sql" ]] && psql -f "${SCHEMA_DIR}/sql/logs.transfer_runs.sql" || true
   psql -f "${SCHEMA_DIR}/views/report.missing_on_juno.sql" || die "Failed: report views"
+  psql -f "${SCHEMA_DIR}/sql/logs.stage_leases.sql" || die "Failed: logs.stage_leases"
+  psql -f "${SCHEMA_DIR}/sql/logs.stage_runs.sql" || die "Failed: logs.stage_runs"
+  psql -f "${SCHEMA_DIR}/sql/agir_db.orchestrator_phase1.sql" || die "Failed: agir_db phase1 funcs"
+  psql -f "${SCHEMA_DIR}/views/report.ready_work.sql" || die "Failed: report.ready_work"
 }
 
 run_tests() {

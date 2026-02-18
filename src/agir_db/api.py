@@ -33,6 +33,7 @@ from typing import Optional
 
 from .connection import ConnectionManager
 from .exceptions import AgirDBError
+from .orchestration import OrchestrationManager
 
 # Domain class imports
 from .transfers import TransferManager
@@ -128,6 +129,8 @@ class AgirDB:
         self.transfers = TransferManager(self._connection)
                 
         logger.info("AgirDB initialized")
+
+        self.orchestration = OrchestrationManager(self._connection)
     
     def connect(self) -> None:
         """
