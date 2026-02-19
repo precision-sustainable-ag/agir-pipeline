@@ -24,17 +24,16 @@ from stages.raw_to_jpg import (
 def create_mock_config(tmp_dir: Path) -> Path:
     """Create valid config with mock files."""
     config_dir = tmp_dir / "config"
+    assets_dir = config_dir / "assets"
     config_dir.mkdir(parents=True, exist_ok=True)
+    assets_dir.mkdir(parents=True, exist_ok=True)
 
-    # Color matrix
+    # Prepare data
     color_matrix_data = np.array({
         "color_matrix": np.eye(3),
         "forward_matrix": np.eye(3),
         "wb_gains": np.array([1.0, 1.0, 1.0]),
     }, dtype=object)
-    np.save(config_dir / "color_matrix.npy", color_matrix_data)
-
-    # SVS tags
     svs_tags = {
         "image": {
             "SVCamImageWidth": 4096, "SVCamImageHeight": 3072,
@@ -55,20 +54,24 @@ def create_mock_config(tmp_dir: Path) -> Path:
             "PreviewColorSpace": 1, "BaselineExposure": [0, 1],
         },
     }
-    with open(config_dir / "svs_tags.yaml", "w") as f:
-        yaml.dump(svs_tags, f)
 
-    # Get validate_rawtherapee script
-    script_path = Path(__file__).parent.parent.parent / "scripts" / "validate_rawtherapee.sh"
+    # Create all files
+    np.save(assets_dir / "color_matrix.npy", color_matrix_data)
+    with open(assets_dir / "svs_tags.yaml", "w") as f:
+        yaml.dump(svs_tags, f)
+    (assets_dir / "rawtherapee-cli").touch()
+    (assets_dir / "profile.pp3").touch()
+    (assets_dir / "temp_dng").mkdir(exist_ok=True)
+    (assets_dir / "validate_rawtherapee.sh").touch()
 
     config = {
         "paths": {
-            "rawtherapee_cli": "/usr/bin/rawtherapee-cli",
-            "temp_dng_dir": str(tmp_dir / "temp_dng"),
-            "color_matrix": "color_matrix.npy",
-            "svs_tags": "svs_tags.yaml",
-            "pp3_profile": "profile.pp3",
-            "rawtherapee_validate_script": str(script_path),
+            "rawtherapee_cli": "assets/rawtherapee-cli",
+            "temp_dng_dir": "assets/temp_dng",
+            "color_matrix": "assets/color_matrix.npy",
+            "svs_tags": "assets/svs_tags.yaml",
+            "pp3_profile": "assets/profile.pp3",
+            "rawtherapee_validate_script": "assets/validate_rawtherapee.sh",
         },
         "processing": {"threads_per_image": 1},
     }
@@ -76,7 +79,6 @@ def create_mock_config(tmp_dir: Path) -> Path:
     with open(config_path, "w") as f:
         yaml.dump(config, f)
 
-    (config_dir / "profile.pp3").touch()
     return config_path
 
 
@@ -117,92 +119,32 @@ def test_path_resolution():
     """Test that relative paths in config are resolved relative to config directory."""
     print("[TEST]: test_path_resolution")
     with tempfile.TemporaryDirectory() as tmp:
-        tmp_dir = Path(tmp)
-        config_dir = tmp_dir / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = create_mock_config(Path(tmp))
+        config_dir = config_path.parent
 
-        # Create subdirectories for assets
-        assets_dir = config_dir / "assets"
-        assets_dir.mkdir(parents=True, exist_ok=True)
-
-        # Create required files
-        color_matrix_data = np.array({
-            "color_matrix": np.eye(3),
-            "forward_matrix": np.eye(3),
-            "wb_gains": np.array([1.0, 1.0, 1.0]),
-        }, dtype=object)
-        np.save(assets_dir / "color_matrix.npy", color_matrix_data)
-
-        svs_tags = {
-            "image": {
-                "SVCamImageWidth": 4096, "SVCamImageHeight": 3072,
-                "BitsPerSample": 16, "PhotometricInterpretation": 32803,
-                "Orientation": 1, "SamplesPerPixel": 1,
-                "CFARepeatPatternDim": [2, 2], "CFAPattern": [0, 1, 1, 2],
-                "RowsPerStrip": 256,
-            },
-            "camera": {
-                "Make": "SVS", "Model": "SHR661", "SerialNumber": "TEST001",
-                "LensModel": "Test", "FocalLength": 50.0, "FocalLengthIn35mmFilm": 50,
-                "FNumber": 2.8, "FocalPlaneXResolution": 4096.0,
-                "FocalPlaneYResolution": 3072.0, "FocalPlaneResolutionUnit": 3,
-            },
-            "dng": {
-                "DNGVersion": [1, 4, 0, 0], "DNGBackwardVersion": [1, 4, 0, 0],
-                "BlackLevel": 0, "WhiteLevel": 65535, "CalibrationIlluminant1": 21,
-                "PreviewColorSpace": 1, "BaselineExposure": [0, 1],
-            },
-        }
-        # write svg_tags yaml
-        with open(assets_dir / "svs_tags.yaml", "w") as f:
-            yaml.dump(svs_tags, f)
-
-        # Get actual script path
-        script_path = Path(__file__).parent.parent.parent / "scripts" / "validate_rawtherapee.sh"
-
-        # Create config
-        config = {
-            "paths": {
-                "rawtherapee_cli": "/usr/bin/rawtherapee-cli",
-                "temp_dng_dir": str(tmp_dir / "temp_dng"),
-                "color_matrix": "assets/color_matrix.npy",
-                "svs_tags": "assets/svs_tags.yaml",
-                "pp3_profile": "assets/profile.pp3",
-                "rawtherapee_validate_script": str(script_path),
-            },
-            "processing": {"threads_per_image": 1},
-        }
-        # create pp3 file
-        (assets_dir / "profile.pp3").touch()
-        config_path = config_dir / "config.yaml"
-        with open(config_path, "w") as f:
-            yaml.dump(config, f)
-
-        # Validate config paths
+        # Load config, resolve paths, then validate directly
+        loaded_config = load_config(config_path)
         try:
-            validate_config(config, config_path)
+            validate_config(loaded_config)
+            assert "color_matrix" in loaded_config
+            assert loaded_config["color_matrix"] is not None
+            assert "dng_tags" in loaded_config
+            assert loaded_config["dng_tags"] is not None
             print("Paths resolved correctly")
+            print("Files loaded successfully from paths")
         except ValueError as e:
             assert False, f"Path resolution failed: {e}"
 
-        # Load config and verify files were loaded
-        loaded_config = load_config(config_path)
-        assert "color_matrix" in loaded_config
-        assert loaded_config["color_matrix"] is not None
-        assert "dng_tags" in loaded_config
-        assert loaded_config["dng_tags"] is not None
-        print("Files loaded successfully from paths")
-
-        # Verify wrong relative path fails
-        bad_config = dict(config)
-        bad_config["paths"] = dict(config["paths"])
-        bad_config["paths"]["color_matrix"] = "nonexistent/color_matrix.npy"
+        # Verify wrong path fails
+        bad_config = dict(loaded_config)
+        bad_config["paths"] = dict(loaded_config["paths"])
+        bad_config["paths"]["color_matrix"] = str(config_dir / "nonexistent/color_matrix.npy")
         try:
-            validate_config(bad_config, config_path)
+            validate_config(bad_config)
             assert False, "Should have raised ValueError for missing file"
         except ValueError as e:
             assert "not found" in str(e).lower()
-            print("Missing relative path caught correctly")
+            print("Missing path caught correctly")
 
 
 def test_batch_id_parsing():
@@ -229,34 +171,19 @@ def test_rawtherapee_validation():
         if result.returncode == 0:
             print("RawTherapee validation script executed successfully")
 
-            # Parse output - should contain path and export statement
-            lines = result.stdout.strip().split('\n')
-            rt_cli_path = None
-            export_statement = None
-
-            for line in lines:
-                if line.startswith('export RT_CLI_PATH='):
-                    export_statement = line
-                    # Extract path from export statement
-                    rt_cli_path = line.split("export RT_CLI_PATH='")[1].rstrip("'")
-
-            if not rt_cli_path:
-                print("ERROR: Could not extract RT_CLI_PATH from output")
-                print("Output:", result.stdout)
+            # Output is a single line: export RT_CLI_PATH='/path/to/rawtherapee-cli'
+            export_statement = result.stdout.strip()
+            if not export_statement.startswith("export RT_CLI_PATH="):
+                print("ERROR: Unexpected output format:", export_statement)
                 return
 
-            # Validate the path exists
+            rt_cli_path = export_statement.split("export RT_CLI_PATH='")[1].rstrip("'")
             path_obj = Path(rt_cli_path)
-            if not path_obj.exists():
+
+            if not path_obj.exists() or not path_obj.is_file():
                 print(f"ERROR: RawTherapee CLI path does not exist: {rt_cli_path}")
                 return
 
-            # Validate it's executable
-            if not path_obj.is_file():
-                print(f"ERROR: RawTherapee CLI path is not a file: {rt_cli_path}")
-                return
-
-            # Check executable permissions
             import os
             if not os.access(rt_cli_path, os.X_OK):
                 print(f"ERROR: RawTherapee CLI is not executable: {rt_cli_path}")
@@ -327,6 +254,7 @@ def test_process_image():
     """Test single image processing."""
     print("[TEST]: test_process_image")
     with tempfile.TemporaryDirectory() as tmp:
+        # root tmp dir for test files
         tmp_dir = Path(tmp)
         config_path = create_mock_config(tmp_dir)
         raw_path = create_mock_raw_file(tmp_dir)

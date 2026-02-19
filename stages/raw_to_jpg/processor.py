@@ -131,6 +131,7 @@ def load_config(config_path: Path) -> dict:
     for key in ['rawtherapee_cli', 'temp_dng_dir', 'color_matrix', 'svs_tags', 'pp3_profile']:
         paths[key] = str(resolve_path(paths[key], base_dir))
 
+    # optionally resolve rawtherapee validate script
     if paths.get('rawtherapee_validate_script'):
         paths['rawtherapee_validate_script'] = str(resolve_path(paths['rawtherapee_validate_script'], base_dir))
 
