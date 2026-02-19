@@ -1,25 +1,366 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/contracts/run_report_schema.json",
+  "title": "Stage Run Report",
   "type": "object",
+
   "required": [
+    "stage",
+    "stage_version",
     "run_id",
     "batch_id",
-    "stage",
-    "attempt",
-    "status",
     "started_at",
-    "ended_at"
+    "ended_at",
+    "duration_ms",
+    "exit_code",
+    "status",
+    "scope",
+    "provenance",
+    "inputs",
+    "outputs",
+    "errors",
+    "warnings",
+    "pointers"
   ],
+
   "properties": {
-    "run_id": { "type": "string", "format": "uuid" },
-    "batch_id": { "type": "string", "minLength": 1 },
-    "stage": { "type": "string", "minLength": 1 },
-    "attempt": { "type": "integer", "minimum": 1 },
-    "status": { "type": "string", "enum": ["success", "partial", "failed"] },
-    "exit_code": { "type": ["integer", "null"] },
-    "started_at": { "type": "string", "format": "date-time" },
-    "ended_at": { "type": "string", "format": "date-time" },
-    "output_ref": { "type": ["string", "null"] }
+    "run_report_version": {
+      "type": "string"
+    },
+    "stage": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stage_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "pipeline_run_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "batch_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "orchestrator_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ended_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "exit_code": {
+      "type": "integer"
+    },
+
+    "status": {
+      "type": "string",
+      "enum": [
+        "success",
+        "partial",
+        "failed"
+      ]
+    },
+    "scope": {
+      "type": "string",
+      "minLength": 1
+    },
+
+    "provenance": {
+      "type": "object",
+      "required": [
+        "code_commit",
+        "build_id",
+        "config_path",
+        "config_hash",
+        "model_id",
+        "deps_id",
+        "container_image"
+      ],
+      "properties": {
+        "code_commit": {
+          "type": "string"
+        },
+        "build_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "config_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "config_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deps_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "container_image": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+
+    "inputs": {
+      "type": "object",
+      "required": [
+        "input_root",
+        "n_units_discovered",
+        "unit_id_kind",
+        "inputs_manifest_path"
+      ],
+      "properties": {
+        "input_root": {
+          "type": "string"
+        },
+        "n_units_discovered": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unit_id_kind": {
+          "type": "string"
+        },
+        "inputs_manifest_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+
+    "outputs": {
+      "type": "object",
+      "required": [
+        "output_root",
+        "run_root",
+        "artifacts_dir",
+        "report_path",
+        "manifest_path",
+        "schema_version",
+        "counts",
+        "artifacts"
+      ],
+      "properties": {
+        "output_root": {
+          "type": "string"
+        },
+        "run_root": {
+          "type": "string"
+        },
+        "artifacts_dir": {
+          "type": "string"
+        },
+        "report_path": {
+          "type": "string"
+        },
+        "manifest_path": {
+          "type": "string"
+        },
+        "schema_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+
+        "counts": {
+          "type": "object",
+          "required": [
+            "n_units_succeeded",
+            "n_units_failed",
+            "n_units_skipped"
+          ],
+          "properties": {
+            "n_units_succeeded": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "n_units_failed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "n_units_skipped": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": true
+        },
+
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "artifact_type",
+              "path",
+              "n_files"
+            ],
+            "properties": {
+              "artifact_type": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "n_files": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+
+    "stage_error": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "unit_id",
+          "code",
+          "type",
+          "message",
+          "retryable",
+          "meta"
+        ],
+        "properties": {
+          "unit_id": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "meta": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "unit_id",
+          "code",
+          "type",
+          "message",
+          "meta"
+        ],
+        "properties": {
+          "unit_id": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "meta": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+
+    "pointers": {
+      "type": "object",
+      "required": [
+        "errors_path",
+        "warnings_path",
+        "logs_path"
+      ],
+      "properties": {
+        "errors_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "warnings_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "logs_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    }
   },
+
   "additionalProperties": true
 }
