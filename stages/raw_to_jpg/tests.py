@@ -13,7 +13,7 @@ import subprocess
 
 from stages.raw_to_jpg.processor import Processor, load_config, validate_config, _classify_error, ImageResult
 from stages.raw_to_jpg.raw_to_jpg import RawToDng, DngToJpg
-from stages.common.parsers import parse_batch_id
+from stages.common.config import parse_batch_id
 from stages import ITEM_OK, ITEM_FAILED
 from stages.raw_to_jpg import (
     ERROR_FILE_NOT_FOUND, ERROR_INVALID_RAW, ERROR_DNG_CONVERSION_FAILED,

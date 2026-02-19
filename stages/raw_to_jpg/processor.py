@@ -5,7 +5,7 @@ RAW -> DNG -> JPG processing pipeline.
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import yaml
@@ -23,6 +23,7 @@ from . import (
 )
 from .raw_to_jpg import RawToDng, DngToJpg
 from stages import ITEM_OK, ITEM_FAILED
+from stages.common import resolve_path
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +33,10 @@ class ImageResult:
     """Result of processing a single image."""
     image_id: str
     status: str
-    jpg_path: Optional[Path] = None
+    jpg_path: Path | None = None
     error_code: str = ""
-    error_type: Optional[str] = None
-    error_message: Optional[str] = None
+    error_type: str | None = None
+    error_message: str | None = None
     retryable: bool = False
 
 
@@ -76,26 +77,27 @@ def validate_config(config: dict, config_path: Path) -> None:
     if 'paths' not in config:
         raise ValueError("Config missing required 'paths' section")
 
-    paths = config['paths']
+    config_paths = config['paths']
 
-    # Required path fields
-    required_paths = [
+    # Required config paths
+    required_config_paths = [
         'rawtherapee_cli',
         'temp_dng_dir',
         'color_matrix',
         'svs_tags',
+        'pp3_profile',
     ]
 
-    for key in required_paths:
-        if key not in paths:
+    for key in required_config_paths:
+        if key not in config_paths:
             raise ValueError(f"Config missing required field: paths.{key}")
-        if not paths[key]:
+        if not config_paths[key]:
             raise ValueError(f"Config field paths.{key} cannot be empty")
 
     # Optional path fields
-    optional_paths = ['pp3_profile', 'rawtherapee_validate_script']
+    optional_paths = ['rawtherapee_validate_script']
     for key in optional_paths:
-        if key not in paths or not paths[key]:
+        if key not in config_paths or not config_paths[key]:
             logger.warning("Config field paths.%s is not specified", key)
 
 
@@ -128,27 +130,32 @@ def load_config(config_path: Path) -> dict:
     # Validate config structure
     validate_config(config, config_path)
 
+    # Resolve all paths to absolute paths
+    base_dir = config_path.parent
+    paths = config['paths']
+
+    # resolve mandatory paths in conifg
+    for key in ['rawtherapee_cli', 'temp_dng_dir', 'color_matrix', 'svs_tags', 'pp3_profile']:
+        paths[key] = str(resolve_path(paths[key], base_dir))
+
+    # optionally resolve rawtherapee validate script
+    if paths.get('rawtherapee_validate_script'):
+        paths['rawtherapee_validate_script'] = str(resolve_path(paths['rawtherapee_validate_script'], base_dir))
+
     # Load color matrix
     try:
         matrix_path = Path(config['paths']['color_matrix'])
-        # check for relative path
-        if not matrix_path.is_absolute():
-            matrix_path = config_path.parent / matrix_path
         config['color_matrix'] = np.load(matrix_path, allow_pickle=True)
         logger.debug("Loaded color matrix from %s", matrix_path)
     except Exception as e:
         raise ValueError(f"Failed to load color matrix from {matrix_path}: {e}")
 
-    # check for svs tags in the config
+    # Load DNG tags from file or use embedded config
     if 'dng_tags' in config and config['dng_tags']:
         logger.debug("Using DNG tags embedded in config")
     else:
-        # get svs tags path from config and load tags
         try:
             tags_path = Path(config['paths']['svs_tags'])
-            # check for relative path
-            if not tags_path.is_absolute():
-                tags_path = config_path.parent / tags_path
             with open(tags_path) as f:
                 config['dng_tags'] = yaml.safe_load(f)
 
@@ -171,7 +178,7 @@ class Processor:
     def __init__(
         self,
         config_path: Path,
-    ):
+    ) -> None:
         self.config = load_config(config_path)
         self.raw_to_dng = RawToDng(self.config)
         self.dng_to_jpg = DngToJpg(self.config)
@@ -180,11 +187,20 @@ class Processor:
     def process_image(self, raw_path: Path, output_dir: Path) -> Path:
         """
         Process a single RAW image to JPG.
+
+        Args:
+            raw_path: Path to input RAW image file
+            output_dir: Directory where output JPG will be saved
+
+        Returns:
+            Path to the generated JPG file
+
+        Raises:
+            RuntimeError: If RAW to DNG or DNG to JPG conversion fails
         """
         raw_path = Path(raw_path)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-
 
         dng_path = None
         try:
@@ -192,8 +208,8 @@ class Processor:
             dng_path = self.raw_to_dng.convert(raw_path)
 
             # DNG to JPG conversion
-            self.dng_to_jpg.develop(dng_path, output_dir)
             jpg_path = output_dir / raw_path.with_suffix(".jpg").name
+            self.dng_to_jpg.develop(dng_path, jpg_path)
         except Exception as e:
             raise RuntimeError(f"Failed to convert DNG to JPG for {raw_path}: {e}")
         finally:

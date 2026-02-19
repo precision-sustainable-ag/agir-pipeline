@@ -54,11 +54,11 @@ class RawToDng:
     def __init__(
         self,
         cfg: dict
-    ):
+    ) -> None:
         self.cfg = cfg
         self.color_matrix = cfg['color_matrix']
         self.profile = cfg['dng_tags']
-        
+
         # Pre-compute DNG rational values
         self._prepare_color_matrices()
     
@@ -224,21 +224,19 @@ class RawToDng:
 class DngToJpg:
     """Develop DNG files to JPG using RawTherapee."""
     
-    def __init__(self, cfg: Dict):
+    def __init__(self, cfg: Dict) -> None:
         """
         Args:
-            rt_cli: Path to rawtherapee-cli executable
-            pp3_profile: Optional RawTherapee processing profile
-            validate_script: Optional path to RawTherapee validation/install script
+            cfg: Configuration dictionary containing paths to RawTherapee and profiles
         """
         self.cfg = cfg
         self.rt_cli = Path(cfg["paths"]["rawtherapee_cli"])
-        self.pp3_profile = Path(cfg["paths"]["pp3_profile"]) if cfg["paths"].get("pp3_profile") else None
+        self.pp3_profile = Path(cfg["paths"]["pp3_profile"])
         self.validate_script = Path(cfg["paths"]["rawtherapee_validate_script"]) if cfg["paths"].get("rawtherapee_validate_script") else None
-        logger.debug("DngToJpg config: rt_cli=%s, pp3=%s", self.rt_cli, self.pp3_profile)
+
         if not self.validate_installation():
             self.install_rawtherapee()
-        
+
         if not self.rt_cli.exists():
             raise FileNotFoundError(f"RawTherapee CLI not found: {self.rt_cli}")
     
@@ -305,7 +303,7 @@ class DngToJpg:
         except FileNotFoundError:
             return False
         
-    def install_rawtherapee(self):
+    def install_rawtherapee(self) -> None:
         """Use the script in ./scripts/validate_rawtherapee.sh to install and unpack RawTherapee if needed."""
         if not self.validate_script or not self.validate_script.exists():
             raise FileNotFoundError("Validation script not found.")

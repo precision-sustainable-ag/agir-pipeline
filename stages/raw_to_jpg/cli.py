@@ -28,8 +28,12 @@ def calculate_sha256(file_path: Path) -> str:
     return "sha256:" + sha256_hash.hexdigest()
 
 
-def get_git_commit() -> str:
-    """Get the current git commit hash."""
+def get_git_commit() -> str | None:
+    """Get the current git commit hash.
+
+    Returns:
+        Git commit hash, or None if unable to determine
+    """
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
