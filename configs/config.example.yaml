@@ -1,0 +1,26 @@
+# Camera Configuration Schema for RAW -> DNG -> JPG Pipeline
+# All paths can be absolute or relative to the config file directory.
+
+paths:
+  # Path to RawTherapee CLI executable
+  rawtherapee_cli: string
+
+  # Directory for temporary DNG files
+  temp_dng_dir: string
+
+  # Path to color matrix numpy file (.npy)
+  color_matrix: string
+
+  # Path to SVS tags configuration file (.yaml)
+  svs_tags: string
+
+  # Path to RawTherapee PP3 processing profile
+  pp3_profile: string
+
+  # Optional validation script path
+  rawtherapee_validate_script: string (optional)
+
+# DNG metadata tags (can also be loaded from svs_tags file)
+dng_tags:
+   Make: "Camera Make"
+   Model: "Camera Model"

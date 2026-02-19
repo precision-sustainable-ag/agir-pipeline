@@ -1,0 +1,8 @@
+[project]
+name = "agir-stage-raw-to-jpg"
+version = "1.5.0"  # Stage version (independent)
+dependencies = [
+    # NO agir-db dependency!
+    "rawpy>=0.18.0",
+    "pillow>=10.0.0",
+]

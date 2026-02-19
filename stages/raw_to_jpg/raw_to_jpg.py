@@ -8,6 +8,7 @@ DNG to JPG developer using RawTherapee.
 Simple wrapper around RawTherapee CLI.
 """
 
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -15,35 +16,9 @@ from typing import Dict, Union
 from datetime import datetime, timezone
 
 import numpy as np
-import yaml
 from pidng.core import RAW2DNG, DNGTags, Tag
 
-def load_config(config_path: Path) -> dict:
-    """
-    Load camera configuration from YAML file.
-    
-    Args:
-        config_path: Path to YAML config file
-        
-    Returns:
-        dict with camera settings and color_matrix as numpy array
-    """
-    config_path = Path(config_path)
-    
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-    
-    # Load color matrix if specified
-    if 'color_matrix' in config['paths']:
-        matrix_path = config_path.parent / config['paths']['color_matrix']
-        config['color_matrix'] = np.load(matrix_path, allow_pickle=True)
-
-    if 'svs_tags' in config['paths']:
-        tags_path = config_path.parent / config['paths']['svs_tags']
-        with open(tags_path) as f:
-            config['dng_tags'] = yaml.safe_load(f)
-    
-    return config
+logger = logging.getLogger(__name__)
 
 class RawToDng:
     """
@@ -79,11 +54,11 @@ class RawToDng:
     def __init__(
         self,
         cfg: dict
-    ):
+    ) -> None:
         self.cfg = cfg
         self.color_matrix = cfg['color_matrix']
         self.profile = cfg['dng_tags']
-        
+
         # Pre-compute DNG rational values
         self._prepare_color_matrices()
     
@@ -216,8 +191,8 @@ class RawToDng:
         raw_path = Path(raw_path)
         output_path = Path(self.cfg['paths']['temp_dng_dir']) / raw_path.with_suffix('.dng').name
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-            
+        logger.debug("Converting RAW -> DNG: %s -> %s", raw_path.name, output_path.name)
+
         expected_size = (
             self.profile['image']['SVCamImageHeight'],
             self.profile['image']['SVCamImageWidth']
@@ -249,22 +224,19 @@ class RawToDng:
 class DngToJpg:
     """Develop DNG files to JPG using RawTherapee."""
     
-    def __init__(self, cfg: Dict):
+    def __init__(self, cfg: Dict) -> None:
         """
         Args:
-            rt_cli: Path to rawtherapee-cli executable
-            pp3_profile: Optional RawTherapee processing profile
-            validate_script: Optional path to RawTherapee validation/install script
+            cfg: Configuration dictionary containing paths to RawTherapee and profiles
         """
         self.cfg = cfg
         self.rt_cli = Path(cfg["paths"]["rawtherapee_cli"])
-        self.pp3_profile = Path(cfg["paths"]["pp3_profile"]) if cfg["paths"].get("pp3_profile") else None
+        self.pp3_profile = Path(cfg["paths"]["pp3_profile"])
         self.validate_script = Path(cfg["paths"]["rawtherapee_validate_script"]) if cfg["paths"].get("rawtherapee_validate_script") else None
-        from pprint import pprint
-        pprint(cfg)
+
         if not self.validate_installation():
             self.install_rawtherapee()
-        
+
         if not self.rt_cli.exists():
             raise FileNotFoundError(f"RawTherapee CLI not found: {self.rt_cli}")
     
@@ -282,7 +254,8 @@ class DngToJpg:
         
         if not dng_path.exists():
             raise FileNotFoundError(f"DNG not found: {dng_path}")
-        
+
+        logger.debug("Developing DNG -> JPG: %s -> %s", dng_path.name, jpg_path)
         try:
             # Build command
             cmd = [
@@ -293,10 +266,11 @@ class DngToJpg:
                 "-c", str(dng_path),
             ]
 
+            # Get threads per image from config
             threads_per_instance = self.cfg.get("processing", {}).get("threads_per_image", 1)
-            max_threads = 50  # Total number of threads to use
-            num_instances = 12  # Expected number of parallel threads
-            threads_per_instance = max(1, max_threads // num_instances) #
+            threads_per_instance = max(1, int(threads_per_instance))
+
+            # Prepare environment with OMP thread settings
             env = {
                 **os.environ,
                 "LANG": "en_US.UTF-8",
@@ -304,6 +278,7 @@ class DngToJpg:
                 "OMP_DYNAMIC": "TRUE",  # Allows OpenMP to optimize thread count
                 "OMP_NESTED": "FALSE"  # Disables nested parallelism
             }
+            logger.debug("RawTherapee thread config: OMP_NUM_THREADS=%d", threads_per_instance)
             
             # Run
             jpg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -328,12 +303,14 @@ class DngToJpg:
         except FileNotFoundError:
             return False
         
-    def install_rawtherapee(self):
+    def install_rawtherapee(self) -> None:
         """Use the script in ./scripts/validate_rawtherapee.sh to install and unpack RawTherapee if needed."""
         if not self.validate_script or not self.validate_script.exists():
             raise FileNotFoundError("Validation script not found.")
-        
+
+        logger.info("Installing RawTherapee via %s", self.validate_script)
         result = subprocess.run([str(self.validate_script)], capture_output=True, text=True)
-        
+
         if result.returncode != 0:
             raise RuntimeError(f"RawTherapee installation failed: {result.stderr}")
+        logger.info("RawTherapee installed successfully")
