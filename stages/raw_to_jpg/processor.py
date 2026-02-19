@@ -62,24 +62,22 @@ def _classify_error(exc: Exception) -> str:
     return ERROR_UNKNOWN
 
 
-def validate_config(config: dict, config_path: Path) -> None:
+def validate_config(config: dict) -> None:
     """
-    Validate camera configuration has all required fields.
+    Validate resolved paths exist.
 
     Args:
-        config: Configuration dictionary
-        config_path: Path to config file (for relative path resolution)
+        config: Configuration dictionary with already-resolved paths
 
     Raises:
-        ValueError: If required fields are missing or invalid
+        ValueError: If required paths don't exist
     """
-    # Check top-level required keys
     if 'paths' not in config:
         raise ValueError("Config missing required 'paths' section")
 
     config_paths = config['paths']
 
-    # Required config paths
+    # Check required paths exist
     required_config_paths = [
         'rawtherapee_cli',
         'temp_dng_dir',
@@ -94,11 +92,9 @@ def validate_config(config: dict, config_path: Path) -> None:
         if not config_paths[key]:
             raise ValueError(f"Config field paths.{key} cannot be empty")
 
-    # Optional path fields
-    optional_paths = ['rawtherapee_validate_script']
-    for key in optional_paths:
-        if key not in config_paths or not config_paths[key]:
-            logger.warning("Config field paths.%s is not specified", key)
+        path = Path(config_paths[key])
+        if not path.exists():
+            raise ValueError(f"Path not found: {path}")
 
 
 
@@ -127,9 +123,6 @@ def load_config(config_path: Path) -> dict:
     if config is None:
         raise ValueError(f"Config file is empty or invalid: {config_path}")
 
-    # Validate config structure
-    validate_config(config, config_path)
-
     # Resolve all paths to absolute paths
     base_dir = config_path.parent
     paths = config['paths']
@@ -138,9 +131,11 @@ def load_config(config_path: Path) -> dict:
     for key in ['rawtherapee_cli', 'temp_dng_dir', 'color_matrix', 'svs_tags', 'pp3_profile']:
         paths[key] = str(resolve_path(paths[key], base_dir))
 
-    # optionally resolve rawtherapee validate script
     if paths.get('rawtherapee_validate_script'):
         paths['rawtherapee_validate_script'] = str(resolve_path(paths['rawtherapee_validate_script'], base_dir))
+
+    # Validate resolved paths exist
+    validate_config(config)
 
     # Load color matrix
     try:
