@@ -92,6 +92,9 @@ def validate_config(config: dict) -> None:
         if not config_paths[key]:
             raise ValueError(f"Config field paths.{key} cannot be empty")
 
+        if key == "temp_dng_dir": 
+            # temp_dng_dir will be created if it doesn't exist, so just skip existence check
+            continue
         path = Path(config_paths[key])
         if not path.exists():
             raise ValueError(f"Path not found: {path}")
