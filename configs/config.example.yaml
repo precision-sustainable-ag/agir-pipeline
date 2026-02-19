@@ -22,5 +22,3 @@ paths:
 
 # DNG metadata tags (can also be loaded from svs_tags file)
 dng_tags:
-   Make: "Camera Make"
-   Model: "Camera Model"
