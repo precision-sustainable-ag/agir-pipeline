@@ -1,7 +1,7 @@
-CREATE SCHEMA IF NOT EXISTS agir_db;
+CREATE SCHEMA IF NOT EXISTS ops;
 CREATE SCHEMA IF NOT EXISTS logs;
 
-CREATE OR REPLACE FUNCTION agir_db.uuid_v4()
+CREATE OR REPLACE FUNCTION ops.uuid_v4()
 RETURNS UUID
 LANGUAGE plpgsql
 AS $$
@@ -20,7 +20,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION agir_db.claim_stage_lease(
+CREATE OR REPLACE FUNCTION ops.claim_stage_lease(
     p_batch_id TEXT,
     p_stage TEXT,
     p_orchestrator_id TEXT,
@@ -51,13 +51,13 @@ BEGIN
             released_at, release_reason, updated_at
         )
         VALUES (
-            agir_db.uuid_v4(), p_batch_id, p_stage, p_orchestrator_id,
+            ops.uuid_v4(), p_batch_id, p_stage, p_orchestrator_id,
             now(), now() + make_interval(secs => p_ttl_seconds), 1, 'active',
             NULL, NULL, now()
         )
         ON CONFLICT ON CONSTRAINT stage_leases_batch_stage_key DO UPDATE
         SET
-            lease_id = agir_db.uuid_v4(),
+            lease_id = ops.uuid_v4(),
             orchestrator_id = EXCLUDED.orchestrator_id,
             leased_at = now(),
             expires_at = now() + make_interval(secs => p_ttl_seconds),
@@ -102,7 +102,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION agir_db.release_stage_lease(
+CREATE OR REPLACE FUNCTION ops.release_stage_lease(
     p_lease_id UUID,
     p_orchestrator_id TEXT,
     p_release_reason TEXT,

@@ -51,7 +51,7 @@ class OrchestrationManager:
         row = self.conn.fetch_one(
             """
             SELECT claimed, lease_id, batch_id, stage, expires_at, attempt, job_workdir_policy
-            FROM agir_db.claim_stage_lease(
+            FROM ops.claim_stage_lease(
                 p_batch_id := %s,
                 p_stage := %s,
                 p_orchestrator_id := %s,
@@ -73,7 +73,7 @@ class OrchestrationManager:
         row = self.conn.fetch_one(
             """
             SELECT released, lease_id, released_at, release_reason
-            FROM agir_db.release_stage_lease(
+            FROM ops.release_stage_lease(
                 p_lease_id := %s::uuid,
                 p_orchestrator_id := %s,
                 p_release_reason := %s,

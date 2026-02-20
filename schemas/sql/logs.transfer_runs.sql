@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS logs.transfer_runs (
   transfer_run_pk  BIGSERIAL PRIMARY KEY,
   transfer_run_id  UUID NOT NULL UNIQUE,
 
-  transfer_request_id BIGINT NOT NULL REFERENCES ops.transfer_requests(transfer_request_id),
+  transfer_request_id BIGINT NOT NULL REFERENCES logs.transfer_requests(transfer_request_id),
 
   batch_id      TEXT NOT NULL,
   data_state    TEXT NOT NULL,

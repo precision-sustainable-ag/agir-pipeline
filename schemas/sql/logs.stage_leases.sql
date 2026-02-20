@@ -1,7 +1,7 @@
 CREATE SCHEMA IF NOT EXISTS logs;
-CREATE SCHEMA IF NOT EXISTS agir_db;
+CREATE SCHEMA IF NOT EXISTS ops;
 
-CREATE OR REPLACE FUNCTION agir_db.uuid_v4()
+CREATE OR REPLACE FUNCTION ops.uuid_v4()
 RETURNS UUID
 LANGUAGE plpgsql
 AS $$
@@ -21,7 +21,7 @@ END;
 $$;
 
 CREATE TABLE IF NOT EXISTS logs.stage_leases (
-    lease_id         UUID PRIMARY KEY DEFAULT agir_db.uuid_v4(),
+    lease_id         UUID PRIMARY KEY DEFAULT ops.uuid_v4(),
     batch_id         TEXT NOT NULL,
     stage            TEXT NOT NULL,
     orchestrator_id  TEXT NOT NULL,
