@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/contracts/manifest_schema.json",
+  "title": "Stage Manifest",
+  "type": "object",
+
+  "required": [
+    "stage",
+    "stage_version",
+    "run_id",
+    "batch_id",
+    "schema_version",
+    "artifacts_root",
+    "items"
+  ],
+
+  "properties": {
+    "stage": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stage_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "batch_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+
+    "artifacts_root": {
+      "type": "string",
+      "minLength": 1
+    },
+
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "image_id",
+          "status"
+        ],
+        "properties": {
+          "image_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "failed",
+              "skipped"
+            ]
+          },
+
+          "artifacts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "checksum": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "size_bytes": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+
+          "error": {
+            "type": "object",
+            "required": [
+              "error_type",
+              "message",
+              "retryable"
+            ],
+            "properties": {
+              "error_type": {
+                "type": "string",
+                "minLength": 1
+              },
+              "message": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              },
+              "meta": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+
+  "additionalProperties": true
+}

@@ -55,6 +55,8 @@ from .transfers import TransferManager
 # Logging utilities
 from .utils.logging_setup import setup_logging, get_logger, set_level
 
+from .orchestration import OrchestrationManager
+
 # Exceptions - organized by category
 from .exceptions import (
     # Base
@@ -159,4 +161,5 @@ __all__ = [
     'InvalidImageIdError',
     'InvalidBatchIdError',
     'OrchestrationError',
+    'OrchestrationManager',
 ]
