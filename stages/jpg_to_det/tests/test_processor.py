@@ -164,10 +164,18 @@ def test_process_image_success(config_file, fake_jpg, tmp_path):
     assert result.txt_path == txt_path
     assert result.n_detections == 2
 
-    # verify detection_rows schema for CSV output
+    # verify detection_rows schema and values for CSV output
     assert len(result.detection_rows) == 2
     expected_keys = {"image_id", "bounding_box_id", "xmin", "ymin", "xmax", "ymax", "conf", "class", "classname"}
     assert set(result.detection_rows[0].keys()) == expected_keys
+    assert result.detection_rows[0] == {
+        "image_id": "test_image", "bounding_box_id": 0, "xmin": 0.1, "ymin": 0.2,
+        "xmax": 0.3, "ymax": 0.4, "conf": 0.9, "class": 0, "classname": "plant",
+    }
+    assert result.detection_rows[1] == {
+        "image_id": "test_image", "bounding_box_id": 1, "xmin": 0.5, "ymin": 0.6,
+        "xmax": 0.7, "ymax": 0.8, "conf": 0.8, "class": 0, "classname": "plant",
+    }
 
 
 def test_process_image_missing_jpg(config_file, tmp_path):
