@@ -51,7 +51,7 @@ def edge_aware_filter(
     min_factor: float = 0.60,
     taper_rel: float = 0.20,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """
+"""
     Dynamic confidence threshold based on distance to nearest image edge.
 
     Args:
@@ -379,7 +379,11 @@ def run_multiscale(model, im0_bgr, config: dict, device=None) -> torch.Tensor:
     final_max_det = int(config["final_max_det"])
 
 
+    # ====== weighted box fusion metadata ======
+    # internal overlap allowed
     wbf_iou = float(config.get("wbf_iou", 0.55))
+
+    # threshold (confience score a box needs to be included)
     wbf_score_thr = float(config.get("wbf_score_thr", 0.001))
 
     all_boxes_norm, all_scores, all_classes = [], [], []
