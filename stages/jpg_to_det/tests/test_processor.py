@@ -115,31 +115,6 @@ class TestValidateConfig:
             validate_config(None)
 
 
-# ── TestClassifyError ────────────────────────────────────────────────────────
-
-class TestClassifyError:
-    def test_file_not_found(self):
-        assert _classify_error(FileNotFoundError("no file")) == ERROR_IMAGE_READ_FAILED
-
-    def test_model_not_found(self):
-        assert _classify_error(FileNotFoundError("model not found")) == ERROR_MODEL_LOAD_FAILED
-
-    def test_value_error(self):
-        assert _classify_error(ValueError("bad config")) == ERROR_CFG_VALIDATION_FAILED
-
-    def test_inference_keyword(self):
-        assert _classify_error(RuntimeError("inference crashed")) == ERROR_INFERENCE_FAILED
-
-    def test_export_keyword(self):
-        assert _classify_error(RuntimeError("export failed")) == ERROR_EXPORT_FAILED
-
-    def test_image_read_keyword(self):
-        assert _classify_error(RuntimeError("image read error")) == ERROR_IMAGE_READ_FAILED
-
-    def test_unknown(self):
-        assert _classify_error(RuntimeError("something weird")) == ERROR_UNKNOWN
-
-
 # ── TestProcessImage ─────────────────────────────────────────────────────────
 
 def _make_processor(config_file, tmp_path):
@@ -176,26 +151,30 @@ class TestProcessImage:
             ]
             mock_export.return_value = (txt_path, rows)
 
-            result_txt, result_rows = proc.process_image(fake_jpg, out_dir)
+            result = proc.process_image(fake_jpg, out_dir)
 
-        assert result_txt == txt_path
-        assert len(result_rows) == 2
+        assert result.status == ITEM_OK
+        assert result.txt_path == txt_path
+        assert result.n_detections == 2
 
     def test_missing_jpg(self, config_file, tmp_path):
         proc = _make_processor(config_file, tmp_path)
         out_dir = tmp_path / "out"
         missing = tmp_path / "nope.jpg"
 
-        with pytest.raises(RuntimeError):
-            proc.process_image(missing, out_dir)
+        result = proc.process_image(missing, out_dir)
+        assert result.status == ITEM_FAILED
+        assert result.error_code == ERROR_IMAGE_READ_FAILED
 
     def test_inference_failure(self, config_file, fake_jpg, tmp_path):
         proc = _make_processor(config_file, tmp_path)
         out_dir = tmp_path / "out"
 
         with patch("stages.jpg_to_det.processor.run_multiscale", side_effect=RuntimeError("inference crashed")):
-            with pytest.raises(RuntimeError):
-                proc.process_image(fake_jpg, out_dir)
+            result = proc.process_image(fake_jpg, out_dir)
+
+        assert result.status == ITEM_FAILED
+        assert result.error_code == ERROR_INFERENCE_FAILED
 
     def test_export_failure(self, config_file, fake_jpg, tmp_path):
         proc = _make_processor(config_file, tmp_path)
@@ -204,8 +183,10 @@ class TestProcessImage:
 
         with patch("stages.jpg_to_det.processor.run_multiscale", return_value=det_tensor), \
              patch("stages.jpg_to_det.processor.export_predictions", side_effect=RuntimeError("export failed")):
-            with pytest.raises(RuntimeError):
-                proc.process_image(fake_jpg, out_dir)
+            result = proc.process_image(fake_jpg, out_dir)
+
+        assert result.status == ITEM_FAILED
+        assert result.error_code == ERROR_EXPORT_FAILED
 
 
 # ── TestProcessBatch ─────────────────────────────────────────────────────────
@@ -214,10 +195,14 @@ class TestProcessBatch:
     def test_all_success(self, config_file, fake_jpg, tmp_path):
         proc = _make_processor(config_file, tmp_path)
         out_dir = tmp_path / "out"
-        txt_path = out_dir / "test_image.txt"
-        rows = [{"image_id": "test_image", "bounding_box_id": 0}]
+        ok_result = DetectionResult(
+            image_id="test_image", status=ITEM_OK,
+            txt_path=out_dir / "test_image.txt",
+            detection_rows=[{"image_id": "test_image", "bounding_box_id": 0}],
+            n_detections=1,
+        )
 
-        with patch.object(proc, "process_image", return_value=(txt_path, rows)):
+        with patch.object(proc, "process_image", return_value=ok_result):
             results = proc.process_batch([fake_jpg], out_dir, fail_stop=False)
 
         assert len(results) == 1
@@ -227,8 +212,13 @@ class TestProcessBatch:
     def test_fail_stop_raises(self, config_file, fake_jpg, tmp_path):
         proc = _make_processor(config_file, tmp_path)
         out_dir = tmp_path / "out"
+        fail_result = DetectionResult(
+            image_id="test_image", status=ITEM_FAILED,
+            error_code=ERROR_IMAGE_READ_FAILED,
+            error_type="RuntimeError", error_message="image read error",
+        )
 
-        with patch.object(proc, "process_image", side_effect=RuntimeError("image read error")):
+        with patch.object(proc, "process_image", return_value=fail_result):
             with pytest.raises(RuntimeError):
                 proc.process_batch([fake_jpg], out_dir, fail_stop=True)
 
@@ -240,13 +230,19 @@ class TestProcessBatch:
         img2 = tmp_path / "img2.jpg"
         cv2.imwrite(str(img2), np.zeros((4, 4, 3), dtype=np.uint8))
 
-        txt_path = out_dir / "img2.txt"
-        rows = [{"image_id": "img2", "bounding_box_id": 0}]
+        fail_result = DetectionResult(
+            image_id="test_image", status=ITEM_FAILED,
+            error_code=ERROR_IMAGE_READ_FAILED,
+            error_type="RuntimeError", error_message="image read error",
+        )
+        ok_result = DetectionResult(
+            image_id="img2", status=ITEM_OK,
+            txt_path=out_dir / "img2.txt",
+            detection_rows=[{"image_id": "img2", "bounding_box_id": 0}],
+            n_detections=1,
+        )
 
-        with patch.object(proc, "process_image", side_effect=[
-            RuntimeError("image read error"),
-            (txt_path, rows),
-        ]):
+        with patch.object(proc, "process_image", side_effect=[fail_result, ok_result]):
             results = proc.process_batch([fake_jpg, img2], out_dir, fail_stop=False)
 
         assert len(results) == 2
@@ -256,10 +252,14 @@ class TestProcessBatch:
     def test_parallel_mode(self, config_file, fake_jpg, tmp_path):
         proc = _make_processor(config_file, tmp_path)
         out_dir = tmp_path / "out"
-        txt_path = out_dir / "test_image.txt"
-        rows = [{"image_id": "test_image", "bounding_box_id": 0}]
+        ok_result = DetectionResult(
+            image_id="test_image", status=ITEM_OK,
+            txt_path=out_dir / "test_image.txt",
+            detection_rows=[{"image_id": "test_image", "bounding_box_id": 0}],
+            n_detections=1,
+        )
 
-        with patch.object(proc, "process_image", return_value=(txt_path, rows)):
+        with patch.object(proc, "process_image", return_value=ok_result):
             results = proc.process_batch([fake_jpg], out_dir, fail_stop=False, max_workers=2)
 
         assert len(results) == 1
