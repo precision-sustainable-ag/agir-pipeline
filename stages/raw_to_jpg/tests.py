@@ -206,14 +206,16 @@ class TestProcessing:
         output_dir = tmp_path / "output"
 
         # ensures reading of mock raw file
-        with patch("numpy.fromfile") as mock_fromfile, \
+        with (
+            patch("numpy.fromfile") as mock_fromfile,
             # mocks rawtherapee validation
-             patch.object(DngToJpg, "validate_installation", return_value=True), \
-             patch.object(DngToJpg, "install_rawtherapee"), \
+            patch.object(DngToJpg, "validate_installation", return_value=True),
+            patch.object(DngToJpg, "install_rawtherapee"),
             # ensures path returns true
-             patch("pathlib.Path.exists", return_value=True), \
+            patch("pathlib.Path.exists", return_value=True),
             # ensure subprocesses run as true
-             patch("subprocess.run") as mock_run:
+            patch("subprocess.run") as mock_run,
+        ):
             mock_run.return_value = Mock(returncode=0)
             mock_fromfile.return_value = np.zeros((3072, 4096), dtype=np.uint16)
             processor = Processor(mock_config)
@@ -227,14 +229,16 @@ class TestProcessing:
         output_dir = tmp_path / "output"
 
         # ensures reading of mock raw file
-        with patch("numpy.fromfile") as mock_fromfile, \
+        with (
+            patch("numpy.fromfile") as mock_fromfile,
             # mocks rawtherapee validation
-             patch.object(DngToJpg, "validate_installation", return_value=True), \
-             patch.object(DngToJpg, "install_rawtherapee"), \
+            patch.object(DngToJpg, "validate_installation", return_value=True),
+            patch.object(DngToJpg, "install_rawtherapee"),
             # ensures path returns true
-             patch("pathlib.Path.exists", return_value=True), \
+            patch("pathlib.Path.exists", return_value=True),
             # ensure subprocesses run as true
-             patch("subprocess.run") as mock_run:
+            patch("subprocess.run") as mock_run,
+        ):
             mock_run.return_value = Mock(returncode=0)
             mock_fromfile.return_value = np.zeros((3072, 4096), dtype=np.uint16)
             processor = Processor(mock_config)
