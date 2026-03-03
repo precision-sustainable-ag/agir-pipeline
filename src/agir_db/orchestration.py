@@ -246,22 +246,10 @@ class OrchestrationManager:
                 g.site,
                 g.storage_domain,
                 '90daydata' AS namespace,
-                CASE
-                    WHEN g.storage_root LIKE '%%/LTS/%%' THEN REPLACE(g.storage_root, '/LTS/', '/90daydata/')
-                    WHEN g.storage_root LIKE '%%/LTS' THEN regexp_replace(g.storage_root, '/LTS$', '/90daydata')
-                    ELSE g.storage_root
-                END AS storage_root,
+                '/90daydata/dash_agir' AS storage_root,
                 g.rel_path,
-                CASE
-                    WHEN g.full_path LIKE '%%/LTS/%%' THEN REPLACE(g.full_path, '/LTS/', '/90daydata/')
-                    WHEN g.full_path LIKE '%%/LTS' THEN regexp_replace(g.full_path, '/LTS$', '/90daydata')
-                    ELSE g.full_path
-                END AS full_path,
-                CASE
-                    WHEN g.parent_dir LIKE '%%/LTS/%%' THEN REPLACE(g.parent_dir, '/LTS/', '/90daydata/')
-                    WHEN g.parent_dir LIKE '%%/LTS' THEN regexp_replace(g.parent_dir, '/LTS$', '/90daydata')
-                    ELSE g.parent_dir
-                END AS parent_dir,
+                ('/90daydata/dash_agir/' || g.rel_path) AS full_path,
+                ('/90daydata/dash_agir/' || regexp_replace(g.rel_path, '/[^/]+$', '')) AS parent_dir,
                 g.file_name,
                 g.entry_type,
                 g.file_ext,

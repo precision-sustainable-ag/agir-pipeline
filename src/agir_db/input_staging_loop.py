@@ -51,6 +51,14 @@ def run_input_staging_once(limit: int = 20, requested_by: str = "orchestrator.lo
                         error_summary=f"missing source path: {src_path}",
                     )
                     continue
+                dst_path = Path(item["dst_staging_ref"])
+                if not str(dst_path).startswith("/90daydata/dash_agir/"):
+                    db.orchestration.mark_input_transfer_status(
+                        transfer_id,
+                        "failed",
+                        error_summary=f"invalid phase2 destination: {dst_path}",
+                    )
+                    continue
                 db.orchestration.mark_input_transfer_status(transfer_id, "active")
                 globus_placeholder_transfer(item["src_lts_ref"], item["dst_staging_ref"])
                 db.orchestration.register_90daydata_index_for_batch(item["batch_id"])
