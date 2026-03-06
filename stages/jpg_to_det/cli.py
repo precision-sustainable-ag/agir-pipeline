@@ -71,10 +71,10 @@ def main() -> int:
     parser.add_argument("--m", type=Path, required=True, help="Path to YOLO model weights (.pt).")
     parser.add_argument("--i", type=Path, required=True, help="Directory containing JPG images.")
     parser.add_argument("--o", type=Path, required=True, help="Output directory.")
-    parser.add_argument("--t", type=int, default=0, help="Number of parallel threads. Default 0 = sequential.")
+    parser.add_argument("--t", type=int, default=0, help="Number of parallel worker processes. Default 0 = sequential.")
     parser.add_argument("--fs", action="store_true", help="Stop processing on first failure.")
     parser.add_argument("--batch-id", type=str, default=None, help="Batch ID. Auto-inferred from input path if omitted.")
-    parser.add_argument("--device", type=str, default="cpu", help="Torch device (cpu, cuda, cuda:0, etc.).")
+    parser.add_argument("--device", type=str, default="cpu", help="Torch device (e.g. cpu, cuda:0).")
 
     args = parser.parse_args()
 
@@ -183,6 +183,7 @@ def main() -> int:
             num_succeeded += 1
             all_detection_rows.extend(r.detection_rows)
 
+            # ensures path is relative
             txt_rel = str(r.txt_path.relative_to(artifacts_dir)) if r.txt_path else None
 
             checksum = {}

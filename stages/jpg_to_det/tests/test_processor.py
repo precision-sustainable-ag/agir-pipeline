@@ -11,17 +11,14 @@ import torch
 import yaml
 
 from stages.jpg_to_det import (
+    ERROR_MODEL_LOAD_FAILED,
     ERROR_IMAGE_READ_FAILED,
     ERROR_INFERENCE_FAILED,
     ERROR_EXPORT_FAILED,
-    ERROR_CFG_VALIDATION_FAILED,
-    ERROR_MODEL_LOAD_FAILED,
-    ERROR_UNKNOWN,
 )
 from stages.jpg_to_det.processor import (
     load_config,
     validate_config,
-    _classify_error,
     DetectionResult,
     Processor,
 )
@@ -133,29 +130,20 @@ class TestValidateConfig:
             validate_config(None)
 
 
-# ================ Test Classify Error ================
+# ================ Test Model Load ================
 
-class TestClassifyError:
-    def test_file_not_found(self):
-        assert _classify_error(FileNotFoundError("no file")) == ERROR_IMAGE_READ_FAILED
+class TestModelLoad:
+    def test_model_file_not_found(self, config_file, tmp_path):
+        missing_model = tmp_path / "missing.pt"
+        with pytest.raises(FileNotFoundError):
+            Processor(config_file, missing_model, device="cpu")
 
-    def test_model_not_found(self):
-        assert _classify_error(FileNotFoundError("model not found")) == ERROR_MODEL_LOAD_FAILED
-
-    def test_value_error(self):
-        assert _classify_error(ValueError("bad config")) == ERROR_CFG_VALIDATION_FAILED
-
-    def test_inference_keyword(self):
-        assert _classify_error(RuntimeError("inference crashed")) == ERROR_INFERENCE_FAILED
-
-    def test_export_keyword(self):
-        assert _classify_error(RuntimeError("export failed")) == ERROR_EXPORT_FAILED
-
-    def test_image_read_keyword(self):
-        assert _classify_error(RuntimeError("image read error")) == ERROR_IMAGE_READ_FAILED
-
-    def test_unknown(self):
-        assert _classify_error(RuntimeError("something weird")) == ERROR_UNKNOWN
+    def test_yolo_load_fails(self, config_file, tmp_path):
+        model_path = tmp_path / "model.pt"
+        model_path.touch()
+        with patch("stages.jpg_to_det.processor.YOLO", side_effect=Exception("corrupt model")):
+            with pytest.raises(RuntimeError, match=ERROR_MODEL_LOAD_FAILED):
+                Processor(config_file, model_path, device="cpu")
 
 
 # ================ Test Process Image ================
@@ -181,26 +169,31 @@ class TestProcessImage:
             ]
             mock_export.return_value = (txt_path, rows)
 
-            result_txt, result_rows = proc.process_image(fake_jpg, out_dir)
+            result = proc.process_image(fake_jpg, out_dir)
 
-        assert result_txt == txt_path
-        assert len(result_rows) == 2
+        assert result.status == ITEM_OK
+        assert result.txt_path == txt_path
+        assert result.n_detections == 2
+        assert len(result.detection_rows) == 2
 
     def test_missing_jpg(self, config_file, tmp_path):
         proc = _make_processor(config_file, tmp_path)
         out_dir = tmp_path / "out"
         missing = tmp_path / "nope.jpg"
 
-        with pytest.raises(RuntimeError):
-            proc.process_image(missing, out_dir)
+        result = proc.process_image(missing, out_dir)
+        assert result.status == ITEM_FAILED
+        assert result.error_code == ERROR_IMAGE_READ_FAILED
 
     def test_inference_failure(self, config_file, fake_jpg, tmp_path):
         proc = _make_processor(config_file, tmp_path)
         out_dir = tmp_path / "out"
 
         with patch("stages.jpg_to_det.processor.run_multiscale", side_effect=RuntimeError("inference crashed")):
-            with pytest.raises(RuntimeError):
-                proc.process_image(fake_jpg, out_dir)
+            result = proc.process_image(fake_jpg, out_dir)
+
+        assert result.status == ITEM_FAILED
+        assert result.error_code == ERROR_INFERENCE_FAILED
 
     def test_export_failure(self, config_file, fake_jpg, tmp_path):
         proc = _make_processor(config_file, tmp_path)
@@ -209,8 +202,10 @@ class TestProcessImage:
 
         with patch("stages.jpg_to_det.processor.run_multiscale", return_value=det_tensor), \
              patch("stages.jpg_to_det.processor.export_predictions", side_effect=RuntimeError("export failed")):
-            with pytest.raises(RuntimeError):
-                proc.process_image(fake_jpg, out_dir)
+            result = proc.process_image(fake_jpg, out_dir)
+
+        assert result.status == ITEM_FAILED
+        assert result.error_code == ERROR_EXPORT_FAILED
 
 
 # ================ Test Process Batch ================
@@ -222,20 +217,41 @@ class TestProcessBatch:
         txt_path = out_dir / "test_image.txt"
         rows = [{"image_id": "test_image", "bounding_box_id": 0}]
 
-        with patch.object(proc, "process_image", return_value=(txt_path, rows)):
+        ok_result = DetectionResult(
+            image_id="test_image", status=ITEM_OK,
+            txt_path=txt_path, detection_rows=rows, n_detections=1,
+        )
+        with patch.object(proc, "process_image", return_value=ok_result):
             results = proc.process_batch([fake_jpg], out_dir, fail_stop=False)
 
         assert len(results) == 1
         assert results[0].status == ITEM_OK
         assert results[0].n_detections == 1
 
-    def test_fail_stop_raises(self, config_file, fake_jpg, tmp_path):
+    def test_fail_stop_returns_early(self, config_file, fake_jpg, tmp_path):
         proc = _make_processor(config_file, tmp_path)
         out_dir = tmp_path / "out"
 
-        with patch.object(proc, "process_image", side_effect=RuntimeError("image read error")):
-            with pytest.raises(RuntimeError):
-                proc.process_batch([fake_jpg], out_dir, fail_stop=True)
+        import cv2
+        img2 = tmp_path / "img2.jpg"
+        cv2.imwrite(str(img2), np.zeros((4, 4, 3), dtype=np.uint8))
+
+        fail_result = DetectionResult(
+            image_id="test_image", status=ITEM_FAILED,
+            error_code=ERROR_IMAGE_READ_FAILED,
+            error_type="RuntimeError", error_message="image read error",
+        )
+        ok_result = DetectionResult(
+            image_id="img2", status=ITEM_OK,
+            txt_path=out_dir / "img2.txt",
+            detection_rows=[{"image_id": "img2"}], n_detections=1,
+        )
+        with patch.object(proc, "process_image", side_effect=[fail_result, ok_result]):
+            results = proc.process_batch([fake_jpg, img2], out_dir, fail_stop=True)
+
+        assert len(results) == 1
+        assert results[0].status == ITEM_FAILED
+        assert results[0].error_code == ERROR_IMAGE_READ_FAILED
 
     def test_no_fail_stop_continues(self, config_file, fake_jpg, tmp_path):
         proc = _make_processor(config_file, tmp_path)
@@ -248,10 +264,16 @@ class TestProcessBatch:
         txt_path = out_dir / "img2.txt"
         rows = [{"image_id": "img2", "bounding_box_id": 0}]
 
-        with patch.object(proc, "process_image", side_effect=[
-            RuntimeError("image read error"),
-            (txt_path, rows),
-        ]):
+        fail_result = DetectionResult(
+            image_id="test_image", status=ITEM_FAILED,
+            error_code=ERROR_IMAGE_READ_FAILED,
+            error_type="RuntimeError", error_message="image read error",
+        )
+        ok_result = DetectionResult(
+            image_id="img2", status=ITEM_OK,
+            txt_path=txt_path, detection_rows=rows, n_detections=1,
+        )
+        with patch.object(proc, "process_image", side_effect=[fail_result, ok_result]):
             results = proc.process_batch([fake_jpg, img2], out_dir, fail_stop=False)
 
         assert len(results) == 2
@@ -261,10 +283,26 @@ class TestProcessBatch:
     def test_parallel_mode(self, config_file, fake_jpg, tmp_path):
         proc = _make_processor(config_file, tmp_path)
         out_dir = tmp_path / "out"
-        txt_path = out_dir / "test_image.txt"
-        rows = [{"image_id": "test_image", "bounding_box_id": 0}]
 
-        with patch.object(proc, "process_image", return_value=(txt_path, rows)):
+        ok_result = DetectionResult(
+            image_id="test_image", status=ITEM_OK,
+            txt_path=out_dir / "test_image.txt",
+            detection_rows=[{"image_id": "test_image", "bounding_box_id": 0}],
+            n_detections=1,
+        )
+
+        # Mock the spawn context and pool
+        mock_async_result = MagicMock()
+        mock_async_result.get.return_value = ok_result
+
+        mock_pool = MagicMock()
+        mock_pool.apply_async.return_value = mock_async_result
+
+        mock_ctx = MagicMock()
+        mock_ctx.Pool.return_value = mock_pool
+
+        with patch("stages.jpg_to_det.processor.mp") as mock_mp:
+            mock_mp.get_context.return_value = mock_ctx
             results = proc.process_batch([fake_jpg], out_dir, fail_stop=False, max_workers=4)
 
         assert len(results) == 1
