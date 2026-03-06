@@ -51,7 +51,7 @@ def edge_aware_filter(
     min_factor: float = 0.60,
     taper_rel: float = 0.20,
 ) -> tuple[np.ndarray, np.ndarray]:
-"""
+    """
     Dynamic confidence threshold based on distance to nearest image edge.
 
     Args:
