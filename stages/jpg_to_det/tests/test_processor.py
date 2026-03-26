@@ -10,6 +10,7 @@ import pytest
 import torch
 import yaml
 
+
 from stages.jpg_to_det import (
     ERROR_MODEL_LOAD_FAILED,
     ERROR_IMAGE_READ_FAILED,
@@ -291,18 +292,7 @@ class TestProcessBatch:
             n_detections=1,
         )
 
-        # Mock the spawn context and pool
-        mock_async_result = MagicMock()
-        mock_async_result.get.return_value = ok_result
-
-        mock_pool = MagicMock()
-        mock_pool.apply_async.return_value = mock_async_result
-
-        mock_ctx = MagicMock()
-        mock_ctx.Pool.return_value = mock_pool
-
-        with patch("stages.jpg_to_det.processor.mp") as mock_mp:
-            mock_mp.get_context.return_value = mock_ctx
+        with patch.object(proc, "process_image", return_value=ok_result):
             results = proc.process_batch([fake_jpg], out_dir, fail_stop=False, max_workers=4)
 
         assert len(results) == 1
