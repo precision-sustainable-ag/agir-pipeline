@@ -6,10 +6,18 @@ report:
 transfer:
   # Which data_state in source.globus_file_index to move
   data_state: semifield-upload
-  # Globus destination settings
+
+  # JUNO Globus destination UUID.
+  # TODO: Confirm whether this should always be a Globus collection UUID.
   juno_endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
-  
-  dest_root: /LTS/project/dash_agir/semifield-upload # where to mirror rel_path on JUNO
+
+  # NCSU local Globus source UUID.
+  # TODO: Confirm whether this should remain fixed across environments.
+  ncsu_endpoint: "2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
+
+  # Destination root on JUNO Globus where rel_path will be mirrored.
+  # TODO: Confirm whether this should always target /LTS/project/dash_agir or vary by workflow.
+  dest_root: /LTS/project/dash_agir/semifield-upload
   dry_run: false   # set to false to actually run globus transfer
 
   # Highest preference first

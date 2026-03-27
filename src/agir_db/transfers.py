@@ -9,8 +9,12 @@ Relies on database views:
   - report.batches_to_copy_to_juno
 """
 
+import re
 import subprocess
-from typing import Dict, List, Optional, Literal, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Literal, Tuple
+
+import yaml
 
 from .connection import ConnectionManager
 
@@ -240,6 +244,35 @@ class TransferManager:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def load_transfer_config(config_path: str = "configs/juno_transfer.yaml") -> Dict[str, Any]:
+        """Load shared Globus transfer configuration."""
+        with open(config_path, "r", encoding="utf-8") as handle:
+            return yaml.safe_load(handle)
+
+    @staticmethod
+    def parse_globus_task_id(output: str) -> Optional[str]:
+        """Extract the Globus task id from CLI output when available."""
+        match = re.search(r"Task ID:\s*([a-f0-9-]+)", output, re.IGNORECASE)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def endpoint_relative_path(full_path: str, root_path: str) -> str:
+        """
+        Convert a filesystem path into a Globus endpoint-relative path.
+
+        TODO: Confirm whether Globus paths should be derived from DB refs directly
+        or translated from NCSU local filesystem paths using configured roots.
+        """
+        full = Path(full_path)
+        root = Path(root_path)
+        return "/" + str(full.relative_to(root)).lstrip("/")
+
+    @staticmethod
+    def build_input_staging_label(stage: str, batch_id: str) -> str:
+        """Construct a stable label for an input staging transfer."""
+        return f"agir:{stage}:{batch_id}:input_stage"
+
+    @staticmethod
     def build_globus_cmd(
         src_endpoint: str,
         dst_endpoint: str,
@@ -279,3 +312,28 @@ class TransferManager:
             return "submitted", None
         except subprocess.CalledProcessError as exc:
             return "failed", str(exc)
+
+    @staticmethod
+    def submit_globus_transfer(
+        cmd: List[str],
+        dry_run: bool,
+    ) -> Tuple[str, Optional[str], Optional[str]]:
+        """
+        Submit a Globus transfer and capture any returned task metadata.
+
+        Returns: (status, globus_task_id, details)
+
+        TODO: Confirm whether input staging should stop after transfer submission
+        or poll Globus until a terminal task state is reached.
+        """
+        if dry_run:
+            return "dry_run", None, " ".join(cmd)
+
+        try:
+            proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            output = (proc.stdout or "").strip()
+            task_id = TransferManager.parse_globus_task_id(output)
+            return "submitted", task_id, output
+        except subprocess.CalledProcessError as exc:
+            details = ((exc.stderr or "") + "\n" + (exc.stdout or "")).strip() or str(exc)
+            return "failed", None, details

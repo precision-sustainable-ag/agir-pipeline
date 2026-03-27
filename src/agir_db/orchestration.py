@@ -229,6 +229,48 @@ class OrchestrationManager:
         )
         return row or {}
 
+    def mark_input_transfer_submitted(
+        self,
+        transfer_id: str,
+        globus_task_id: Optional[str],
+        globus_src_endpoint: str,
+        globus_dst_endpoint: str,
+        globus_label: Optional[str] = None,
+        submission_details: Optional[str] = None,
+    ) -> Dict:
+        """
+        Persist Globus submission metadata so transfer requests can be
+        reconciled with Globus task state after submission.
+        """
+        row = self.conn.fetch_one(
+            """
+            UPDATE logs.transfer_runs
+            SET
+              status = 'active',
+              started_at = COALESCE(started_at, now()),
+              globus_task_id = %s,
+              globus_src_endpoint = %s,
+              globus_dst_endpoint = %s,
+              globus_label = %s,
+              submission_details = %s
+            WHERE transfer_id = %s::uuid
+            RETURNING
+              transfer_id::text AS transfer_id,
+              status,
+              globus_task_id,
+              started_at
+            """,
+            (
+                globus_task_id,
+                globus_src_endpoint,
+                globus_dst_endpoint,
+                globus_label,
+                submission_details,
+                transfer_id,
+            ),
+        )
+        return row or {}
+
     def register_90daydata_index_for_batch(
         self,
         batch_id: str,

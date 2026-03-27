@@ -7,8 +7,29 @@ from pathlib import Path
 from agir_db import AgirDB
 
 
+def build_globus_submission_context(item: dict, cfg: dict) -> dict:
+    """
+    Prepare transfer context for NCSU local Globus -> JUNO Globus submission.
+
+    TODO: Confirm whether src_lts_ref and dst_staging_ref should be used directly,
+    or converted to endpoint-relative paths from configured storage roots.
+    """
+    transfer_cfg = cfg.get("transfer", {})
+    return {
+        "batch_id": item["batch_id"],
+        "stage": item["stage"],
+        "src_lts_ref": item["src_lts_ref"],
+        "dst_staging_ref": item["dst_staging_ref"],
+        "src_endpoint": transfer_cfg.get("ncsu_endpoint"),
+        "dst_endpoint": transfer_cfg.get("juno_endpoint"),
+        "dst_root": transfer_cfg.get("dest_root"),
+    }
+
+
 def globus_placeholder_transfer(src: str, dst: str) -> None:
     # Placeholder for real Globus integration; local copy only for now.
+    # TODO: Replace local copy with NCSU local Globus -> JUNO Globus transfer submission.
+    # TODO: Confirm whether src_lts_ref and dst_staging_ref are already valid Globus paths.
     src_p = Path(src)
     dst_p = Path(dst)
 
@@ -25,6 +46,8 @@ def globus_placeholder_transfer(src: str, dst: str) -> None:
 def run_input_staging_once(limit: int = 20, requested_by: str = "orchestrator.local") -> int:
     moved = 0
     with AgirDB() as db:
+        # TODO: Load shared JUNO Globus transfer config here before switching
+        # from the local placeholder copy path to transfer submission.
         candidates = db.orchestration.get_batches_needing_input_staging(limit=limit, stages=["raw_to_jpg"])
         for item in candidates:
             req = db.orchestration.request_input_transfer(
@@ -43,6 +66,8 @@ def run_input_staging_once(limit: int = 20, requested_by: str = "orchestrator.lo
 
             transfer_id = req["transfer_id"]
             try:
+                # TODO: Use build_globus_submission_context(...) when wiring
+                # the real Globus submission path into this loop.
                 src_path = Path(item["src_lts_ref"])
                 if not src_path.exists():
                     db.orchestration.mark_input_transfer_status(
