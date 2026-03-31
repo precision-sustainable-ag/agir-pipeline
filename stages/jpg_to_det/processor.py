@@ -3,10 +3,9 @@ JPG -> Detection processor.
 """
 
 import logging
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-import threading
 from typing import Iterable, List
 
 import cv2
@@ -99,13 +98,106 @@ def load_config(config_path: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Multiprocessing worker globals
+# ---------------------------------------------------------------------------
+
+_WORKER_MODEL = None
+_WORKER_CONFIG = None
+_WORKER_DEVICE = None
+_WORKER_NAMES = None
+
+
+def _init_worker(config_path: str, model_path: str, device: str) -> None:
+    """
+    Initialize one YOLO model per worker process.
+    """
+    global _WORKER_MODEL, _WORKER_CONFIG, _WORKER_DEVICE, _WORKER_NAMES
+
+    _WORKER_CONFIG = load_config(Path(config_path))
+    _WORKER_DEVICE = device
+
+    try:
+        _WORKER_MODEL = YOLO(str(model_path))
+    except Exception as e:
+        raise RuntimeError(f"{ERROR_MODEL_LOAD_FAILED}: {e}") from e
+
+    _WORKER_NAMES = _WORKER_MODEL.names
+
+
+def _process_image_worker(jpg_path: str, output_dir: str) -> DetectionResult:
+    """
+    Process a single image inside a worker process.
+    """
+    global _WORKER_MODEL, _WORKER_CONFIG, _WORKER_DEVICE, _WORKER_NAMES
+
+    jpg_path = Path(jpg_path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    image_id = jpg_path.stem
+
+    try:
+        im0 = cv2.imread(str(jpg_path))
+        if im0 is None:
+            raise RuntimeError(f"cv2.imread returned None for {jpg_path}")
+    except Exception as e:
+        return DetectionResult(
+            image_id=image_id,
+            status=ITEM_FAILED,
+            error_code=ERROR_IMAGE_READ_FAILED,
+            error_type=type(e).__name__,
+            error_message=str(e),
+        )
+
+    try:
+        det_abs = run_multiscale(
+            model=_WORKER_MODEL,
+            im0_bgr=im0,
+            config=_WORKER_CONFIG,
+            device=_WORKER_DEVICE,
+        )
+    except Exception as e:
+        return DetectionResult(
+            image_id=image_id,
+            status=ITEM_FAILED,
+            error_code=ERROR_INFERENCE_FAILED,
+            error_type=type(e).__name__,
+            error_message=str(e),
+        )
+
+    try:
+        txt_path, detection_rows = export_predictions(
+            results_raw_xyxy_abs=det_abs,
+            save_dir=output_dir,
+            filename=str(jpg_path),
+            names=_WORKER_NAMES,
+            im0=im0,
+        )
+    except Exception as e:
+        return DetectionResult(
+            image_id=image_id,
+            status=ITEM_FAILED,
+            error_code=ERROR_EXPORT_FAILED,
+            error_type=type(e).__name__,
+            error_message=str(e),
+        )
+
+    return DetectionResult(
+        image_id=image_id,
+        status=ITEM_OK,
+        txt_path=txt_path,
+        detection_rows=detection_rows,
+        n_detections=len(detection_rows),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Processor
 # ---------------------------------------------------------------------------
 
 class Processor:
     """
-    Detection processor — loads YOLO model once, runs multiscale detection
-    on each JPG image. Parallel mode uses a shared-model thread pool.
+    Detection processor — loads YOLO model once for sequential mode.
+    Parallel mode uses one model per worker process.
     """
 
     def __init__(
@@ -114,7 +206,8 @@ class Processor:
         model_path: Path,
         device: str = "cpu",
     ) -> None:
-        self.config = load_config(config_path)
+        self.config_path = Path(config_path)
+        self.config = load_config(self.config_path)
         self.device = device
         self.model_path = Path(model_path)
 
@@ -128,28 +221,15 @@ class Processor:
 
         self.names = self.model.names
 
-        # lock inference model
-        self._inference_lock = threading.Lock()
-
-    def process_image(self, jpg_path: Path, output_dir: Path, use_lock: bool = False) -> DetectionResult:
+    def process_image(self, jpg_path: Path, output_dir: Path) -> DetectionResult:
         """
-        Run detection on a single JPG.
-
-        Args:
-            jpg_path: Path to the input JPG image.
-            output_dir: Directory where per-image detection artifacts are written.
-            use_lock: If True, use lock to manage inference model usage.
-
-        Returns:
-            DetectionResult with ITEM_OK on success or ITEM_FAILED with error details.
+        Sequential single-image path.
         """
         jpg_path = Path(jpg_path)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         image_id = jpg_path.stem
-        device = self.device
 
-        # Read image
         try:
             im0 = cv2.imread(str(jpg_path))
             if im0 is None:
@@ -163,20 +243,13 @@ class Processor:
                 error_message=str(e),
             )
 
-        # Run model inference with optional lock
         try:
-            if use_lock:
-                # ensure no other thread is using the model
-                with self._inference_lock:
-                    det_abs = run_multiscale(
-                        model=self.model, im0_bgr=im0,
-                        config=self.config, device=device,
-                    )
-            else:
-                det_abs = run_multiscale(
-                    model=self.model, im0_bgr=im0,
-                    config=self.config, device=device,
-                )
+            det_abs = run_multiscale(
+                model=self.model,
+                im0_bgr=im0,
+                config=self.config,
+                device=self.device,
+            )
         except Exception as e:
             return DetectionResult(
                 image_id=image_id,
@@ -186,11 +259,13 @@ class Processor:
                 error_message=str(e),
             )
 
-        # Export file path
         try:
             txt_path, detection_rows = export_predictions(
-                results_raw_xyxy_abs=det_abs, save_dir=output_dir,
-                filename=str(jpg_path), names=self.names, im0=im0,
+                results_raw_xyxy_abs=det_abs,
+                save_dir=output_dir,
+                filename=str(jpg_path),
+                names=self.names,
+                im0=im0,
             )
         except Exception as e:
             return DetectionResult(
@@ -217,9 +292,9 @@ class Processor:
         max_workers: int = 0,
     ) -> List[DetectionResult]:
         """
-        Process multiple JPG images, optionally in parallel via thread pool.
+        Process multiple JPG images, optionally in parallel via process pool.
         """
-        jpg_list = list(jpg_images)
+        jpg_list = [Path(p) for p in jpg_images]
         results: List[DetectionResult] = []
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -245,31 +320,38 @@ class Processor:
 
         workers = max(1, int(max_workers))
         logger.info(
-            "Execution plan | device=%s | mode=single-model-threadpool | workers=%d | model_copies=1",
+            "Execution plan | device=%s | mode=process-pool | workers=%d | model_copies=%d",
             self.device,
             workers,
+            workers,
         )
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            # catch a list of futures (tasks to run in the threadpool)
-            futures = [
-                executor.submit(
-                    self.process_image,
-                    jpg_path=jpg_path,
-                    output_dir=output_dir,
-                    use_lock=True,
-                )
+
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_init_worker,
+            initargs=(str(self.config_path), str(self.model_path), self.device),
+        ) as executor:
+            future_to_path = {
+                executor.submit(_process_image_worker, str(jpg_path), str(output_dir)): jpg_path
                 for jpg_path in jpg_list
-            ]
+            }
 
-            for idx in range(len(jpg_list)):
-                future = futures[idx]
-                jpg_path = jpg_list[idx]
+            for future in as_completed(future_to_path):
+                jpg_path = future_to_path[future]
 
-                # wait for task future results
-                result = future.result()
+                try:
+                    result = future.result()
+                except Exception as e:
+                    result = DetectionResult(
+                        image_id=jpg_path.stem,
+                        status=ITEM_FAILED,
+                        error_code=ERROR_INFERENCE_FAILED,
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                    )
+
                 results.append(result)
 
-                
                 if result.status == ITEM_OK:
                     logger.info("Processed %s -> %s", jpg_path.name, result.txt_path.name)
                 else:
@@ -278,8 +360,11 @@ class Processor:
                         jpg_path.name, result.error_code, result.error_message,
                     )
                     if fail_stop:
-                        for pending in futures[idx + 1:]:
+                        for pending in future_to_path:
                             pending.cancel()
                         return results
 
-        return results
+        # optional: keep output ordering stable
+        result_map = {r.image_id: r for r in results}
+        ordered_results = [result_map[p.stem] for p in jpg_list if p.stem in result_map]
+        return ordered_results
