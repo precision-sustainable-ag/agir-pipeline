@@ -179,6 +179,13 @@ source /path/to/venv/bin/activate
 
 ---
 
+## Atlas Performance
+
+See [performance.md](/Users/brennenfarrell/Random/psa/agir-pipeline/docs/performance.md) for the current GPU timing comparison and Atlas run notes.
+For heavy inference tasks, such as JPG to DET, this guide should be followed.
+
+---
+
 ## Notes / assumptions
 
 * Requires `bash`, `curl` (only if `uv` must be installed), and optionally `psql` for schema/test steps.

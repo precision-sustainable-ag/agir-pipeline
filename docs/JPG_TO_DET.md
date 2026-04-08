@@ -370,3 +370,71 @@ post_fusion_nms:
   enabled: false
   iou: 0.5
 ```
+
+
+## High Performance Running
+
+Atlas test scripts are under [tests/gpu](/Users/brennenfarrell/Random/psa/agir-pipeline/tests/gpu), and current GPU timing/performance notes are in [performance.md](/Users/brennenfarrell/Random/psa/agir-pipeline/docs/performance.md).
+
+
+
+As the inference in this task can be very compute intensive, it is recommended to run using Atlas. Example scrips can be found in tests/gpu/. Currently, the A100 is highly recommended. 
+
+
+Atlas test scripts are under [tests/gpu](/Users/brennenfarrell/Random/psa/agir-pipeline/tests/gpu), and current GPU timing/performance notes are in [performance.md](/Users/brennenfarrell/Random/psa/agir-pipeline/docs/performance.md).
+
+
+The scrips are described below
+
+```bash
+tests/gpu/
+```
+
+
+
+### A100
+
+```bash
+sbatch tests/gpu/jpg_to_det_a100.sh
+```
+
+### L40S
+
+```bash
+sbatch tests/gpu/jpg_to_det_l40s.sh
+```
+
+### A100 MIG7
+
+```bash
+sbatch tests/gpu/jpg_to_det_a100_mig7.sh
+```
+
+### Run All Three
+
+```bash
+bash tests/gpu/run_all_jpg_to_det.sh
+```
+
+### MIG7 Config
+
+```yaml
+base_imgsz: 2048
+scales: [0.5, 0.75, 1.0]
+per_scale_conf: 0.15
+per_scale_iou: 0.5
+per_scale_max_det: 300
+conf: 0.70
+iou: 0.5
+final_max_det: 300
+wbf_iou: 0.55
+wbf_score_thr: 0.001
+edge_aware:
+  enabled: true
+  edge_band_rel: 0.08
+  min_factor: 0.60
+  taper_rel: 0.20
+post_fusion_nms:
+  enabled: false
+  iou: 0.5
+```
