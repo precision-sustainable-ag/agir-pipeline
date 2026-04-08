@@ -18,6 +18,8 @@
 ## Bash Script Notes
 The table below describes the different elements required for the example GPU SLURM script.
 
+The visualization step in the GPU test scripts uses [visualize_detections.py](/Users/brennenfarrell/Random/psa/agir-pipeline/scripts/visualize_detections.py). That helper reads YOLO-format `.txt` outputs from the resolved `artifacts/` directory, draws the predicted boxes and confidence values onto a random sample of JPGs, and downscales the rendered images for easier review.
+
 | Item | Value |
 |------|-------|
 | JPG_INPUT_DIR | Directory of input JPG images passed into the detector. |
