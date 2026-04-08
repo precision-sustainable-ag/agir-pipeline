@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Exit on command errors, unset variables, and pipeline failures.
 set -euo pipefail
 
 # This script lives in repo_root/scripts/

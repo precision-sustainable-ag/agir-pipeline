@@ -12,6 +12,7 @@
 #SBATCH -o /project/dash_agir/brennen.farrell/logs/%x-%j.out
 #SBATCH -e /project/dash_agir/brennen.farrell/logs/%x-%j.err
 
+# Exit on command errors, unset variables, and pipeline failures.
 set -euo pipefail
 
 export OMP_NUM_THREADS=1
@@ -60,6 +61,7 @@ python3 -m stages.jpg_to_det.cli \
   --batch-id "$BATCH_ID" \
   --device "$DET_DEVICE"
 
+# Resolve the most recently updated detection artifacts directory.
 DET_ARTIFACT_DIR="$(ls -td "$FINAL_DET_DIR"/jpg_to_det/*/artifacts 2>/dev/null | head -n 1)"
 if [[ -z "$DET_ARTIFACT_DIR" || ! -d "$DET_ARTIFACT_DIR" ]]; then
   echo "Could not resolve detection artifacts directory under $FINAL_DET_DIR/jpg_to_det" >&2

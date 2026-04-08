@@ -15,6 +15,7 @@ export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
+# Exit on command errors, unset variables, and pipeline failures.
 set -euo pipefail
 
 echo "Setting up paths..."

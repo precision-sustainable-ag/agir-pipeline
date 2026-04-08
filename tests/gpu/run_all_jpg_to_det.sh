@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Exit on command errors, unset variables, and pipeline failures.
 set -euo pipefail
 
 sbatch tests/gpu/jpg_to_det_a100.sh

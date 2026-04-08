@@ -12,6 +12,7 @@
 # Recreate env (non-interactive):
 #   AGIR_RECREATE_ENV=1 ./setup.sh --dev
 #
+# Exit on command errors, unset variables, and pipeline failures.
 set -euo pipefail
 
 # -----------------------------
