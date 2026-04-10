@@ -6,7 +6,7 @@ Checks:
 1) batch appears in report.batches_needing_input_staging (Q8)
 2) batch does not appear in report.ready_work before staging
 3) Q9 request_input_transfer returns created then already_active (idempotent active dedupe)
-4) input staging loop copies LTS -> /90daydata and records transfer
+4) input staging loop submits + polls transfer and records transfer completion
 5) Q9 returns already_completed after staging
 6) batch disappears from report.batches_needing_input_staging after staging
 7) batch appears in report.ready_work after staging
@@ -15,6 +15,7 @@ Checks:
 from __future__ import annotations
 
 import os
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -43,7 +44,7 @@ def load_env_from_file(env_path: Path) -> None:
 def make_seed_paths(batch_id: str) -> tuple[Path, Path, list[Path]]:
     rel_dir = Path("NC_2025-12-03/images/upload_raw") / batch_id
     src_root = Path("/tmp/agir/LTS")
-    dst_root = Path("/tmp/agir/90daydata")
+    dst_root = Path("/90daydata/dash_agir")
     src_dir = src_root / rel_dir
     dst_dir = dst_root / rel_dir
     src_dir.mkdir(parents=True, exist_ok=True)
@@ -55,9 +56,40 @@ def make_seed_paths(batch_id: str) -> tuple[Path, Path, list[Path]]:
 
 
 def refs_for_batch(src_root: Path, batch_id: str) -> tuple[str, str]:
-    src = src_root / "NC_2025-12-03/images/upload_raw" / batch_id
-    dst = Path(str(src).replace("/LTS/", "/90daydata/"))
+    rel_dir = Path("NC_2025-12-03/images/upload_raw") / batch_id
+    src = src_root / rel_dir
+    dst = Path("/90daydata/dash_agir") / rel_dir
     return str(src), str(dst)
+
+
+def write_test_transfer_config() -> str:
+    text = """
+transfer:
+  juno_endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
+  ncsu_endpoint: "2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
+  ceres_endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+  source_mode: testing_ncsu
+  dry_run: true
+  poll_interval_seconds: 1
+  poll_timeout_seconds: 5
+  max_poll_attempts: 5
+  routes:
+    raw_to_jpg:
+      data_state: semifield-upload
+      source_root_juno: /LTS/project/dash_agir/semifield-upload
+      source_root_ncsu: /tmp/agir/LTS/NC_2025-12-03/images/upload_raw
+      destination_root: /90daydata/dash_agir/semifield-upload
+    post_raw_to_jpg:
+      data_state: semifield-developed-images
+      source_root_juno: /LTS/project/dash_agir/semifield-developed-images
+      source_root_ncsu: /tmp/agir/LTS/NC_2025-12-03/images/developed_images
+      destination_root: /90daydata/dash_agir/semifield-developed-images
+"""
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
+    tmp.write(text)
+    tmp.flush()
+    tmp.close()
+    return tmp.name
 
 
 def cleanup_batch(batch_id: str) -> None:
@@ -102,7 +134,8 @@ def main() -> int:
 
     stage_batch_id = f"000_PHASE2_STAGE_{uuid.uuid4().hex[:8]}"
     q9_batch_id = f"000_PHASE2_Q9_{uuid.uuid4().hex[:8]}"
-    src_root, dst_dir, stage_files = make_seed_paths(stage_batch_id)
+    transfer_cfg_path = write_test_transfer_config()
+    src_root, _, stage_files = make_seed_paths(stage_batch_id)
     _, _, q9_files = make_seed_paths(q9_batch_id)
 
     try:
@@ -148,14 +181,14 @@ def main() -> int:
             assert req2.get("state") == "already_active", f"Expected already_active, got {req2}"
             print(f"[OK] Q9 created -> already_active idempotency works: {q9_batch_id}")
 
-        moved = run_input_staging_once(limit=2, requested_by="phase2-test")
+        moved = run_input_staging_once(
+            limit=2,
+            requested_by="phase2-test",
+            config_path=transfer_cfg_path,
+            batch_ids=[stage_batch_id, q9_batch_id],
+        )
         assert moved == 1, f"Expected one staged batch, got {moved}"
-        print(f"[OK] Staging loop moved one batch: {stage_batch_id}")
-
-        # 4) Files exist in /90daydata
-        assert (dst_dir / "img1.raw").exists(), "Missing staged file img1.raw"
-        assert (dst_dir / "img2.raw").exists(), "Missing staged file img2.raw"
-        print(f"[OK] Files copied to /90daydata: {dst_dir}")
+        print(f"[OK] Staging loop completed one batch via submit+poll: {stage_batch_id}")
 
         with AgirDB() as db:
             # 5) Q9 returns already_completed after staging
@@ -185,7 +218,7 @@ def main() -> int:
             # transfer log status
             tr = db.orchestration.conn.fetch_one(
                 """
-                SELECT status, error_summary
+                SELECT status, error_summary, globus_task_id, poll_attempts
                 FROM logs.transfer_runs
                 WHERE batch_id = %s AND stage = 'raw_to_jpg'
                 ORDER BY created_at DESC
@@ -194,6 +227,8 @@ def main() -> int:
                 (stage_batch_id,),
             )
             assert tr is not None and tr["status"] == "completed", f"Transfer status is not completed: {tr}"
+            assert tr["globus_task_id"] is not None, f"Expected globus_task_id to be present: {tr}"
+            assert int(tr["poll_attempts"] or 0) >= 1, f"Expected at least one poll attempt: {tr}"
             print(f"[OK] Transfer completed in logs.transfer_runs: {stage_batch_id}")
 
         print("\nPASS: Phase 2 orchestration test passed.")
@@ -201,6 +236,7 @@ def main() -> int:
     finally:
         cleanup_batch(stage_batch_id)
         cleanup_batch(q9_batch_id)
+        Path(transfer_cfg_path).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

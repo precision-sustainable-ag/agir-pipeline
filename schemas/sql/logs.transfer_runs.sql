@@ -29,6 +29,9 @@ CREATE TABLE logs.transfer_runs (
   globus_dst_endpoint  TEXT NULL,
   globus_label         TEXT NULL,
   submission_details   TEXT NULL,
+  globus_status_text   TEXT NULL,
+  last_polled_at       TIMESTAMPTZ NULL,
+  poll_attempts        INTEGER NOT NULL DEFAULT 0,
 
   created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -39,7 +42,8 @@ CREATE UNIQUE INDEX idx_transfer_runs_active_input
 
 CREATE UNIQUE INDEX idx_transfer_runs_dedupe_key
   ON logs.transfer_runs (dedupe_key)
-  WHERE dedupe_key IS NOT NULL;
+  WHERE dedupe_key IS NOT NULL
+    AND status <> 'failed';
 
 CREATE INDEX idx_transfer_runs_status_time
   ON logs.transfer_runs (status, requested_at DESC);

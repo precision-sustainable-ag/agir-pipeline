@@ -156,12 +156,14 @@ class OrchestrationManager:
         limit: int = 100,
         stages: Optional[List[str]] = None,
         min_priority: Optional[int] = None,
+        batch_ids: Optional[List[str]] = None,
     ) -> List[Dict]:
         query = """
             SELECT batch_id, stage, transfer_profile_id, src_lts_ref, dst_staging_ref, priority
             FROM report.batches_needing_input_staging
             WHERE (%s IS NULL OR stage = ANY(%s))
               AND (%s IS NULL OR priority >= %s)
+              AND (%s IS NULL OR batch_id = ANY(%s))
             ORDER BY priority DESC, batch_id ASC
             LIMIT %s
         """
@@ -170,6 +172,8 @@ class OrchestrationManager:
             stages if stages else None,
             min_priority,
             min_priority,
+            batch_ids if batch_ids else None,
+            batch_ids if batch_ids else None,
             limit,
         )
         return self.conn.fetch_all(query, params)
@@ -246,8 +250,7 @@ class OrchestrationManager:
             """
             UPDATE logs.transfer_runs
             SET
-              status = 'active',
-              started_at = COALESCE(started_at, now()),
+              status = 'requested',
               globus_task_id = %s,
               globus_src_endpoint = %s,
               globus_dst_endpoint = %s,
@@ -268,6 +271,65 @@ class OrchestrationManager:
                 submission_details,
                 transfer_id,
             ),
+        )
+        return row or {}
+
+    def get_pending_input_transfers_for_polling(self, limit: int = 100) -> List[Dict]:
+        """Return requested/active transfers that have a Globus task id."""
+        return self.conn.fetch_all(
+            """
+            SELECT
+              transfer_id::text AS transfer_id,
+              batch_id,
+              stage,
+              status,
+              globus_task_id,
+              poll_attempts,
+              requested_at,
+              started_at
+            FROM logs.transfer_runs
+            WHERE direction = 'input_stage'
+              AND status IN ('requested', 'active')
+              AND globus_task_id IS NOT NULL
+            ORDER BY requested_at ASC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+
+    def update_input_transfer_poll_result(
+        self,
+        transfer_id: str,
+        status: str,
+        globus_status_text: Optional[str] = None,
+        error_summary: Optional[str] = None,
+    ) -> Dict:
+        """
+        Update transfer status based on Globus polling.
+
+        Expected lifecycle: requested -> active -> completed/failed.
+        """
+        row = self.conn.fetch_one(
+            """
+            UPDATE logs.transfer_runs
+            SET
+              status = %s,
+              started_at = CASE WHEN %s = 'active' THEN COALESCE(started_at, now()) ELSE started_at END,
+              ended_at = CASE WHEN %s IN ('completed', 'failed') THEN COALESCE(ended_at, now()) ELSE ended_at END,
+              globus_status_text = %s,
+              error_summary = COALESCE(%s, error_summary),
+              last_polled_at = now(),
+              poll_attempts = poll_attempts + 1
+            WHERE transfer_id = %s::uuid
+            RETURNING
+              transfer_id::text AS transfer_id,
+              status,
+              poll_attempts,
+              last_polled_at,
+              started_at,
+              ended_at
+            """,
+            (status, status, status, globus_status_text, error_summary, transfer_id),
         )
         return row or {}
 
