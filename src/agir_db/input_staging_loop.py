@@ -86,8 +86,8 @@ def run_input_staging_once(
             context = build_globus_submission_context(item, transfer_cfg)
 
             try:
-                src_path = db.transfers.endpoint_relative_path(context["src_lts_ref"], context["src_root"])
-                dst_path = db.transfers.endpoint_relative_path(context["dst_staging_ref"], context["dst_root"])
+                src_path = context["src_lts_ref"]
+                dst_path = context["dst_staging_ref"]
             except Exception as exc:
                 db.orchestration.mark_input_transfer_status(
                     transfer_id,
@@ -174,5 +174,5 @@ def run_input_staging_once(
 
 
 if __name__ == "__main__":
-    count = run_input_staging_once(limit=int(os.environ.get("INPUT_STAGING_LIMIT", "20")))
+    count = run_input_staging_once(limit=int(os.environ.get("INPUT_STAGING_LIMIT", "1")))
     print(f"input_staged={count}")

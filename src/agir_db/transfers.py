@@ -279,8 +279,9 @@ class TransferManager:
         or translated from NCSU local filesystem paths using configured roots.
         """
         full = Path(full_path)
-        root = Path(root_path)
-        return "/" + str(full.relative_to(root)).lstrip("/")
+        # root = Path(root_path)
+        # return "/" + str(full.relative_to(root)).lstrip("/")
+        return str(full)
 
     @staticmethod
     def build_input_staging_label(stage: str, batch_id: str) -> str:
