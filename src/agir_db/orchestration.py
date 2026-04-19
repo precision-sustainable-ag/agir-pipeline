@@ -297,6 +297,31 @@ class OrchestrationManager:
             (limit,),
         )
 
+    def get_input_transfers_for_polling_by_ids(self, transfer_ids: List[str]) -> List[Dict]:
+        """Return requested/active input transfers scoped to specific transfer ids."""
+        if not transfer_ids:
+            return []
+        return self.conn.fetch_all(
+            """
+            SELECT
+              transfer_id::text AS transfer_id,
+              batch_id,
+              stage,
+              status,
+              globus_task_id,
+              poll_attempts,
+              requested_at,
+              started_at
+            FROM logs.transfer_runs
+            WHERE direction = 'input_stage'
+              AND status IN ('requested', 'active')
+              AND globus_task_id IS NOT NULL
+              AND transfer_id::text = ANY(%s)
+            ORDER BY requested_at ASC
+            """,
+            (transfer_ids,),
+        )
+
     def update_input_transfer_poll_result(
         self,
         transfer_id: str,

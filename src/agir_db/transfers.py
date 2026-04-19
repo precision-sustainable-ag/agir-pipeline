@@ -272,12 +272,7 @@ class TransferManager:
 
     @staticmethod
     def endpoint_relative_path(full_path: str, root_path: str) -> str:
-        """
-        Convert a filesystem path into a Globus endpoint-relative path.
-
-        TODO: Confirm whether Globus paths should be derived from DB refs directly
-        or translated from NCSU local filesystem paths using configured roots.
-        """
+        """Convert a filesystem path into a Globus endpoint-relative path."""
         full = Path(full_path)
         # root = Path(root_path)
         # return "/" + str(full.relative_to(root)).lstrip("/")

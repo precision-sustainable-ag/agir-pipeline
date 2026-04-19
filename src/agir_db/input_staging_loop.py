@@ -131,7 +131,12 @@ def run_input_staging_once(
 
         # Poll requested/active transfers until terminal state or timeout.
         while time.monotonic() <= poll_deadline:
-            pending = db.orchestration.get_pending_input_transfers_for_polling(limit=limit)
+            if submitted_transfer_ids:
+                pending = db.orchestration.get_input_transfers_for_polling_by_ids(
+                    transfer_ids=list(submitted_transfer_ids),
+                )
+            else:
+                pending = db.orchestration.get_pending_input_transfers_for_polling(limit=limit)
             if not pending:
                 break
 
