@@ -242,6 +242,7 @@ BEGIN
   INTO v_existing
   FROM logs.transfer_runs t
   WHERE t.dedupe_key = v_dedupe
+    AND t.status <> 'failed'
   ORDER BY t.requested_at DESC
   LIMIT 1;
 
