@@ -166,10 +166,291 @@ TBD
 ## `release`
 TBD
 ## `logs`
-TBD
+
+### logs.stage_leases
+
+**Purpose:** Mutable lease state for each `(batch_id, stage)` so only one orchestrator owns a stage at a time.
+
+**Use Cases:**
+- Claim exclusive stage execution
+- Track lease expiry and release outcomes
+- Prevent duplicate stage runners
+
+#### Column descriptions
+| Table column | Conceptual grouping | Brief description | Examples |
+| --- | --- | --- | --- |
+| `lease_id` | **Row identity** | UUID primary key for the lease row. | • `gen_random_uuid()` |
+| `batch_id` | **Work identity** | Batch currently leased. | • `TX_2025-08-18` |
+| `stage` | **Work identity** | Stage currently leased. | • `input_staging` |
+| `orchestrator_id` | **Ownership** | Orchestrator instance that claimed the lease. | • `orch-01` |
+| `leased_at` | **Timing** | Timestamp when lease became active. | • `now()` |
+| `expires_at` | **Timing** | Timestamp when lease expires if not released. | • `2026-04-07 14:10:00+00` |
+| `attempt` | **Retry tracking** | Lease claim attempt count (`>= 1`). | • `1`<br>• `2` |
+| `state` | **Lease state** | Lease lifecycle state. | • `active`<br>• `released` |
+| `released_at` | **Lease state** | Timestamp of release (nullable). | • `NULL` |
+| `release_reason` | **Lease state** | Reason for release (nullable). | • `completed` |
+| `created_at` | **Audit** | Row creation timestamp. | • `now()` |
+| `updated_at` | **Audit** | Last update timestamp. | • `now()` |
+
+#### `logs.stage_leases` Table schema
+```sql
+CREATE TABLE IF NOT EXISTS logs.stage_leases (
+    lease_id         UUID PRIMARY KEY DEFAULT ops.uuid_v4(),
+    batch_id         TEXT NOT NULL,
+    stage            TEXT NOT NULL,
+    orchestrator_id  TEXT NOT NULL,
+    leased_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at       TIMESTAMPTZ NOT NULL,
+    attempt          INTEGER NOT NULL DEFAULT 1 CHECK (attempt >= 1),
+    state            TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'released')),
+    released_at      TIMESTAMPTZ NULL,
+    release_reason   TEXT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT stage_leases_batch_stage_key UNIQUE (batch_id, stage)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stage_leases_active_expiry
+    ON logs.stage_leases (stage, state, expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_stage_leases_batch_stage
+    ON logs.stage_leases (batch_id, stage);
+```
+
+### logs.stage_runs
+
+**Purpose:** Append-only execution history for stage runs.
+
+**Use Cases:**
+- Record stage execution outcomes
+- Query latest status per batch/stage
+- Drive reliability and retry reporting
+
+#### Column descriptions
+| Table column | Conceptual grouping | Brief description | Examples |
+| --- | --- | --- | --- |
+| `run_id` | **Row identity** | UUID primary key for a stage run. | • UUID |
+| `batch_id` | **Work identity** | Batch processed by the run. | • `TX_2025-08-18` |
+| `stage` | **Work identity** | Pipeline stage executed. | • `input_staging` |
+| `attempt` | **Retry tracking** | Attempt number (`>= 1`). | • `1` |
+| `status` | **Outcome** | Terminal run status. | • `success`<br>• `partial`<br>• `failed` |
+| `exit_code` | **Outcome** | Process exit code (nullable). | • `0`<br>• `1` |
+| `started_at` | **Timing** | Run start timestamp. | • TIMESTAMPTZ |
+| `ended_at` | **Timing** | Run end timestamp (`ended_at >= started_at`). | • TIMESTAMPTZ |
+| `run_report_ref` | **Artifacts** | Location/reference for run report bundle. | • URI/path |
+| `output_ref` | **Artifacts** | Optional output artifact pointer. | • URI/path |
+| `created_at` | **Audit** | Row creation timestamp. | • `now()` |
+| `updated_at` | **Audit** | Last update timestamp. | • `now()` |
+
+#### `logs.stage_runs` Table schema
+```sql
+CREATE TABLE IF NOT EXISTS logs.stage_runs (
+    run_id           UUID PRIMARY KEY,
+    batch_id         TEXT NOT NULL,
+    stage            TEXT NOT NULL,
+    attempt          INTEGER NOT NULL CHECK (attempt >= 1),
+    status           TEXT NOT NULL CHECK (status IN ('success', 'partial', 'failed')),
+    exit_code        INTEGER NULL,
+    started_at       TIMESTAMPTZ NOT NULL,
+    ended_at         TIMESTAMPTZ NOT NULL,
+    run_report_ref   TEXT NOT NULL,
+    output_ref       TEXT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (ended_at >= started_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stage_runs_batch_stage_time
+    ON logs.stage_runs (batch_id, stage, ended_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_stage_runs_stage_status_time
+    ON logs.stage_runs (stage, status, ended_at DESC);
+```
+
+### logs.transfer_requests
+
+**Purpose:** Requested transfer intents that transfer workers can claim and execute.
+
+**Use Cases:**
+- Queue transfer demand by batch/state
+- Enable prioritized and lease-safe worker pickup
+- Track operator notes and request ownership
+
+#### Column descriptions
+| Table column | Conceptual grouping | Brief description | Examples |
+| --- | --- | --- | --- |
+| `transfer_request_id` | **Row identity** | Bigserial primary key. | • `12345` |
+| `batch_id` | **Transfer target** | Batch to transfer. | • `TX_2025-08-18` |
+| `data_state` | **Transfer target** | Logical data-state tree to transfer. | • `semifield-upload` |
+| `storage_domain` | **Storage scope** | Storage domain for source inventory. | • `dash_agir` |
+| `namespace` | **Storage scope** | Namespace/tier within storage domain. | • `longterm_images` |
+| `from_site` | **Routing** | Source site code. | • `NCSU` |
+| `to_site` | **Routing** | Destination site code. | • `JUNO` |
+| `priority` | **Scheduling** | Request priority value. | • `100` |
+| `is_enabled` | **Scheduling** | Whether request is eligible for pickup. | • `true` |
+| `created_at` | **Audit** | Creation timestamp. | • `now()` |
+| `leased_until` | **Leasing** | Soft lease expiration for worker ownership (nullable). | • TIMESTAMPTZ |
+| `leased_by` | **Leasing** | Worker currently holding lease (nullable). | • `transfer-worker-1` |
+| `notes` | **Metadata** | Optional human note/context. | • ticket text |
+
+#### `logs.transfer_requests` Table schema
+```sql
+CREATE TABLE IF NOT EXISTS logs.transfer_requests (
+  transfer_request_id BIGSERIAL PRIMARY KEY,
+  batch_id      TEXT NOT NULL,
+  data_state    TEXT NOT NULL,
+  storage_domain TEXT NOT NULL,
+  namespace     TEXT NOT NULL,
+  from_site     TEXT NOT NULL DEFAULT 'NCSU',
+  to_site       TEXT NOT NULL DEFAULT 'JUNO',
+  priority      INTEGER NOT NULL DEFAULT 100,
+  is_enabled    BOOLEAN NOT NULL DEFAULT true,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  leased_until  TIMESTAMPTZ NULL,
+  leased_by     TEXT NULL,
+  notes         TEXT NULL,
+  UNIQUE (batch_id, data_state, storage_domain, namespace, from_site, to_site)
+);
+
+CREATE INDEX IF NOT EXISTS idx_transfer_requests_enabled_priority
+  ON logs.transfer_requests (is_enabled, priority, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_transfer_requests_lease
+  ON logs.transfer_requests (leased_until);
+```
+
+### logs.transfer_runs
+
+**Purpose:** Execution history of transfer attempts initiated by orchestration and transfer workers.
+
+**Use Cases:**
+- Track transfer lifecycle from request to completion/failure
+- Enforce idempotency and active transfer uniqueness
+- Provide operational audit trail by batch/stage
+
+#### Column descriptions
+| Table column | Conceptual grouping | Brief description | Examples |
+| --- | --- | --- | --- |
+| `transfer_run_pk` | **Row identity** | Bigserial primary key. | • `9876` |
+| `transfer_id` | **External identity** | Stable UUID for a transfer run. | • UUID |
+| `direction` | **Transfer type** | Transfer direction enum. | • `input_stage`<br>• `promotion` |
+| `batch_id` | **Work identity** | Batch associated with transfer. | • `TX_2025-08-18` |
+| `stage` | **Work identity** | Stage that requested transfer. | • `input_staging` |
+| `transfer_profile_id` | **Configuration** | Transfer profile used for execution. | • `juno_default` |
+| `src_lts_ref` | **Source** | Source LTS reference/path. | • URI/path |
+| `dst_staging_ref` | **Destination** | Destination staging reference/path. | • URI/path |
+| `priority` | **Scheduling** | Priority value. | • `100` |
+| `requested_by` | **Audit** | Request initiator (nullable). | • service/user id |
+| `dedupe_key` | **Idempotency** | Optional dedupe key (nullable). | • formatted key |
+| `status` | **Lifecycle** | Transfer status enum. | • `requested`<br>• `active`<br>• `completed`<br>• `failed` |
+| `requested_at` | **Timing** | Request timestamp. | • `now()` |
+| `started_at` | **Timing** | Start timestamp (nullable). | • TIMESTAMPTZ |
+| `ended_at` | **Timing** | End timestamp (nullable). | • TIMESTAMPTZ |
+| `error_summary` | **Errors** | Error summary text (nullable). | • message |
+| `created_at` | **Audit** | Row creation timestamp. | • `now()` |
+
+#### `logs.transfer_runs` Table schema
+```sql
+CREATE TABLE logs.transfer_runs (
+  transfer_run_pk      BIGSERIAL PRIMARY KEY,
+  transfer_id          UUID NOT NULL UNIQUE,
+  direction            TEXT NOT NULL CHECK (direction IN ('input_stage', 'promotion')),
+  batch_id             TEXT NOT NULL,
+  stage                TEXT NOT NULL,
+  transfer_profile_id  TEXT NOT NULL,
+  src_lts_ref          TEXT NOT NULL,
+  dst_staging_ref      TEXT NOT NULL,
+  priority             INTEGER NOT NULL DEFAULT 100,
+  requested_by         TEXT NULL,
+  dedupe_key           TEXT NULL,
+  status               TEXT NOT NULL CHECK (status IN ('requested','active','completed','failed')),
+  requested_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at           TIMESTAMPTZ NULL,
+  ended_at             TIMESTAMPTZ NULL,
+  error_summary        TEXT NULL,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX idx_transfer_runs_active_input
+  ON logs.transfer_runs (direction, batch_id, stage, dst_staging_ref)
+  WHERE status IN ('requested', 'active');
+
+CREATE UNIQUE INDEX idx_transfer_runs_dedupe_key
+  ON logs.transfer_runs (dedupe_key)
+  WHERE dedupe_key IS NOT NULL;
+
+CREATE INDEX idx_transfer_runs_status_time
+  ON logs.transfer_runs (status, requested_at DESC);
+```
+
 ## `report`
 TBD
 ## `registry`
 TBD
 ## `ops`
-TBD
+
+### ops.claim_stage_lease
+
+**Purpose:** Atomically claim or renew a stage lease for a `(batch_id, stage)` pair when no active unexpired lease exists.
+
+#### `ops.claim_stage_lease` Function signature
+```sql
+ops.claim_stage_lease(
+  p_batch_id TEXT,
+  p_stage TEXT,
+  p_orchestrator_id TEXT,
+  p_ttl_seconds INTEGER,
+  p_attempt INTEGER DEFAULT NULL
+) RETURNS TABLE (
+  claimed BOOLEAN,
+  lease_id UUID,
+  batch_id TEXT,
+  stage TEXT,
+  expires_at TIMESTAMPTZ,
+  attempt INTEGER,
+  job_workdir_policy JSONB
+)
+```
+
+### ops.release_stage_lease
+
+**Purpose:** Release an active lease owned by an orchestrator and record release metadata.
+
+#### `ops.release_stage_lease` Function signature
+```sql
+ops.release_stage_lease(
+  p_lease_id UUID,
+  p_orchestrator_id TEXT,
+  p_release_reason TEXT,
+  p_released_at TIMESTAMPTZ DEFAULT NULL
+) RETURNS TABLE (
+  released BOOLEAN,
+  lease_id UUID,
+  released_at TIMESTAMPTZ,
+  release_reason TEXT
+)
+```
+
+### agir_db.request_input_transfer
+
+**Purpose:** Idempotently request an `input_stage` transfer, returning existing active/completed transfer when appropriate.
+
+#### `agir_db.request_input_transfer` Function signature
+```sql
+agir_db.request_input_transfer(
+  p_batch_id TEXT,
+  p_stage TEXT,
+  p_transfer_profile_id TEXT,
+  p_src_lts_ref TEXT,
+  p_dst_staging_ref TEXT,
+  p_requested_by TEXT DEFAULT NULL,
+  p_priority INTEGER DEFAULT 100,
+  p_dedupe_key TEXT DEFAULT NULL,
+  p_request_ts TIMESTAMPTZ DEFAULT NULL
+) RETURNS TABLE (
+  accepted BOOLEAN,
+  transfer_id UUID,
+  state TEXT,
+  requested_at TIMESTAMPTZ
+)
+```

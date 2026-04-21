@@ -1,44 +1,53 @@
 CREATE SCHEMA IF NOT EXISTS logs;
 
-CREATE TABLE IF NOT EXISTS logs.transfer_runs (
-  transfer_run_pk  BIGSERIAL PRIMARY KEY,
-  transfer_run_id  UUID NOT NULL UNIQUE,
+-- Dev-safe reset; remove if need to preserve existing transfer_runs data
+DROP TABLE IF EXISTS logs.transfer_runs CASCADE;
 
-  transfer_request_id BIGINT NOT NULL REFERENCES logs.transfer_requests(transfer_request_id),
+CREATE TABLE logs.transfer_runs (
+  transfer_run_pk      BIGSERIAL PRIMARY KEY,
+  transfer_id          UUID NOT NULL UNIQUE,
 
-  batch_id      TEXT NOT NULL,
-  data_state    TEXT NOT NULL,
-  storage_domain TEXT NOT NULL,
-  namespace     TEXT NOT NULL,
+  direction            TEXT NOT NULL CHECK (direction IN ('input_stage', 'promotion')),
+  batch_id             TEXT NOT NULL,
+  stage                TEXT NOT NULL,
 
-  from_site     TEXT NOT NULL,
-  to_site       TEXT NOT NULL,
+  transfer_profile_id  TEXT NOT NULL,
+  src_lts_ref          TEXT NOT NULL,
+  dst_staging_ref      TEXT NOT NULL,
 
-  -- resolved plan (what worker actually used)
-  source_root   TEXT NOT NULL,
-  dest_root     TEXT NOT NULL,
+  priority             INTEGER NOT NULL DEFAULT 100,
+  requested_by         TEXT NULL,
+  dedupe_key           TEXT NULL,
 
-  status        TEXT NOT NULL CHECK (status IN ('created','submitted','active','succeeded','failed','canceled')),
-  started_at    TIMESTAMPTZ NOT NULL,
-  ended_at      TIMESTAMPTZ NULL,
+  status               TEXT NOT NULL CHECK (status IN ('requested','active','completed','failed')),
+  requested_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at           TIMESTAMPTZ NULL,
+  ended_at             TIMESTAMPTZ NULL,
+  error_summary        TEXT NULL,
+  globus_task_id       TEXT NULL,
+  globus_src_endpoint  TEXT NULL,
+  globus_dst_endpoint  TEXT NULL,
+  globus_label         TEXT NULL,
+  submission_details   TEXT NULL,
+  globus_status_text   TEXT NULL,
+  last_polled_at       TIMESTAMPTZ NULL,
+  poll_attempts        INTEGER NOT NULL DEFAULT 0,
 
-  globus_task_id TEXT NULL,
-
-  n_files_expected BIGINT NULL,
-  bytes_expected   BIGINT NULL,
-  n_files_done     BIGINT NULL,
-  bytes_done       BIGINT NULL,
-
-  error_summary TEXT NULL,
-
-  -- keep the full report for forward-compat
-  transfer_report_json JSONB NOT NULL,
-
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_transfer_runs_request_time
-  ON logs.transfer_runs (transfer_request_id, started_at DESC);
+CREATE UNIQUE INDEX idx_transfer_runs_active_input
+  ON logs.transfer_runs (direction, batch_id, stage, dst_staging_ref)
+  WHERE status IN ('requested', 'active');
 
-CREATE INDEX IF NOT EXISTS idx_transfer_runs_status_time
-  ON logs.transfer_runs (status, started_at DESC);
+CREATE UNIQUE INDEX idx_transfer_runs_dedupe_key
+  ON logs.transfer_runs (dedupe_key)
+  WHERE dedupe_key IS NOT NULL
+    AND status <> 'failed';
+
+CREATE INDEX idx_transfer_runs_status_time
+  ON logs.transfer_runs (status, requested_at DESC);
+
+CREATE INDEX idx_transfer_runs_globus_task_id
+  ON logs.transfer_runs (globus_task_id)
+  WHERE globus_task_id IS NOT NULL;

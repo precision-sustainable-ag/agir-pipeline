@@ -153,3 +153,120 @@ BEGIN
     END IF;
 END;
 $$;
+
+CREATE SCHEMA IF NOT EXISTS agir_db;
+
+CREATE OR REPLACE FUNCTION agir_db.request_input_transfer(
+  p_batch_id            TEXT,
+  p_stage               TEXT,
+  p_transfer_profile_id TEXT,
+  p_src_lts_ref         TEXT,
+  p_dst_staging_ref     TEXT,
+  p_requested_by        TEXT DEFAULT NULL,
+  p_priority            INTEGER DEFAULT 100,
+  p_dedupe_key          TEXT DEFAULT NULL,
+  p_request_ts          TIMESTAMPTZ DEFAULT NULL
+)
+RETURNS TABLE (
+  accepted     BOOLEAN,
+  transfer_id  UUID,
+  state        TEXT,
+  requested_at TIMESTAMPTZ
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_now        TIMESTAMPTZ := COALESCE(p_request_ts, now());
+  v_dedupe     TEXT := COALESCE(p_dedupe_key, format('input_stage:%s:%s:%s', p_batch_id, p_stage, p_dst_staging_ref));
+  v_existing   logs.transfer_runs%ROWTYPE;
+BEGIN
+  -- already staged -> idempotent completed
+  IF EXISTS (
+    SELECT 1
+    FROM source.globus_file_index g
+    WHERE g.batch_id = p_batch_id
+      AND g.namespace = '90daydata'
+      AND g.data_state = 'semifield-upload'
+      AND g.entry_type = 'file'
+  ) THEN
+    SELECT *
+    INTO v_existing
+    FROM logs.transfer_runs t
+    WHERE t.direction = 'input_stage'
+      AND t.batch_id = p_batch_id
+      AND t.stage = p_stage
+      AND t.status = 'completed'
+    ORDER BY t.ended_at DESC NULLS LAST, t.requested_at DESC
+    LIMIT 1;
+
+    RETURN QUERY SELECT TRUE, v_existing.transfer_id, 'already_completed', COALESCE(v_existing.requested_at, v_now);
+    RETURN;
+  END IF;
+
+  -- active request exists -> idempotent active
+  SELECT *
+  INTO v_existing
+  FROM logs.transfer_runs t
+  WHERE t.direction = 'input_stage'
+    AND t.batch_id = p_batch_id
+    AND t.stage = p_stage
+    AND t.dst_staging_ref = p_dst_staging_ref
+    AND t.status IN ('requested', 'active')
+  ORDER BY t.requested_at DESC
+  LIMIT 1;
+
+  IF FOUND THEN
+    RETURN QUERY SELECT TRUE, v_existing.transfer_id, 'already_active', v_existing.requested_at;
+    RETURN;
+  END IF;
+
+  INSERT INTO logs.transfer_runs (
+    transfer_id, direction, batch_id, stage, transfer_profile_id,
+    src_lts_ref, dst_staging_ref, priority, requested_by, dedupe_key,
+    status, requested_at
+  )
+  VALUES (
+    ops.uuid_v4(), 'input_stage', p_batch_id, p_stage, p_transfer_profile_id,
+    p_src_lts_ref, p_dst_staging_ref, p_priority, p_requested_by, v_dedupe,
+    'requested', v_now
+  )
+  ON CONFLICT DO NOTHING
+  RETURNING * INTO v_existing;
+
+  IF FOUND THEN
+    RETURN QUERY SELECT TRUE, v_existing.transfer_id, 'created', v_existing.requested_at;
+    RETURN;
+  END IF;
+
+  SELECT *
+  INTO v_existing
+  FROM logs.transfer_runs t
+  WHERE t.dedupe_key = v_dedupe
+    AND t.status <> 'failed'
+  ORDER BY t.requested_at DESC
+  LIMIT 1;
+
+  IF FOUND THEN
+    RETURN QUERY
+    SELECT
+      TRUE,
+      v_existing.transfer_id,
+      CASE WHEN v_existing.status = 'completed' THEN 'already_completed' ELSE 'already_active' END,
+      v_existing.requested_at;
+    RETURN;
+  END IF;
+
+  SELECT *
+  INTO v_existing
+  FROM logs.transfer_runs t
+  WHERE t.direction = 'input_stage'
+    AND t.batch_id = p_batch_id
+    AND t.stage = p_stage
+    AND t.dst_staging_ref = p_dst_staging_ref
+    AND t.status IN ('requested', 'active')
+  ORDER BY t.requested_at DESC
+  LIMIT 1;
+
+  RETURN QUERY SELECT TRUE, v_existing.transfer_id, 'already_active', v_existing.requested_at;
+END;
+$$;

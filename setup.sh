@@ -189,12 +189,13 @@ apply_schemas() {
 
   log "Applying schemas..."
   psql -f "${SCHEMA_DIR}/sql/source.globus_file_index.sql" || die "Failed: source schema"
-  psql -f "${SCHEMA_DIR}/sql/logs.transfer_requests.sql" || true
-  [[ -f "${SCHEMA_DIR}/sql/logs.transfer_runs.sql" ]] && psql -f "${SCHEMA_DIR}/sql/logs.transfer_runs.sql" || true
-  psql -f "${SCHEMA_DIR}/views/report.missing_on_juno.sql" || die "Failed: report views"
+  psql -f "${SCHEMA_DIR}/sql/logs.transfer_requests.sql" || die "Failed: logs.transfer_requests"
+  psql -f "${SCHEMA_DIR}/sql/logs.transfer_runs.sql" || die "Failed: logs.transfer_runs"
   psql -f "${SCHEMA_DIR}/sql/logs.stage_leases.sql" || die "Failed: logs.stage_leases"
   psql -f "${SCHEMA_DIR}/sql/logs.stage_runs.sql" || die "Failed: logs.stage_runs"
   psql -f "${SCHEMA_DIR}/sql/ops.orchestrator.sql" || die "Failed: ops orchestrator funcs"
+  psql -f "${SCHEMA_DIR}/views/report.missing_on_juno.sql" || die "Failed: report views"
+  psql -f "${SCHEMA_DIR}/views/report.batches_needing_input_staging.sql" || die "Failed: report.batches_needing_input_staging"
   psql -f "${SCHEMA_DIR}/views/report.ready_work.sql" || die "Failed: report.ready_work"
 }
 

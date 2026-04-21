@@ -9,8 +9,14 @@ Relies on database views:
   - report.batches_to_copy_to_juno
 """
 
+import json
+import re
 import subprocess
-from typing import Dict, List, Optional, Literal, Tuple
+import uuid
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Literal, Tuple
+
+import yaml
 
 from .connection import ConnectionManager
 
@@ -240,6 +246,56 @@ class TransferManager:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def load_transfer_config(config_path: str = "configs/juno_transfer.yaml") -> Dict[str, Any]:
+        """Load shared Globus transfer configuration."""
+        with open(config_path, "r", encoding="utf-8") as handle:
+            return yaml.safe_load(handle)
+
+    @staticmethod
+    def parse_globus_task_id(output: str) -> Optional[str]:
+        """Extract the Globus task id from CLI output when available."""
+        match = re.search(r"Task ID:\s*([a-f0-9-]+)", output, re.IGNORECASE)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def parse_globus_task_state(output: str) -> Optional[str]:
+        """Extract task state from 'globus task show' output."""
+        patterns = (
+            r"Status:\s*([A-Z_]+)",
+            r"Task Status:\s*([A-Z_]+)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, output, re.IGNORECASE)
+            if match:
+                return match.group(1).upper()
+        return None
+
+    @staticmethod
+    def endpoint_relative_path(full_path: str, root_path: str) -> str:
+        """Convert a filesystem path into a Globus endpoint-relative path."""
+        full = Path(full_path)
+        # root = Path(root_path)
+        # return "/" + str(full.relative_to(root)).lstrip("/")
+        return str(full)
+
+    @staticmethod
+    def build_input_staging_label(stage: str, batch_id: str) -> str:
+        """Construct a stable label for an input staging transfer."""
+        return f"agir:{stage}:{batch_id}:input_stage"
+
+    @staticmethod
+    def map_globus_state_to_transfer_status(globus_state: Optional[str]) -> str:
+        """Map Globus task states to transfer_runs status values."""
+        state = (globus_state or "").upper()
+        if state in {"ACTIVE", "IN_PROGRESS", "RUNNING", "RETRYING"}:
+            return "active"
+        if state in {"SUCCEEDED", "SUCCESS"}:
+            return "completed"
+        if state in {"FAILED", "CANCELED"}:
+            return "failed"
+        return "requested"
+
+    @staticmethod
     def build_globus_cmd(
         src_endpoint: str,
         dst_endpoint: str,
@@ -279,3 +335,76 @@ class TransferManager:
             return "submitted", None
         except subprocess.CalledProcessError as exc:
             return "failed", str(exc)
+
+    @staticmethod
+    def submit_globus_transfer(
+        cmd: List[str],
+        dry_run: bool,
+    ) -> Tuple[str, Optional[str], Optional[str]]:
+        """
+        Submit a Globus transfer and capture any returned task metadata.
+
+        Returns: (status, globus_task_id, details)
+
+        TODO: Confirm whether input staging should stop after transfer submission
+        or poll Globus until a terminal task state is reached.
+        """
+        if dry_run:
+            dry_task_id = f"dry-run-{uuid.uuid4()}"
+            return "submitted", dry_task_id, "[DRY-RUN] " + " ".join(cmd)
+
+        try:
+            proc = subprocess.run(
+                cmd + ["--format", "json"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            output = (proc.stdout or "").strip()
+            task_id = None
+            if output:
+                try:
+                    payload = json.loads(output)
+                    task_id = payload.get("task_id") or payload.get("task_id_text")
+                except json.JSONDecodeError:
+                    task_id = None
+            task_id = task_id or TransferManager.parse_globus_task_id(output)
+            return "submitted", task_id, output
+        except subprocess.CalledProcessError as exc:
+            details = ((exc.stderr or "") + "\n" + (exc.stdout or "")).strip() or str(exc)
+            return "failed", None, details
+
+    @staticmethod
+    def poll_globus_task(
+        globus_task_id: str,
+        dry_run: bool = False,
+    ) -> Tuple[str, Optional[str]]:
+        """
+        Poll a Globus task and return mapped transfer status + raw output.
+
+        Returns: (status, details)
+        """
+        if dry_run or globus_task_id.startswith("dry-run-"):
+            return "completed", "DRY-RUN SUCCEEDED"
+
+        cmd = ["globus", "task", "show", globus_task_id]
+        try:
+            proc = subprocess.run(
+                cmd + ["--format", "json"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            output = (proc.stdout or "").strip()
+            globus_state = None
+            if output:
+                try:
+                    payload = json.loads(output)
+                    globus_state = (payload.get("status") or payload.get("state") or "").upper() or None
+                except json.JSONDecodeError:
+                    globus_state = None
+            globus_state = globus_state or TransferManager.parse_globus_task_state(output)
+            return TransferManager.map_globus_state_to_transfer_status(globus_state), output
+        except subprocess.CalledProcessError as exc:
+            details = ((exc.stderr or "") + "\n" + (exc.stdout or "")).strip() or str(exc)
+            return "failed", details

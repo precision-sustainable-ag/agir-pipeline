@@ -150,3 +150,254 @@ class OrchestrationManager:
             ),
         )
         return row or {}
+    
+    def get_batches_needing_input_staging(
+        self,
+        limit: int = 100,
+        stages: Optional[List[str]] = None,
+        min_priority: Optional[int] = None,
+        batch_ids: Optional[List[str]] = None,
+    ) -> List[Dict]:
+        query = """
+            SELECT batch_id, stage, transfer_profile_id, src_lts_ref, dst_staging_ref, priority
+            FROM report.batches_needing_input_staging
+            WHERE (%s IS NULL OR stage = ANY(%s))
+              AND (%s IS NULL OR priority >= %s)
+              AND (%s IS NULL OR batch_id = ANY(%s))
+            ORDER BY priority DESC, batch_id ASC
+            LIMIT %s
+        """
+        params = (
+            stages if stages else None,
+            stages if stages else None,
+            min_priority,
+            min_priority,
+            batch_ids if batch_ids else None,
+            batch_ids if batch_ids else None,
+            limit,
+        )
+        return self.conn.fetch_all(query, params)
+
+    def request_input_transfer(
+        self,
+        batch_id: str,
+        stage: str,
+        transfer_profile_id: str,
+        src_lts_ref: str,
+        dst_staging_ref: str,
+        requested_by: Optional[str] = None,
+        priority: int = 100,
+        dedupe_key: Optional[str] = None,
+        request_ts: Optional[str] = None,
+    ) -> Dict:
+        row = self.conn.fetch_one(
+            """
+            SELECT accepted, transfer_id::text AS transfer_id, state, requested_at
+            FROM agir_db.request_input_transfer(
+                p_batch_id := %s,
+                p_stage := %s,
+                p_transfer_profile_id := %s,
+                p_src_lts_ref := %s,
+                p_dst_staging_ref := %s,
+                p_requested_by := %s,
+                p_priority := %s,
+                p_dedupe_key := %s,
+                p_request_ts := %s::timestamptz
+            )
+            """,
+            (
+                batch_id, stage, transfer_profile_id, src_lts_ref, dst_staging_ref,
+                requested_by, priority, dedupe_key, request_ts,
+            ),
+        )
+        return row or {}
+
+    def mark_input_transfer_status(
+        self,
+        transfer_id: str,
+        status: str,
+        error_summary: Optional[str] = None,
+    ) -> Dict:
+        row = self.conn.fetch_one(
+            """
+            UPDATE logs.transfer_runs
+            SET
+              status = %s,
+              started_at = CASE WHEN %s = 'active' THEN COALESCE(started_at, now()) ELSE started_at END,
+              ended_at = CASE WHEN %s IN ('completed', 'failed') THEN COALESCE(ended_at, now()) ELSE ended_at END,
+              error_summary = %s
+            WHERE transfer_id = %s::uuid
+            RETURNING transfer_id::text AS transfer_id, status, requested_at, started_at, ended_at
+            """,
+            (status, status, status, error_summary, transfer_id),
+        )
+        return row or {}
+
+    def mark_input_transfer_submitted(
+        self,
+        transfer_id: str,
+        globus_task_id: Optional[str],
+        globus_src_endpoint: str,
+        globus_dst_endpoint: str,
+        globus_label: Optional[str] = None,
+        submission_details: Optional[str] = None,
+    ) -> Dict:
+        """
+        Persist Globus submission metadata so transfer requests can be
+        reconciled with Globus task state after submission.
+        """
+        row = self.conn.fetch_one(
+            """
+            UPDATE logs.transfer_runs
+            SET
+              status = 'requested',
+              globus_task_id = %s,
+              globus_src_endpoint = %s,
+              globus_dst_endpoint = %s,
+              globus_label = %s,
+              submission_details = %s
+            WHERE transfer_id = %s::uuid
+            RETURNING
+              transfer_id::text AS transfer_id,
+              status,
+              globus_task_id,
+              started_at
+            """,
+            (
+                globus_task_id,
+                globus_src_endpoint,
+                globus_dst_endpoint,
+                globus_label,
+                submission_details,
+                transfer_id,
+            ),
+        )
+        return row or {}
+
+    def get_pending_input_transfers_for_polling(self, limit: int = 100) -> List[Dict]:
+        """Return requested/active transfers that have a Globus task id."""
+        return self.conn.fetch_all(
+            """
+            SELECT
+              transfer_id::text AS transfer_id,
+              batch_id,
+              stage,
+              status,
+              globus_task_id,
+              poll_attempts,
+              requested_at,
+              started_at
+            FROM logs.transfer_runs
+            WHERE direction = 'input_stage'
+              AND status IN ('requested', 'active')
+              AND globus_task_id IS NOT NULL
+            ORDER BY requested_at ASC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+
+    def get_input_transfers_for_polling_by_ids(self, transfer_ids: List[str]) -> List[Dict]:
+        """Return requested/active input transfers scoped to specific transfer ids."""
+        if not transfer_ids:
+            return []
+        return self.conn.fetch_all(
+            """
+            SELECT
+              transfer_id::text AS transfer_id,
+              batch_id,
+              stage,
+              status,
+              globus_task_id,
+              poll_attempts,
+              requested_at,
+              started_at
+            FROM logs.transfer_runs
+            WHERE direction = 'input_stage'
+              AND status IN ('requested', 'active')
+              AND globus_task_id IS NOT NULL
+              AND transfer_id::text = ANY(%s)
+            ORDER BY requested_at ASC
+            """,
+            (transfer_ids,),
+        )
+
+    def update_input_transfer_poll_result(
+        self,
+        transfer_id: str,
+        status: str,
+        globus_status_text: Optional[str] = None,
+        error_summary: Optional[str] = None,
+    ) -> Dict:
+        """
+        Update transfer status based on Globus polling.
+
+        Expected lifecycle: requested -> active -> completed/failed.
+        """
+        row = self.conn.fetch_one(
+            """
+            UPDATE logs.transfer_runs
+            SET
+              status = %s,
+              started_at = CASE WHEN %s = 'active' THEN COALESCE(started_at, now()) ELSE started_at END,
+              ended_at = CASE WHEN %s IN ('completed', 'failed') THEN COALESCE(ended_at, now()) ELSE ended_at END,
+              globus_status_text = %s,
+              error_summary = COALESCE(%s, error_summary),
+              last_polled_at = now(),
+              poll_attempts = poll_attempts + 1
+            WHERE transfer_id = %s::uuid
+            RETURNING
+              transfer_id::text AS transfer_id,
+              status,
+              poll_attempts,
+              last_polled_at,
+              started_at,
+              ended_at
+            """,
+            (status, status, status, globus_status_text, error_summary, transfer_id),
+        )
+        return row or {}
+
+    def register_90daydata_index_for_batch(
+        self,
+        batch_id: str,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO source.globus_file_index (
+                endpoint, site, storage_domain, namespace, storage_root,
+                rel_path, full_path, parent_dir, file_name, entry_type, file_ext,
+                size_bytes, permissions, checksum, batch_id, batch_state, batch_date,
+                data_state, mtime_iso, fname_ts_epoch, fname_ts_iso, created_at_ts_iso
+            )
+            SELECT
+                g.endpoint,
+                g.site,
+                g.storage_domain,
+                '90daydata' AS namespace,
+                '/90daydata/dash_agir' AS storage_root,
+                g.rel_path,
+                ('/90daydata/dash_agir/' || g.rel_path) AS full_path,
+                ('/90daydata/dash_agir/' || regexp_replace(g.rel_path, '/[^/]+$', '')) AS parent_dir,
+                g.file_name,
+                g.entry_type,
+                g.file_ext,
+                g.size_bytes,
+                g.permissions,
+                g.checksum,
+                g.batch_id,
+                g.batch_state,
+                g.batch_date,
+                g.data_state,
+                g.mtime_iso,
+                g.fname_ts_epoch,
+                g.fname_ts_iso,
+                now()
+            FROM source.globus_file_index g
+            WHERE g.batch_id = %s
+              AND g.namespace = 'LTS'
+              AND g.entry_type = 'file'
+            ON CONFLICT DO NOTHING
+            """,
+            (batch_id,),
+        )
