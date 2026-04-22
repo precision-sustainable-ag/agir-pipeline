@@ -1,5 +1,16 @@
 # JPG To Detection Performance
 
+## Compute Job Settings
+
+```sh
+#SBATCH --partition=gpu-a100
+#SBATCH --gres=gpu:1
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=128G
+```
+
 ## Standard Config
 
 | Hardware | Script | Start | End | Runtime (s) | Status |
