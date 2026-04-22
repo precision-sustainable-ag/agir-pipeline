@@ -77,3 +77,8 @@ def main() -> None:
             written += 1
 
     print(f"Wrote {written} overlays to {args.output}")
+
+
+if __name__ == "__main__":
+    main()
+
