@@ -7,6 +7,7 @@
 #SBATCH --output=/project/dash_agir/logs/pg_server/agir_%x_%j.out.log
 #SBATCH --error=/project/dash_agir/logs/pg_server/agir_%x_%j.err.log
 
+# Exit on command errors, unset variables, and pipeline failures.
 set -euo pipefail
 unset PGHOST PGDATABASE PGUSER PGPASSWORD PGPORT
 export PGPASSFILE="${HOME}/.pgpass"

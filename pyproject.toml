@@ -72,9 +72,21 @@ all = [
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.package-dir]
+"" = "src"
+"stages" = "stages"
+"stages.common" = "stages/common"
+"stages.jpg_to_det" = "stages/jpg_to_det"
+"stages.raw_to_jpg" = "stages/raw_to_jpg"
+
 [tool.setuptools]
-package-dir = { "" = "src" }
-packages = ["agir_db"]
+packages = [
+    "agir_db",
+    "stages",
+    "stages.common",
+    "stages.jpg_to_det",
+    "stages.raw_to_jpg",
+]
 
 [tool.setuptools.package-data]
 agir_db = ["py.typed"]
