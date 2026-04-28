@@ -42,6 +42,8 @@ ml = [
   "torch>=2.0.0",
   "torchvision>=0.15.0",
   "ultralytics>=8.0.0",
+  "segmentation-models-pytorch>=0.3.0",
+  "timm>=0.9.0",
 ]
 
 # Everything (dev + docs + cv + ml + hpc)
@@ -63,6 +65,8 @@ all = [
   "torch>=2.0.0",
   "torchvision>=0.15.0",
   "ultralytics>=8.0.0",
+  "segmentation-models-pytorch>=0.3.0",
+  "timm>=0.9.0",
 ]
 
 # =============================================================================
@@ -77,6 +81,7 @@ build-backend = "setuptools.build_meta"
 "stages" = "stages"
 "stages.common" = "stages/common"
 "stages.jpg_to_det" = "stages/jpg_to_det"
+"stages.det_to_seg" = "stages/det_to_seg"
 "stages.raw_to_jpg" = "stages/raw_to_jpg"
 
 [tool.setuptools]
@@ -85,6 +90,7 @@ packages = [
     "stages",
     "stages.common",
     "stages.jpg_to_det",
+    "stages.det_to_seg",
     "stages.raw_to_jpg",
 ]
 

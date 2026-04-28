@@ -15,15 +15,15 @@
 
 | Hardware | Script | Start | End | Runtime (s) | Status |
 |----------|--------|-------|-----|-------------|--------|
-| A100 | `tests/gpu/jpg_to_det_a100.sh` | `2026-04-07 14:14:14` | `2026-04-07 14:28:00` | `825` | Success |
-| L40S | `tests/gpu/jpg_to_det_l40s.sh` | `2026-04-07 14:14:38` | `2026-04-07 14:32:53` | `1094` | Success |
+| A100 | `tests/gpu/jpg_to_det/jpg_to_det_a100.sh` | `2026-04-07 14:14:14` | `2026-04-07 14:28:00` | `825` | Success |
+| L40S | `tests/gpu/jpg_to_det/jpg_to_det_l40s.sh` | `2026-04-07 14:14:38` | `2026-04-07 14:32:53` | `1094` | Success |
 
 ## Low-Latency / Reduced Config
 
 | Hardware | Script | Start | End | Runtime (s) | Status |
 |----------|--------|-------|-----|-------------|--------|
 | A100 | low-latency script | `2026-04-07 16:04:36` | `2026-04-07 16:10:27` | `351` | Success |
-| A100 MIG7 | `tests/gpu/jpg_to_det_a100_mig7.sh` | `2026-04-07 14:14:26` | `2026-04-07 14:22:43` | `497` | Success |
+| A100 MIG7 | `tests/gpu/jpg_to_det/jpg_to_det_a100_mig7.sh` | `2026-04-07 14:14:26` | `2026-04-07 14:22:43` | `497` | Success |
 | L40S | low-latency script | `2026-04-07 16:04:30` | `2026-04-07 16:11:40` | `430` | Not run yet |
 
 ## Bash Script Notes
