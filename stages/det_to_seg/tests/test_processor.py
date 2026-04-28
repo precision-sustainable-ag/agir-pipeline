@@ -37,6 +37,7 @@ VALID_CONFIG = {
 }
 
 
+# mock config file
 @pytest.fixture
 def config_file(tmp_path):
     p = tmp_path / "seg.yaml"
@@ -44,6 +45,7 @@ def config_file(tmp_path):
     return p
 
 
+# mock jpg image
 @pytest.fixture
 def fake_jpg(tmp_path):
     img = np.zeros((20, 30, 3), dtype=np.uint8)
@@ -52,6 +54,7 @@ def fake_jpg(tmp_path):
     return p
 
 
+# mock txt file
 @pytest.fixture
 def fake_txt(tmp_path):
     p = tmp_path / "img001.txt"
@@ -59,6 +62,7 @@ def fake_txt(tmp_path):
     return p
 
 
+# helper to create processor with model
 def _make_processor(config_file):
     with patch("stages.det_to_seg.processor._load_model_from_config", return_value=object()):
         return Processor(config_file, device="cpu")
@@ -95,6 +99,7 @@ class TestDetParsing:
 
 
 class TestProcessor:
+    # test success
     def test_success(self, config_file, fake_jpg, fake_txt, tmp_path):
         proc = _make_processor(config_file)
         out_dir = tmp_path / "out"
@@ -108,6 +113,7 @@ class TestProcessor:
         assert result.n_detections == 1
         mock_write.assert_called_once()
 
+    # test success even when tehre are zero detections
     def test_zero_detection_still_ok(self, config_file, fake_jpg, tmp_path):
         proc = _make_processor(config_file)
         txt = tmp_path / "img001.txt"
@@ -128,6 +134,7 @@ class TestProcessor:
         assert result.status == ITEM_FAILED
         assert result.error_code == ERROR_IMAGE_READ_FAILED
 
+    # test detection read failure with malformed txt file
     def test_det_read_failure(self, config_file, fake_jpg, tmp_path):
         proc = _make_processor(config_file)
         bad_txt = tmp_path / "img001.txt"
@@ -137,16 +144,20 @@ class TestProcessor:
         assert result.status == ITEM_FAILED
         assert result.error_code == ERROR_DET_READ_FAILED
 
+    # test inference failure
     def test_inference_failure(self, config_file, fake_jpg, fake_txt, tmp_path):
         proc = _make_processor(config_file)
+        # patch the function that creates the masks to throw an error, simulating an inference failure
         with patch("stages.det_to_seg.processor.composite_bbox_masks", side_effect=RuntimeError("boom")):
             result = proc.process_image(fake_txt, fake_jpg, tmp_path / "out")
 
         assert result.status == ITEM_FAILED
         assert result.error_code == ERROR_INFERENCE_FAILED
 
+    # test export failure
     def test_export_failure(self, config_file, fake_jpg, fake_txt, tmp_path):
         proc = _make_processor(config_file)
+        # patch the function that writes the mask to disk to throw an error
         with patch("stages.det_to_seg.processor.composite_bbox_masks", return_value=np.zeros((20, 30), dtype=np.uint8)), \
              patch("stages.det_to_seg.processor.write_mask_png", side_effect=RuntimeError("write failed")):
             result = proc.process_image(fake_txt, fake_jpg, tmp_path / "out")
@@ -154,6 +165,7 @@ class TestProcessor:
         assert result.status == ITEM_FAILED
         assert result.error_code == ERROR_EXPORT_FAILED
 
+    # test that if the mask already exists, we skip processing and return ok with the existing path
     def test_idempotent_existing_mask(self, config_file, fake_jpg, fake_txt, tmp_path):
         proc = _make_processor(config_file)
         out_dir = tmp_path / "out"
@@ -168,6 +180,7 @@ class TestProcessor:
         assert result.mask_path == existing
         mock_compose.assert_not_called()
 
+    # test instance where model fails to load
     def test_model_load_failure_wrapped(self, config_file):
         with patch("stages.det_to_seg.processor._load_model_from_config", side_effect=RuntimeError("bad ckpt")):
             with pytest.raises(RuntimeError, match=ERROR_MODEL_LOAD_FAILED):
@@ -175,6 +188,7 @@ class TestProcessor:
 
 
 class TestBatch:
+    # test that if fail_stop is True, we return immediately on first failure and do not process remaining items
     def test_fail_stop_returns_early(self, config_file, tmp_path):
         proc = _make_processor(config_file)
 
@@ -194,6 +208,7 @@ class TestBatch:
         assert len(results) == 1
         assert results[0].status == ITEM_FAILED
 
+    # test that if fail_stop is False, we continue processing remaining items even if some fail
     def test_no_fail_stop_continues(self, config_file, tmp_path):
         proc = _make_processor(config_file)
 

@@ -57,6 +57,37 @@ python3 -m stages.det_to_seg.cli \
   --batch-id "$BATCH_ID" \
   --device "$SEG_DEVICE"
 
+RUN_DIR="$(ls -td "$FINAL_SEG_DIR"/det_to_seg/* 2>/dev/null | head -n 1)"
+MASK_DIR="$RUN_DIR/artifacts/masks"
+
+if [[ -z "$RUN_DIR" || ! -d "$RUN_DIR" ]]; then
+  echo "det_to_seg run directory was not created under $FINAL_SEG_DIR/det_to_seg" >&2
+  exit 1
+fi
+
+if [[ ! -f "$RUN_DIR/manifest.json" ]]; then
+  echo "manifest.json missing from $RUN_DIR" >&2
+  exit 1
+fi
+
+if [[ ! -f "$RUN_DIR/run_report.json" ]]; then
+  echo "run_report.json missing from $RUN_DIR" >&2
+  exit 1
+fi
+
+if [[ ! -d "$MASK_DIR" ]]; then
+  echo "mask artifacts directory missing: $MASK_DIR" >&2
+  exit 1
+fi
+
+MASK_COUNT="$(find "$MASK_DIR" -name '*.png' | wc -l | tr -d ' ')"
+if [[ "$MASK_COUNT" -eq 0 ]]; then
+  echo "no mask PNGs were produced in $MASK_DIR" >&2
+  exit 1
+fi
+
+echo "Validated output: $MASK_COUNT mask PNGs in $MASK_DIR"
+
 echo "Job finished at $(date)"
 echo "Detections:           $DET_ARTIFACT_DIR"
 echo "Segmentation outputs: $FINAL_SEG_DIR"

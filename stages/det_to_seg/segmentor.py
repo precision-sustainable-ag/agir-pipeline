@@ -31,12 +31,19 @@ def _strip_prefix(sd: dict, prefixes=("model.", "module.")) -> dict:
 
 
 def load_weights_flex(model: torch.nn.Module, path: Path, strict: bool = False) -> None:
+    # load model weights 
     obj = torch.load(str(path), map_location="cpu", weights_only=False)
+
+    # extract model state dictionary from torch.load output
     sd = obj.get("state_dict", obj) if isinstance(obj, dict) else obj
+    
     if not isinstance(sd, dict):
         raise RuntimeError(f"Unsupported checkpoint format: {path}")
     sd = _strip_prefix(sd)
+    
+
     missing, unexpected = model.load_state_dict(sd, strict=strict)
+    # check issues from model state dict loading
     if missing:
         log.warning("missing keys: %s", missing)
     if unexpected:
