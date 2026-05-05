@@ -1,0 +1,8 @@
+weights: /path/to/unet_mit_b4.pth
+arch: Unet
+encoder: mit_b4
+threshold: 0.5
+pad_divisor: 32
+tile_size: 1024
+overlap: 128
+tiling: true

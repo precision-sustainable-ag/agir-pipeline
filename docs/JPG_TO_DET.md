@@ -395,25 +395,25 @@ tests/gpu/
 ### A100
 
 ```bash
-sbatch tests/gpu/jpg_to_det_a100.sh
+sbatch tests/gpu/jpg_to_det/jpg_to_det_a100.sh
 ```
 
 ### L40S
 
 ```bash
-sbatch tests/gpu/jpg_to_det_l40s.sh
+sbatch tests/gpu/jpg_to_det/jpg_to_det_l40s.sh
 ```
 
 ### A100 MIG7
 
 ```bash
-sbatch tests/gpu/jpg_to_det_a100_mig7.sh
+sbatch tests/gpu/jpg_to_det/jpg_to_det_a100_mig7.sh
 ```
 
 ### Run All Three
 
 ```bash
-bash tests/gpu/run_all_jpg_to_det.sh
+bash tests/gpu/jpg_to_det/run_all_jpg_to_det.sh
 ```
 
 ### MIG7 Config
