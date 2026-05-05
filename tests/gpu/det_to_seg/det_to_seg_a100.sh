@@ -25,14 +25,20 @@ UV_ENV="${UV_ENV:-/project/dash_agir/brennen.farrell/uv/venvs/agir_pipeline/bin/
 JPG_INPUT_DIR="${JPG_INPUT_DIR:-/90daydata/dash_agir/tmp/semifield-developed-images/new/images2}"
 FINAL_DET_DIR="${FINAL_DET_DIR:-/90daydata/dash_agir/tmp/semifield-developed-images/new/a100/detections}"
 FINAL_SEG_DIR="${FINAL_SEG_DIR:-/90daydata/dash_agir/tmp/semifield-developed-images/new/a100/segmentations}"
+FINAL_VIZ_DIR="${FINAL_VIZ_DIR:-$FINAL_SEG_DIR/visualizations}"
 
 SEG_CFG_PATH="${SEG_CFG_PATH:-$REPO_DIR/stages/det_to_seg/configs/default.yaml}"
+VIZ_SCRIPT="${VIZ_SCRIPT:-$REPO_DIR/scripts/visualize_segmentation.py}"
+
+# viz sampling and rendering parameters
+VIZ_SAMPLE_SIZE="${VIZ_SAMPLE_SIZE:-24}"
+VIZ_MAX_WIDTH="${VIZ_MAX_WIDTH:-1800}"
 SEG_THREADS="${SEG_THREADS:-1}"
 SEG_DEVICE="${SEG_DEVICE:-cuda:0}"
 BATCH_ID="${BATCH_ID:-new-test-sample}"
 
 mkdir -p /project/dash_agir/brennen.farrell/logs
-mkdir -p "$FINAL_SEG_DIR"
+mkdir -p "$FINAL_SEG_DIR" "$FINAL_VIZ_DIR"
 
 echo "Sourcing environment..."
 source "$UV_ENV"
@@ -88,6 +94,16 @@ fi
 
 echo "Validated output: $MASK_COUNT mask PNGs in $MASK_DIR"
 
+echo "Rendering random overlay sample to $FINAL_VIZ_DIR..."
+python3 "$VIZ_SCRIPT" \
+  --images "$JPG_INPUT_DIR" \
+  --detections "$DET_ARTIFACT_DIR" \
+  --masks "$MASK_DIR" \
+  --output "$FINAL_VIZ_DIR" \
+  --sample-size "$VIZ_SAMPLE_SIZE" \
+  --max-width "$VIZ_MAX_WIDTH"
+
 echo "Job finished at $(date)"
 echo "Detections:           $DET_ARTIFACT_DIR"
-echo "Segmentation outputs: $FINAL_SEG_DIR"
+echo "Segmentation outputs: $SEG_ARTIFACT_DIR"
+echo "Visualizations:   $FINAL_VIZ_DIR"
