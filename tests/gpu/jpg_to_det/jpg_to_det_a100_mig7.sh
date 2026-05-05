@@ -33,7 +33,7 @@ FINAL_VIZ_DIR="${FINAL_VIZ_DIR:-/90daydata/dash_agir/tmp/semifield-developed-ima
 # model, config, and script paths
 DET_CFG_PATH="${DET_CFG_PATH:-$REPO_DIR/stages/jpg_to_det/configs/mig7.yaml}"
 MODEL_PATH="${MODEL_PATH:-/project/dash_agir/matthew.kutugata/repos/AgIR-CVToolkit/data/plant_detection_model/last.pt}"
-VIZ_SCRIPT="${VIZ_SCRIPT:-$REPO_DIR/scripts/visualize_detections.py}"
+VIZ_SCRIPT="${VIZ_SCRIPT:-$REPO_DIR/tests/gpu/jpg_to_det/visualize_detections.py}"
 
 # viz sampling and rendering parameters
 VIZ_SAMPLE_SIZE="${VIZ_SAMPLE_SIZE:-24}"
