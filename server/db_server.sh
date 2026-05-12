@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=pg_server_agir
 #SBATCH --account=dash_agir
-#SBATCH --time=12:00:00
+#SBATCH --time=4:00:00
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
 #SBATCH --output=/project/dash_agir/logs/pg_server/agir_%x_%j.out.log
