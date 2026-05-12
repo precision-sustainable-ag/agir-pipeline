@@ -9,8 +9,8 @@
 #SBATCH --job-name=globus_index
 #SBATCH --account=dash_agir
 #SBATCH --time=8:00:00
-#SBATCH --cpus-per-task=2
-#SBATCH --mem=8G
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=128G
 #SBATCH --output=/project/dash_agir/logs/weekly_globus/agir_%x_%j.out.log
 #SBATCH --error=/project/dash_agir/logs/weekly_globus/agir_%x_%j.err.log
 
@@ -18,8 +18,9 @@ set -Euo pipefail
 
 sbatch /project/dash_agir/matthew.kutugata/repos/agir-pipeline/server/db_server.sh
 
-# wait 20 seconds for the DB server to start
-sleep 20
+# wait 120 seconds for the DB server to start
+echo "[INFO] Waiting 120 seconds for the database server to start..."
+sleep 120
 
 # ----------------- Basic log setup -----------------
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -277,7 +278,7 @@ find "${LOG_DIR}" -name "*.log" -type f -mtime +30 -delete
 
 # ------------------ Resubmit for next week -----
 echo "[DAILY] Scheduling next run for day from now at the same time..."
-
-sbatch --begin=now+1days "$0"
+SCRIPT_PATH="$(readlink -f "$0")"
+sbatch --begin=now+1days "${SCRIPT_PATH}"
 
 exit 0
