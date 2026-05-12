@@ -22,6 +22,7 @@ from . import (
     ERROR_UNKNOWN,
 )
 from .raw_to_jpg import RawToDng, DngToJpg
+from .update_exif import ensure_exiftool_installed, update_exif_single
 from stages import ITEM_OK, ITEM_FAILED
 from stages.common import resolve_path
 
@@ -138,6 +139,9 @@ def load_config(config_path: Path) -> dict:
     if paths.get('rawtherapee_validate_script'):
         paths['rawtherapee_validate_script'] = str(resolve_path(paths['rawtherapee_validate_script'], base_dir))
 
+    if paths.get('setup_exiftool_script'):
+        paths['setup_exiftool_script'] = str(resolve_path(paths['setup_exiftool_script'], base_dir))
+
     # Validate resolved paths exist
     validate_config(config)
 
@@ -182,6 +186,16 @@ class Processor:
         self.raw_to_dng = RawToDng(self.config)
         self.dng_to_jpg = DngToJpg(self.config)
 
+        self.exif_tags = self.config.get('dng_tags') or {}
+        setup_script_str = self.config.get('paths', {}).get('setup_exiftool_script')
+        setup_script = Path(setup_script_str) if setup_script_str else None
+        try:
+            ensure_exiftool_installed(setup_script)
+            self.exif_enabled = True
+        except RuntimeError as e:
+            logger.warning("ExifTool not available; EXIF update will be skipped: %s", e)
+            self.exif_enabled = False
+
 
     def process_image(self, raw_path: Path, output_dir: Path) -> Path:
         """
@@ -215,6 +229,18 @@ class Processor:
             # Clean up intermediate DNG file
             if dng_path and dng_path.exists():
                 dng_path.unlink()
+        
+        if self.exif_enabled:
+            try:
+                update_exif_single(
+                    jpg_path=Path(jpg_path),
+                    exif_tags=self.exif_tags,
+                    rewrite_config_tags=False,
+                    debug_args=False,
+                )
+            except Exception as e:
+                logger.error("Failed to update EXIF for %s: %s", jpg_path, e)
+                raise RuntimeError(f"Failed to update EXIF for {jpg_path}: {e}")
 
         return jpg_path
 
