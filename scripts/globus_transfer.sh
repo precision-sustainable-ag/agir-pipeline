@@ -16,7 +16,14 @@
 #SBATCH --error=/project/dash_agir/logs/weekly_globus/globus_transfer_%x_%j.err.log
 
 set -Euo pipefail
+source /project/dash_agir/postgres/pg_coords.env
+source # source to your uv env
 
-python /project/dash_agir/matthew.kutugata/repos/agir-pipeline/scripts/globus_transfer.py
+STATES=  # enter state(s) like "NC TX MD"
+START_DATE=  # enter date like "2025-10-01"
+END_DATE=  # enter date like "2026-06-30"
 
-sbatch --begin=now+2days "$0"
+python /project/dash_agir/matthew.kutugata/repos/agir-pipeline/scripts/globus_transfer.py \
+    --states $STATES \
+    --start-date $START_DATE \
+    --end-date $END_DATE
