@@ -1,0 +1,6 @@
+[project]
+name = "agir-orchestrator"
+version = "2.0.0"  # Orchestrator version
+dependencies = [
+    "agir-db>=1.2.0,<2.0.0",  # Compatible DB API version
+]
