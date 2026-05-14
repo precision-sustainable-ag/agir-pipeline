@@ -1,0 +1,88 @@
+# Example orchestrator job config for a single pipeline stage.
+# One file like this per stage (e.g. scinet_raw_to_jpg.yaml, scinet_jpg_to_det.yaml).
+# Used by both scripts/stage_inputs.py and scripts/submit_jobs.py.
+
+# ── Stage identity & compute-node invocation ─────────────────────────────────
+#
+# cli_args and promote_args are embedded verbatim into the generated bash
+# script, so they may reference any bash variable set in that script:
+#   $BATCH_ID, $CONFIG_PATH, $TMPDIR, $CPUS, $RUN_DIR, $FINAL_DEST, $AGIR_DIR
+#
+stage:
+  name: raw_to_jpg
+
+  # Python module run on the compute node (python -m <cli_module> <cli_args>)
+  cli_module: stages.raw_to_jpg.cli
+  cli_args: >-
+    --c $CONFIG_PATH
+    --i $TMPDIR/input
+    --o $TMPDIR/output
+    --t $CPUS
+    --batch-id $BATCH_ID
+    --window-key $WINDOW_KEY
+
+  # Subdirectory of $TMPDIR/output where run_report.json is written.
+  # Matches the stage name by convention (stages write to output/<stage_name>/).
+  output_subdir: raw_to_jpg
+
+  # Optional promote step — omit both keys for stages that have no promotion.
+  promote_script: stages/raw_to_jpg/promote.py
+  promote_args: "--run-dir $RUN_DIR --dest $FINAL_DEST"
+
+# Example for jpg_to_det (no promote step):
+#
+# stage:
+#   name: jpg_to_det
+#   cli_module: stages.jpg_to_det.cli
+#   cli_args: >-
+#     --c $CONFIG_PATH
+#     --i $TMPDIR/input
+#     --o $TMPDIR/output
+#     --device cuda:0
+#     --batch-id $BATCH_ID
+#   output_subdir: jpg_to_det
+
+# ── Globus transfer (used by stage_inputs.py) ─────────────────────────────────
+transfer:
+  juno_endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
+  ceres_endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+
+  dry_run: false
+
+  poll_interval_seconds: 30
+  poll_timeout_seconds: 7200
+  max_poll_attempts: 240
+
+  # Route key must match stage.name above.
+  routes:
+    raw_to_jpg:
+      source_root_juno: /LTS/project/dash_agir/semifield-upload
+      destination_root: /90daydata/dash_agir/semifield-upload
+
+# ── SLURM job settings (used by submit_jobs.py) ───────────────────────────────
+slurm:
+  account: dash_agir
+  cpus_per_task: 16
+  mem: 128G
+  time: "4:00:00"
+
+# ── Filesystem paths (used by submit_jobs.py) ─────────────────────────────────
+paths:
+  # Root of the agir-pipeline checkout on the HPC cluster.
+  agir_pipeline_dir: /project/dash_agir/agir-pipeline
+
+  # Stage-specific processor config passed as $CONFIG_PATH inside the job.
+  # For raw_to_jpg this is the camera config YAML; adjust per stage.
+  stage_config: /project/dash_agir/configs/raw_to_jpg_camera.yaml
+
+  # Where staged inputs land after Globus transfer.
+  input_staging_root: /90daydata/dash_agir/semifield-upload
+
+  # Where per-run artifacts are written after the job completes.
+  output_stage_runs: /90daydata/dash_agir/stage_runs
+
+  # Root used to build the final promotion destination ($final_dest_root/$batch_id/images).
+  final_dest_root: /90daydata/dash_agir/semifield-developed-images
+
+  # SLURM stdout/stderr log directory.
+  log_dir: /90daydata/dash_agir/logs

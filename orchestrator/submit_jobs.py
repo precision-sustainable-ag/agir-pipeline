@@ -1,5 +1,5 @@
 """
-Submit raw_to_jpg SLURM jobs for a list of batches.
+Submit SLURM jobs for a pipeline stage across a list of batches.
 
 For each batch:
   1. Verify the input-staging transfer is confirmed complete in the DB.
@@ -8,7 +8,23 @@ For each batch:
   4. Submit via sbatch and record the job ID on the lease row.
 
 The generated job script handles the full compute-node lifecycle:
-  copy-in → raw_to_jpg → promote → copy-out artifacts → ingest + release lease
+  copy-in → run stage → promote (optional) → copy-out artifacts → ingest + release lease
+
+Stage identity and the compute-node CLI invocation are declared in the config YAML
+under a ``stage:`` block, so this module works for any pipeline stage without
+modification:
+
+  stage:
+    name: raw_to_jpg
+    cli_module: stages.raw_to_jpg.cli
+    cli_args: "--c $CONFIG_PATH --i $TMPDIR/input --o $TMPDIR/output --t $CPUS --batch-id $BATCH_ID"
+    output_subdir: raw_to_jpg
+    promote_script: stages/raw_to_jpg/promote.py   # omit if stage has no promote step
+    promote_args: "--run-dir $RUN_DIR --dest $FINAL_DEST"
+
+``cli_args`` and ``promote_args`` are embedded verbatim into the bash script, so
+they may reference any bash variable set earlier in the script ($BATCH_ID,
+$CONFIG_PATH, $TMPDIR, $CPUS, $RUN_DIR, $FINAL_DEST, $AGIR_DIR, etc.).
 """
 
 from __future__ import annotations
@@ -34,7 +50,7 @@ _LEASE_TTL_SECONDS = 4 * 3600 + 600
 
 class JobResult(NamedTuple):
     batch_id: str
-    status: str                   # submitted | lease_conflict | transfer_not_complete | sbatch_failed | no_transfer
+    status: str  # submitted | lease_conflict | no_staged_inputs | sbatch_failed
     slurm_job_id: Optional[str]
     lease_id: Optional[str]
     error: Optional[str]
@@ -45,21 +61,37 @@ def load_job_config(config_path: str) -> Dict:
         return yaml.safe_load(fh)
 
 
-def submit_raw_to_jpg_jobs(
+def submit_stage_jobs(
     batch_entries: List[BatchEntry],
     config_path: str,
     require_transfer_complete: bool = True,
 ) -> List[JobResult]:
     """Claim leases and submit one SLURM job per batch.
 
+    The stage name and CLI invocation are read from the ``stage:`` block in the
+    config YAML — no stage-specific code lives here.
+
     Returns a list of JobResult namedtuples (one per batch entry).
     """
     cfg = load_job_config(config_path)
+
+    stage_cfg = cfg.get("stage", {})
+    stage_name = stage_cfg.get("name")
+    if not stage_name:
+        raise ValueError(f"Config '{config_path}' is missing required 'stage.name' field.")
+    cli_module = stage_cfg.get("cli_module")
+    if not cli_module:
+        raise ValueError(f"Config '{config_path}' is missing required 'stage.cli_module' field.")
+    cli_args = stage_cfg.get("cli_args", "")
+    output_subdir = stage_cfg.get("output_subdir", stage_name)
+    promote_script = stage_cfg.get("promote_script")
+    promote_args = stage_cfg.get("promote_args", "")
+
     paths_cfg = cfg.get("paths", {})
     slurm_cfg = cfg.get("slurm", {})
 
     agir_pipeline_dir = paths_cfg["agir_pipeline_dir"]
-    raw_to_jpg_config = paths_cfg["raw_to_jpg_config"]
+    stage_config = paths_cfg["stage_config"]
     input_staging_root = paths_cfg["input_staging_root"]
     output_stage_runs = paths_cfg["output_stage_runs"]
     final_dest_root = paths_cfg["final_dest_root"]
@@ -84,7 +116,7 @@ def submit_raw_to_jpg_jobs(
                     batch_id, entry.start_epoch, entry.end_epoch
                 ):
                     logger.warning(
-                        "[%s] Windowed inputs not found on 90daydata — run stage_raw_inputs first",
+                        "[%s] Windowed inputs not found on 90daydata — run stage_inputs first",
                         batch_id,
                     )
                     results.append(JobResult(batch_id, "no_staged_inputs", None, None, None))
@@ -97,7 +129,7 @@ def submit_raw_to_jpg_jobs(
             window_key = f"{entry.start_epoch}_{entry.end_epoch}"
             lease = db.orchestration.claim_stage_lease(
                 batch_id=batch_id,
-                stage="raw_to_jpg",
+                stage=stage_name,
                 orchestrator_id=ORCHESTRATOR_ID,
                 ttl_seconds=_LEASE_TTL_SECONDS,
                 window_key=window_key,
@@ -112,10 +144,16 @@ def submit_raw_to_jpg_jobs(
             final_dest = f"{final_dest_root}/{batch_id}/images"
 
             script_text = _render_slurm_script(
+                stage_name=stage_name,
+                cli_module=cli_module,
+                cli_args=cli_args,
+                output_subdir=output_subdir,
+                promote_script=promote_script,
+                promote_args=promote_args,
                 batch_id=batch_id,
                 lease_id=lease_id,
                 window_key=window_key,
-                config_path=raw_to_jpg_config,
+                stage_config=stage_config,
                 input_dir=input_dir,
                 output_stage_runs=output_stage_runs,
                 final_dest=final_dest,
@@ -127,7 +165,7 @@ def submit_raw_to_jpg_jobs(
                 time_limit=time_limit,
             )
 
-            script_path = script_dir / f"raw_to_jpg_{batch_id}_{window_key}.sh"
+            script_path = script_dir / f"{stage_name}_{batch_id}_{window_key}.sh"
             script_path.write_text(script_text)
             script_path.chmod(0o755)
 
@@ -162,11 +200,42 @@ def submit_raw_to_jpg_jobs(
     return results
 
 
+def _render_promote_block(
+    agir_pipeline_dir: str,
+    promote_script: Optional[str],
+    promote_args: str,
+    stage_exit_var: str = "$STAGE_EXIT",
+) -> str:
+    if not promote_script:
+        return f"""\
+PROMOTE_EXIT=0
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] No promote step for this stage"
+"""
+    return f"""\
+PROMOTE_EXIT=1
+if [ "{stage_exit_var}" -eq 0 ]; then
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Promoting outputs"
+  python "{agir_pipeline_dir}/{promote_script}" \\
+    {promote_args}
+  PROMOTE_EXIT=$?
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] promote exited $PROMOTE_EXIT"
+else
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Skipping promotion (stage_exit={stage_exit_var})"
+fi
+"""
+
+
 def _render_slurm_script(
+    stage_name: str,
+    cli_module: str,
+    cli_args: str,
+    output_subdir: str,
+    promote_script: Optional[str],
+    promote_args: str,
     batch_id: str,
     lease_id: str,
     window_key: str,
-    config_path: str,
+    stage_config: str,
     input_dir: str,
     output_stage_runs: str,
     final_dest: str,
@@ -177,9 +246,15 @@ def _render_slurm_script(
     mem: str,
     time_limit: str,
 ) -> str:
+    promote_block = _render_promote_block(
+        agir_pipeline_dir=agir_pipeline_dir,
+        promote_script=promote_script,
+        promote_args=promote_args,
+        stage_exit_var="$STAGE_EXIT",
+    )
     return f"""\
 #!/bin/bash
-#SBATCH --job-name=raw_to_jpg_{batch_id}
+#SBATCH --job-name={stage_name}_{batch_id}
 #SBATCH --account={account}
 #SBATCH --cpus-per-task={cpus}
 #SBATCH --mem={mem}
@@ -193,13 +268,14 @@ BATCH_ID="{batch_id}"
 LEASE_ID="{lease_id}"
 WINDOW_KEY="{window_key}"
 ORCHESTRATOR_ID="{ORCHESTRATOR_ID}"
-CONFIG_PATH="{config_path}"
+CONFIG_PATH="{stage_config}"
 INPUT_DIR="{input_dir}"
 OUTPUT_STAGE_RUNS="{output_stage_runs}"
 FINAL_DEST="{final_dest}"
 AGIR_DIR="{agir_pipeline_dir}"
+CPUS={cpus}
 
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] START batch=$BATCH_ID job=$SLURM_JOB_ID"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] START stage={stage_name} batch=$BATCH_ID job=$SLURM_JOB_ID"
 
 mkdir -p "$TMPDIR/input" "$TMPDIR/output"
 
@@ -207,21 +283,16 @@ mkdir -p "$TMPDIR/input" "$TMPDIR/output"
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Copying inputs from $INPUT_DIR"
 rsync -a --info=progress2 "$INPUT_DIR/" "$TMPDIR/input/"
 
-# ── 2. Run raw_to_jpg ─────────────────────────────────────────────────────────
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Running raw_to_jpg"
+# ── 2. Run stage ──────────────────────────────────────────────────────────────
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Running {stage_name}"
 cd "$AGIR_DIR"
-python -m stages.raw_to_jpg.cli \\
-  --c "$CONFIG_PATH" \\
-  --i "$TMPDIR/input" \\
-  --o "$TMPDIR/output" \\
-  --t {cpus} \\
-  --batch-id "$BATCH_ID" \\
-  --window-key "$WINDOW_KEY"
+python -m {cli_module} \\
+  {cli_args}
 STAGE_EXIT=$?
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] raw_to_jpg exited $STAGE_EXIT"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] {stage_name} exited $STAGE_EXIT"
 
 # ── 3. Locate run directory ───────────────────────────────────────────────────
-RUN_REPORT=$(find "$TMPDIR/output/raw_to_jpg" -name "run_report.json" 2>/dev/null | head -1)
+RUN_REPORT=$(find "$TMPDIR/output/{output_subdir}" -name "run_report.json" 2>/dev/null | head -1)
 if [ -z "$RUN_REPORT" ]; then
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: no run_report.json found"
   python "$AGIR_DIR/scripts/ingest_and_release.py" \\
@@ -234,19 +305,8 @@ RUN_DIR=$(dirname "$RUN_REPORT")
 RUN_ID=$(python -c "import json; print(json.load(open('$RUN_REPORT'))['run_id'])")
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] run_id=$RUN_ID"
 
-# ── 4. Promote outputs (only when stage exited 0) ────────────────────────────
-PROMOTE_EXIT=1
-if [ "$STAGE_EXIT" -eq 0 ]; then
-  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Promoting to $FINAL_DEST"
-  python "$AGIR_DIR/stages/raw_to_jpg/promote.py" \\
-    --run-dir "$RUN_DIR" \\
-    --dest "$FINAL_DEST"
-  PROMOTE_EXIT=$?
-  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] promote exited $PROMOTE_EXIT"
-else
-  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Skipping promotion (stage_exit=$STAGE_EXIT)"
-fi
-
+# ── 4. Promote outputs ────────────────────────────────────────────────────────
+{promote_block}
 # ── 5. Copy artifacts back to 90daydata ──────────────────────────────────────
 ARTIFACT_DEST="$OUTPUT_STAGE_RUNS/$RUN_ID"
 mkdir -p "$ARTIFACT_DEST"
@@ -261,5 +321,5 @@ python "$AGIR_DIR/scripts/ingest_and_release.py" \\
   --orchestrator-id "$ORCHESTRATOR_ID" \\
   --release-reason "$RELEASE_REASON"
 
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] DONE stage_exit=$STAGE_EXIT promote_exit=$PROMOTE_EXIT"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] DONE stage={stage_name} stage_exit=$STAGE_EXIT promote_exit=$PROMOTE_EXIT"
 """

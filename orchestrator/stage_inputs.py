@@ -1,9 +1,9 @@
 """
-Targeted input staging: transfer time-windowed RAW files from JUNO LTS to 90daydata.
+Targeted input staging: transfer time-windowed files from LTS to 90daydata.
 
 Unlike the automated input_staging_loop (which discovers batches via DB views and
 transfers full directories), this module accepts an explicit batch list with per-batch
-time windows and transfers only the RAW files whose filename epoch falls within each
+time windows and transfers only the files whose filename epoch falls within each
 window.  Transfer tracking and polling reuse the same logs.transfer_runs machinery.
 """
 
@@ -25,10 +25,14 @@ logger = logging.getLogger(__name__)
 def stage_inputs_for_batches(
     batch_entries: List[BatchEntry],
     config_path: str,
+    stage: str,
     requested_by: str = "orchestrator.manual",
     dry_run: Optional[bool] = None,
 ) -> Dict[str, str]:
-    """Transfer time-windowed RAW files for each batch from JUNO LTS to 90daydata.
+    """Transfer time-windowed files for each batch from LTS to 90daydata.
+
+    ``stage`` must match a key under ``transfer.routes`` in the config YAML and
+    the stage name recorded in the DB (e.g. "raw_to_jpg", "jpg_to_det").
 
     Blocks until all submitted transfers reach a terminal state (completed/failed)
     or the poll timeout is exceeded.
@@ -45,7 +49,12 @@ def stage_inputs_for_batches(
 
         src_endpoint = transfer_cfg.get("juno_endpoint")
         dst_endpoint = transfer_cfg.get("ceres_endpoint")
-        route = transfer_cfg.get("routes", {}).get("raw_to_jpg", {})
+        route = transfer_cfg.get("routes", {}).get(stage, {})
+        if not route:
+            raise ValueError(
+                f"No transfer route found for stage '{stage}' in config '{config_path}'. "
+                f"Add a 'transfer.routes.{stage}' section."
+            )
         src_root = route.get("source_root_juno")
         dst_root = route.get("destination_root")
         _dry_run = dry_run if dry_run is not None else bool(transfer_cfg.get("dry_run", False))
@@ -103,7 +112,7 @@ def stage_inputs_for_batches(
 
                 req = db.orchestration.request_windowed_input_transfer(
                     batch_id=batch_id,
-                    stage="raw_to_jpg",
+                    stage=stage,
                     start_epoch=start_epoch,
                     end_epoch=end_epoch,
                     src_lts_ref=src_dir,
@@ -124,7 +133,7 @@ def stage_inputs_for_batches(
                     continue
 
                 transfer_id = req["transfer_id"]
-                label = db.transfers.build_input_staging_label("raw_to_jpg", batch_id)
+                label = db.transfers.build_input_staging_label(stage, batch_id)
 
                 cmd = db.transfers.build_globus_batch_cmd(
                     src_endpoint=src_endpoint,
