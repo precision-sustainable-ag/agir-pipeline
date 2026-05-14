@@ -38,7 +38,8 @@ CREATE TABLE logs.transfer_runs (
 
 CREATE UNIQUE INDEX idx_transfer_runs_active_input
   ON logs.transfer_runs (direction, batch_id, stage, dst_staging_ref)
-  WHERE status IN ('requested', 'active');
+  WHERE status IN ('requested', 'active')
+  AND dedupe_key IS NULL;
 
 CREATE UNIQUE INDEX idx_transfer_runs_dedupe_key
   ON logs.transfer_runs (dedupe_key)

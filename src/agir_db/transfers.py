@@ -296,6 +296,29 @@ class TransferManager:
         return "requested"
 
     @staticmethod
+    def build_globus_batch_cmd(
+        src_endpoint: str,
+        dst_endpoint: str,
+        batch_file_path: str,
+        label: Optional[str] = None,
+    ) -> List[str]:
+        """Construct a Globus CLI transfer command for a pre-written batch file.
+
+        The batch file must have one 'src_path dst_path' pair per line.
+        Use this for targeted file-level transfers instead of recursive directory transfers.
+        """
+        cmd = [
+            "globus",
+            "transfer",
+            src_endpoint,
+            dst_endpoint,
+            "--batch", batch_file_path,
+        ]
+        if label:
+            cmd += ["--label", label]
+        return cmd
+
+    @staticmethod
     def build_globus_cmd(
         src_endpoint: str,
         dst_endpoint: str,

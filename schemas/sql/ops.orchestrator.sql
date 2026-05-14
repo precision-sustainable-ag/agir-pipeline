@@ -25,7 +25,8 @@ CREATE OR REPLACE FUNCTION ops.claim_stage_lease(
     p_stage TEXT,
     p_orchestrator_id TEXT,
     p_ttl_seconds INTEGER,
-    p_attempt INTEGER DEFAULT NULL
+    p_attempt INTEGER DEFAULT NULL,
+    p_window_key TEXT DEFAULT ''
 )
 RETURNS TABLE (
     claimed BOOLEAN,
@@ -46,16 +47,16 @@ BEGIN
     RETURN QUERY
     WITH upserted AS (
         INSERT INTO logs.stage_leases AS sl (
-            lease_id, batch_id, stage, orchestrator_id,
+            lease_id, batch_id, stage, window_key, orchestrator_id,
             leased_at, expires_at, attempt, state,
             released_at, release_reason, updated_at
         )
         VALUES (
-            ops.uuid_v4(), p_batch_id, p_stage, p_orchestrator_id,
+            ops.uuid_v4(), p_batch_id, p_stage, p_window_key, p_orchestrator_id,
             now(), now() + make_interval(secs => p_ttl_seconds), 1, 'active',
             NULL, NULL, now()
         )
-        ON CONFLICT ON CONSTRAINT stage_leases_batch_stage_key DO UPDATE
+        ON CONFLICT ON CONSTRAINT stage_leases_batch_stage_window_key DO UPDATE
         SET
             lease_id = ops.uuid_v4(),
             orchestrator_id = EXCLUDED.orchestrator_id,

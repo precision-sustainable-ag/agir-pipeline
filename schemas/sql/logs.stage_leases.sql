@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS logs.stage_leases (
     state            TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'released')),
     released_at      TIMESTAMPTZ NULL,
     release_reason   TEXT NULL,
+    slurm_job_id     TEXT NULL,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
 
