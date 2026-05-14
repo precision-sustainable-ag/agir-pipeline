@@ -45,6 +45,7 @@ class RunReportBuilder:
         batch_id: str = None,
         pipeline_run_id: str = None,
         orchestrator_id: str = None,
+        window_key: str = None,
     ):
         self.stage = stage
         self.stage_version = stage_version
@@ -52,6 +53,7 @@ class RunReportBuilder:
         self.batch_id = batch_id
         self.pipeline_run_id = pipeline_run_id
         self.orchestrator_id = orchestrator_id
+        self.window_key = window_key or ""
 
         self._started_at = None
         self._ended_at = None
@@ -273,6 +275,7 @@ class RunReportBuilder:
             "run_id": self.run_id,
             "pipeline_run_id": self.pipeline_run_id,
             "batch_id": self.batch_id,
+            "window_key": self.window_key,
             "orchestrator_id": self.orchestrator_id,
             "started_at": self._started_at,
             "ended_at": self._ended_at,
@@ -321,12 +324,14 @@ class ManifestBuilder:
         run_id: str,
         artifacts_root: str,
         batch_id: str = None,
+        window_key: str = None,
         schema_version: int = 1,
     ):
         self.stage = stage
         self.stage_version = stage_version
         self.run_id = run_id
         self.batch_id = batch_id
+        self.window_key = window_key or ""
         self.schema_version = schema_version
         self.artifacts_root = str(artifacts_root)
         self._items = []
@@ -394,6 +399,7 @@ class ManifestBuilder:
             "stage_version": self.stage_version,
             "run_id": self.run_id,
             "batch_id": self.batch_id,
+            "window_key": self.window_key,
             "schema_version": self.schema_version,
             "artifacts_root": self.artifacts_root,
             "items": self._items,

@@ -34,6 +34,7 @@ def main() -> int:
     parser.add_argument("--t", type=int, default=0, help="Number of parallel threads. Default 0 = sequential processing.")
     parser.add_argument("--fs", action="store_true", help="Stop processing on first failure.")
     parser.add_argument("--batch-id", type=str, default=None, help="Batch ID (e.g. TX_2024-06-01). Auto-inferred from input path if omitted.")
+    parser.add_argument("--window-key", type=str, default="", help="Time-window key (e.g. 1760975625_1760975685). Written into run_report and manifest.")
 
     args = parser.parse_args()
 
@@ -54,6 +55,7 @@ def main() -> int:
         stage=STAGE,
         stage_version=STAGE_VERSION,
         batch_id=batch_id,
+        window_key=args.window_key,
     )
     report.start()
 
@@ -101,6 +103,7 @@ def main() -> int:
         run_id=run_id,
         artifacts_root=str(artifacts_dir),
         batch_id=batch_id,
+        window_key=args.window_key,
     )
 
     report.set_provenance(

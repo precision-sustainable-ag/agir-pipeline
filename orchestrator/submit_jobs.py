@@ -114,6 +114,7 @@ def submit_raw_to_jpg_jobs(
             script_text = _render_slurm_script(
                 batch_id=batch_id,
                 lease_id=lease_id,
+                window_key=window_key,
                 config_path=raw_to_jpg_config,
                 input_dir=input_dir,
                 output_stage_runs=output_stage_runs,
@@ -164,6 +165,7 @@ def submit_raw_to_jpg_jobs(
 def _render_slurm_script(
     batch_id: str,
     lease_id: str,
+    window_key: str,
     config_path: str,
     input_dir: str,
     output_stage_runs: str,
@@ -189,6 +191,7 @@ set -uo pipefail
 
 BATCH_ID="{batch_id}"
 LEASE_ID="{lease_id}"
+WINDOW_KEY="{window_key}"
 ORCHESTRATOR_ID="{ORCHESTRATOR_ID}"
 CONFIG_PATH="{config_path}"
 INPUT_DIR="{input_dir}"
@@ -212,7 +215,8 @@ python -m stages.raw_to_jpg.cli \\
   --i "$TMPDIR/input" \\
   --o "$TMPDIR/output" \\
   --t {cpus} \\
-  --batch-id "$BATCH_ID"
+  --batch-id "$BATCH_ID" \\
+  --window-key "$WINDOW_KEY"
 STAGE_EXIT=$?
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] raw_to_jpg exited $STAGE_EXIT"
 
