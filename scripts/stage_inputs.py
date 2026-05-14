@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Stage RAW inputs from JUNO LTS to 90daydata for a list of batches.
+Stage inputs from LTS to 90daydata for a list of batches.
 
 Reads a batch list file, queries source.globus_file_index for each batch's
-time-windowed RAW files, submits targeted Globus transfers, and polls until
-all transfers reach a terminal state.  Must be run BEFORE submit_raw_to_jpg.py.
+time-windowed files, submits targeted Globus transfers, and polls until all
+transfers reach a terminal state.  Must be run BEFORE submit_jobs.py.
+
+The stage being transferred is read from the ``stage.name`` field in the
+config YAML, so this script works for any pipeline stage without modification.
 
 Usage
 -----
-python scripts/stage_raw_inputs.py \\
+python scripts/stage_inputs.py \\
     --batches path/to/batch_list.txt \\
     --config  configs/scinet_raw_to_jpg.yaml \\
     [--dry-run]
@@ -24,16 +27,28 @@ import logging
 import sys
 from pathlib import Path
 
-# Ensure repo root is on the path when run directly
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from orchestrator.batch_list import parse_batch_list
 from orchestrator.stage_inputs import stage_inputs_for_batches
 
 
+def _read_stage_name(config_path: Path) -> str:
+    with open(config_path, "r", encoding="utf-8") as fh:
+        cfg = yaml.safe_load(fh)
+    stage_name = cfg.get("stage", {}).get("name")
+    if not stage_name:
+        raise ValueError(
+            f"Config '{config_path}' is missing required 'stage.name' field."
+        )
+    return stage_name
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Transfer time-windowed RAW files from JUNO LTS to 90daydata staging."
+        description="Transfer time-windowed files from LTS to 90daydata staging."
     )
     parser.add_argument(
         "--batches", required=True, type=Path,
@@ -41,7 +56,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--config", required=True, type=Path,
-        help="Transfer config YAML (e.g. configs/scinet_raw_to_jpg.yaml or configs/juno_transfer.yaml).",
+        help="Stage config YAML (e.g. configs/scinet_raw_to_jpg.yaml).",
     )
     parser.add_argument(
         "--dry-run", action="store_true", default=None,
@@ -60,6 +75,12 @@ def main() -> int:
     )
 
     try:
+        stage_name = _read_stage_name(args.config)
+    except (ValueError, OSError) as exc:
+        logging.error("Failed to read stage name from config: %s", exc)
+        return 1
+
+    try:
         entries = parse_batch_list(args.batches)
         logging.info("Parsed %d batch(es) from batch list: %s", len(entries), args.batches)
     except ValueError as exc:
@@ -70,7 +91,7 @@ def main() -> int:
         logging.warning("Batch list is empty — nothing to do.")
         return 0
 
-    logging.info("Staging inputs for %d batch(es)", len(entries))
+    logging.info("Staging '%s' inputs for %d batch(es)", stage_name, len(entries))
     for e in entries:
         logging.info("  %s  [%d, %d]", e.batch_id, e.start_epoch, e.end_epoch)
 
@@ -78,16 +99,17 @@ def main() -> int:
     results = stage_inputs_for_batches(
         batch_entries=entries,
         config_path=str(args.config),
-        requested_by="scripts.stage_raw_inputs",
+        stage=stage_name,
+        requested_by="scripts.stage_inputs",
         dry_run=dry_run,
     )
     logging.info("Completed staging inputs for %d batch(es)", len(results))
 
     any_failed = False
-    print("\n── Transfer results ──────────────────────────────────────")
-    for batch_id, status in results.items():
+    print(f"\n── Transfer results [{stage_name}] ──────────────────────────────")
+    for window_key, status in results.items():
         icon = "✓" if status in {"completed", "already_completed"} else "✗"
-        print(f"  {icon}  {batch_id:<25}  {status}")
+        print(f"  {icon}  {window_key:<40}  {status}")
         if status not in {"completed", "already_completed", "already_active"}:
             any_failed = True
     print()
