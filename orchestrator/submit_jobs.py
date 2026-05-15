@@ -30,6 +30,7 @@ $CONFIG_PATH, $TMPDIR, $CPUS, $RUN_DIR, $FINAL_DEST, $AGIR_DIR, etc.).
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -43,9 +44,7 @@ from .batch_list import BatchEntry
 
 logger = logging.getLogger(__name__)
 
-ORCHESTRATOR_ID = "orchestrator.manual"
-# 4-hour walltime + 10-minute buffer so the lease outlives the job
-_LEASE_TTL_SECONDS = 4 * 3600 + 600
+ORCHESTRATOR_ID = f"orchestrator.manual.{os.getpid()}"
 
 
 class JobResult(NamedTuple):
@@ -100,6 +99,14 @@ def submit_stage_jobs(
     cpus = int(slurm_cfg.get("cpus_per_task", 16))
     mem = slurm_cfg.get("mem", "128G")
     time_limit = slurm_cfg.get("time", "4:00:00")
+
+    # convert time_limit to seconds and add buffer for lease TTL
+    time_match = re.match(r"(\d+):(\d{2}):(\d{2})", time_limit)
+    if not time_match:
+        raise ValueError(f"Invalid time format in config: {time_limit!r}")
+    hours, minutes, seconds = map(int, time_match.groups())
+    total_seconds = hours * 3600 + minutes * 60 + seconds
+
     account = slurm_cfg.get("account", "dash_agir")
 
     script_dir = Path(output_stage_runs) / "job_scripts"
@@ -131,7 +138,7 @@ def submit_stage_jobs(
                 batch_id=batch_id,
                 stage=stage_name,
                 orchestrator_id=ORCHESTRATOR_ID,
-                ttl_seconds=_LEASE_TTL_SECONDS,
+                ttl_seconds=total_seconds,
                 window_key=window_key,
             )
             if not lease.get("claimed"):

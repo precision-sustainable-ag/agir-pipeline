@@ -107,7 +107,10 @@ def main() -> int:
 
     any_failed = False
     print(f"\n── Transfer results [{stage_name}] ──────────────────────────────")
-    for window_key, status in results.items():
+    # for window_key, status in results.items():
+    for result in results:
+        window_key = result.window_key
+        status = result.status
         icon = "✓" if status in {"completed", "already_completed"} else "✗"
         print(f"  {icon}  {window_key:<40}  {status}")
         if status not in {"completed", "already_completed", "already_active"}:

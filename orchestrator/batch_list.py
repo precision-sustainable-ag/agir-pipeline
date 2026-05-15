@@ -29,36 +29,22 @@ class BatchEntry(NamedTuple):
     start_epoch: int
     end_epoch: int
 
+def make_window_key(start_epoch: int, end_epoch: int) -> str:
+    """Return the canonical key for a time window."""
+    return f"{start_epoch}_{end_epoch}"
+
+
+def make_entry_window_key(entry: BatchEntry) -> str:
+    """Return the canonical key for a BatchEntry time window."""
+    return make_window_key(entry.start_epoch, entry.end_epoch)
+
 
 _TIME_RE = re.compile(r"\d{1,2}:\d{2}:\d{2}\s*(?:AM|PM)", re.IGNORECASE)
 
-def normalize_time_str(time_str: str) -> str:
-    """
-    Detects if the time string is in 12-hour (AM/PM) or 24-hour format
-    and normalizes it into 24-hour 'HH:MM:SS'.
-    
-    Accepts both '1:25:18 PM' and '1:25:18PM'.
-    """
-    time_str = time_str.strip().upper()
 
-    # Fix cases like '1:25:18PM' -> '1:25:18 PM'
-    time_str = re.sub(r'(?<=\d)(AM|PM)$', r' \1', time_str)
-
-    try:
-        # Try parsing as 12-hour format (AM/PM)
-        dt = datetime.datetime.strptime(time_str, "%I:%M:%S %p")
-    except ValueError:
-        try:
-            # Try parsing as 24-hour format
-            dt = datetime.datetime.strptime(time_str, "%H:%M:%S")
-        except ValueError as e:
-            raise ValueError(f"Unrecognized time format: {time_str}") from e
-
-    return dt.strftime("%H:%M:%S")
 
 def _parse_time_window(date: datetime.date, times_str: str) -> tuple[int, int]:
     matches = _TIME_RE.findall(times_str)
-    # matches = [normalize_time_str(m) for m in matches]
 
     if len(matches) < 2:
         raise ValueError(
@@ -71,9 +57,9 @@ def _parse_time_window(date: datetime.date, times_str: str) -> tuple[int, int]:
     end_dt = datetime.datetime.strptime(f"{date_str} {matches[1].strip()}", fmt)
     start_epoch = int(start_dt.replace(tzinfo=datetime.timezone.utc).timestamp())
     end_epoch = int(end_dt.replace(tzinfo=datetime.timezone.utc).timestamp())
-    if end_epoch < start_epoch:
+    if end_epoch <= start_epoch:
         raise ValueError(
-            f"end_time {matches[1].strip()!r} is before start_time {matches[0].strip()!r}"
+            f"end_time must be after start_time: {matches[0].strip()!r} vs {matches[1].strip()!r}"
         )
     return start_epoch, end_epoch
 
@@ -108,4 +94,13 @@ def parse_batch_list(path: str | Path) -> List[BatchEntry]:
         except ValueError as exc:
             raise ValueError(f"Line {lineno}: {exc}") from exc
         entries.append(BatchEntry(batch_id=batch_id, start_epoch=start_epoch, end_epoch=end_epoch))
+    
+    # Reject duplicate exact windows (batch_id, start_epoch, end_epoch)
+    seen_windows = set()
+    for entry in entries:
+        window_key = (entry.batch_id, entry.start_epoch, entry.end_epoch)
+        if window_key in seen_windows:
+            raise ValueError(f"Duplicate window detected: {window_key}")
+        seen_windows.add(window_key)
+    
     return entries
