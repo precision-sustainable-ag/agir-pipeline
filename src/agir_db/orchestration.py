@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from uuid import UUID
 
+from orchestrator.batch_list import make_window_key
+
 from .connection import ConnectionManager
 from .exceptions import ValidationError
 
@@ -139,7 +141,7 @@ class OrchestrationManager:
             }
 
         # Check for an in-flight transfer for this exact window
-        dedupe_key = f"input_stage:{batch_id}:{stage}:{start_epoch}:{end_epoch}"
+        dedupe_key = f"input_stage:{batch_id}:{stage}:{make_window_key(start_epoch, end_epoch)}"
         existing = self.conn.fetch_one(
             """
             SELECT transfer_id::text AS transfer_id, status, requested_at
@@ -160,18 +162,18 @@ class OrchestrationManager:
         row = self.conn.fetch_one(
             """
             INSERT INTO logs.transfer_runs (
-                transfer_id, direction, batch_id, stage, transfer_profile_id,
+                transfer_id, direction, batch_id, stage, window_key, transfer_profile_id,
                 src_lts_ref, dst_staging_ref, priority, requested_by,
                 dedupe_key, status, requested_at
             )
             VALUES (
-                ops.uuid_v4(), 'input_stage', %s, %s, 'juno_to_ceres_targeted',
+                ops.uuid_v4(), 'input_stage', %s, %s, %s, 'juno_to_ceres_targeted',
                 %s, %s, %s, %s, %s, 'requested', now()
             )
             RETURNING transfer_id::text AS transfer_id, status, requested_at
             """,
             (
-                batch_id, stage, src_lts_ref, dst_staging_ref,
+                batch_id, stage, make_window_key(start_epoch, end_epoch), src_lts_ref, dst_staging_ref,
                 priority, requested_by, dedupe_key,
             ),
         )

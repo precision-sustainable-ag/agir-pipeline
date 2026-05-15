@@ -10,6 +10,7 @@ CREATE TABLE logs.transfer_runs (
   direction            TEXT NOT NULL CHECK (direction IN ('input_stage', 'promotion')),
   batch_id             TEXT NOT NULL,
   stage                TEXT NOT NULL,
+  window_key           TEXT NOT NULL,
 
   transfer_profile_id  TEXT NOT NULL,
   src_lts_ref          TEXT NOT NULL,
@@ -37,7 +38,7 @@ CREATE TABLE logs.transfer_runs (
 );
 
 CREATE UNIQUE INDEX idx_transfer_runs_active_input
-  ON logs.transfer_runs (direction, batch_id, stage, dst_staging_ref)
+  ON logs.transfer_runs (direction, batch_id, stage, window_key, dst_staging_ref)
   WHERE status IN ('requested', 'active')
   AND dedupe_key IS NULL;
 
