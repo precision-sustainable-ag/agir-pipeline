@@ -7,42 +7,22 @@ Outputs run_report.json and manifest.json — no database interaction.
 
 import argparse
 import csv
-import hashlib
 import logging
-import subprocess
 from pathlib import Path
 
 from . import STAGE, STAGE_VERSION, ERROR_CFG_VALIDATION_FAILED, ERROR_UNKNOWN
 from .processor import Processor
 from stages import EXIT_SUCCESS, EXIT_PARTIAL, EXIT_FAILURE, EXIT_CONFIG_ERROR, ITEM_OK
-from stages.common import RunReportBuilder, ManifestBuilder, parse_batch_id, setup_logging
+from stages.common import (
+    RunReportBuilder,
+    ManifestBuilder,
+    calculate_sha256,
+    get_git_commit,
+    parse_batch_id,
+    setup_logging,
+)
 
 logger = logging.getLogger(__name__)
-
-
-def calculate_sha256(file_path: Path) -> str:
-    """Calculate SHA256 checksum of a file."""
-    sha256_hash = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for byte_block in iter(lambda: f.read(4096), b""):
-            sha256_hash.update(byte_block)
-    return "sha256:" + sha256_hash.hexdigest()
-
-
-def get_git_commit() -> str | None:
-    """Get the current git commit hash."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=Path(__file__).parent.parent.parent,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        logger.warning("Could not determine git commit hash")
-        return None
 
 
 def write_batch_csv(rows: list[dict], csv_path: Path) -> Path:
@@ -146,7 +126,7 @@ def main() -> int:
 
     report.set_provenance(
         config_path=args.c,
-        code_commit=get_git_commit(),
+        code_commit=get_git_commit(logger),
         model_id=str(args.m),
     )
     report.set_inputs(

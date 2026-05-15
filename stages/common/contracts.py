@@ -99,6 +99,10 @@ class RunReportBuilder:
             "warnings_path": None,
             "logs_path": None,
         }
+        self._skip = {
+            "skipped": False,
+            "skip_reason": None,
+        }
 
 
     # Monitor Timing
@@ -251,6 +255,11 @@ class RunReportBuilder:
             self._pointers["logs_path"] = str(logs_path)
         return self
 
+    def set_skip(self, skipped: bool, skip_reason: str = None):
+        self._skip["skipped"] = bool(skipped)
+        self._skip["skip_reason"] = skip_reason
+        return self
+
     # Build / Write
     def build(self) -> dict:
         """
@@ -258,7 +267,7 @@ class RunReportBuilder:
 
         Matches docs/examples/run_report_example.json exactly.
         """
-        return {
+        report = {
             "stage": self.stage,
             "stage_version": self.stage_version,
             "run_id": self.run_id,
@@ -279,6 +288,10 @@ class RunReportBuilder:
             "warnings": self._warnings,
             "pointers": self._pointers,
         }
+        if self._skip["skipped"]:
+            report["skipped"] = True
+            report["skip_reason"] = self._skip["skip_reason"]
+        return report
 
     def write(self, path: Path) -> Path:
         """Serialize the run_report to a JSON file."""
@@ -350,6 +363,20 @@ class ManifestBuilder:
                 "retryable": retryable,
             },
         })
+        return self
+
+    def add_skipped_item(
+        self,
+        image_id: str,
+        message: str = None,
+    ):
+        item = {
+            "image_id": image_id,
+            "status": "skipped",
+        }
+        if message is not None:
+            item["message"] = message
+        self._items.append(item)
         return self
 
     @property

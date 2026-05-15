@@ -17,8 +17,11 @@ def parse_batch_id(path: str) -> str | None:
     batch_pattern = re.compile(r"^([A-Z]{2})_(\d{4}-\d{2}-\d{2})$")
 
     for segment in str(path).replace("\\", "/").split("/"):
+        candidate = Path(segment).stem
         if batch_pattern.match(segment):
             return segment
+        if batch_pattern.match(candidate):
+            return candidate
     return None
 
 
