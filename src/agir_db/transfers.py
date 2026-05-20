@@ -13,7 +13,6 @@ import json
 import re
 import subprocess
 import uuid
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Literal, Tuple
 
 import yaml
@@ -269,14 +268,6 @@ class TransferManager:
             if match:
                 return match.group(1).upper()
         return None
-
-    @staticmethod
-    def endpoint_relative_path(full_path: str, root_path: str) -> str:
-        """Convert a filesystem path into a Globus endpoint-relative path."""
-        full = Path(full_path)
-        # root = Path(root_path)
-        # return "/" + str(full.relative_to(root)).lstrip("/")
-        return str(full)
 
     @staticmethod
     def build_input_staging_label(stage: str, batch_id: str) -> str:

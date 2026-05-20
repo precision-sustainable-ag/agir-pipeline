@@ -9,8 +9,6 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from uuid import UUID
 
-from orchestrator.batch_list import make_window_key
-
 from .connection import ConnectionManager
 from .exceptions import ValidationError
 
@@ -104,15 +102,14 @@ class OrchestrationManager:
     ) -> Dict:
         """Request a transfer for a specific epoch-windowed subset of a batch.
 
-        Unlike request_input_transfer (which uses a batch-level already-staged
-        check), this method checks whether the specific windowed files are
-        already on 90daydata so that different time windows of the same batch
-        can be transferred and processed independently.
+        Checks whether the specific windowed files are already on 90daydata so
+        that different time windows of the same batch can be transferred and
+        processed independently.
 
-        Returns the same shape as request_input_transfer:
-          {accepted, transfer_id, state, requested_at}
+        Returns: {accepted, transfer_id, state, requested_at, input_manifest_ref,
+            staging_report_ref}
         """
-        dedupe_key = f"input_stage:{batch_id}:{stage}:{make_window_key(start_epoch, end_epoch)}"
+        dedupe_key = f"input_stage:{batch_id}:{stage}:{start_epoch}_{end_epoch}"
 
         existing = self.conn.fetch_one(
             """
@@ -187,7 +184,7 @@ class OrchestrationManager:
                 (
                     batch_id,
                     stage,
-                    make_window_key(start_epoch, end_epoch),
+                    f"{start_epoch}_{end_epoch}",
                     src_lts_ref,
                     dst_staging_ref,
                     priority,
@@ -208,7 +205,7 @@ class OrchestrationManager:
             }
 
         # Check for an in-flight transfer for this exact window
-        dedupe_key = f"input_stage:{batch_id}:{stage}:{make_window_key(start_epoch, end_epoch)}"
+        dedupe_key = f"input_stage:{batch_id}:{stage}:{start_epoch}_{end_epoch}"
         existing = self.conn.fetch_one(
             """
             SELECT transfer_id::text AS transfer_id, status, requested_at
@@ -240,7 +237,7 @@ class OrchestrationManager:
             RETURNING transfer_id::text AS transfer_id, status, requested_at
             """,
             (
-                batch_id, stage, make_window_key(start_epoch, end_epoch), src_lts_ref, dst_staging_ref,
+                batch_id, stage, f"{start_epoch}_{end_epoch}", src_lts_ref, dst_staging_ref,
                 priority, requested_by, dedupe_key, input_manifest_ref, staging_report_ref,
             ),
         )
@@ -670,49 +667,6 @@ class OrchestrationManager:
             (batch_id, start_epoch, end_epoch),
         )
 
-    def get_transfer_status_for_batch(
-        self,
-        batch_id: str,
-        stage: str,
-    ) -> Optional[Dict]:
-        """Return the most recent input_stage transfer record for a batch/stage pair."""
-        return self.conn.fetch_one(
-            """
-            SELECT
-                transfer_id::text AS transfer_id,
-                status,
-                globus_task_id,
-                ended_at,
-                error_summary
-            FROM logs.transfer_runs
-            WHERE batch_id = %s
-              AND stage = %s
-              AND direction = 'input_stage'
-            ORDER BY requested_at DESC
-            LIMIT 1
-            """,
-            (batch_id, stage),
-        )
-
-    def are_inputs_staged_for_batch(self, batch_id: str) -> bool:
-        """Return True if RAW files exist on 90daydata for this batch.
-
-        Accepts either a completed logs.transfer_runs record OR direct file
-        presence in source.globus_file_index (covers batches staged outside
-        the normal transfer workflow, e.g. manual rsync or a prior run).
-        """
-        row = self.conn.fetch_one(
-            """
-            SELECT COUNT(*) AS n
-            FROM source.globus_file_index
-            WHERE batch_id = %s
-              AND namespace = '90daydata'
-              AND data_state = 'semifield-upload'
-              AND entry_type = 'file'
-            """,
-            (batch_id,),
-        )
-        return int((row or {}).get("n", 0)) > 0
 
     def update_lease_slurm_job_id(
         self,

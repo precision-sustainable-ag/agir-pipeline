@@ -29,15 +29,6 @@ class BatchEntry(NamedTuple):
     start_epoch: int
     end_epoch: int
 
-def make_window_key(start_epoch: int, end_epoch: int) -> str:
-    """Return the canonical key for a time window."""
-    return f"{start_epoch}_{end_epoch}"
-
-
-def make_entry_window_key(entry: BatchEntry) -> str:
-    """Return the canonical key for a BatchEntry time window."""
-    return make_window_key(entry.start_epoch, entry.end_epoch)
-
 
 _TIME_RE = re.compile(r"\d{1,2}:\d{2}:\d{2}\s*(?:AM|PM)", re.IGNORECASE)
 

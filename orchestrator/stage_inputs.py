@@ -24,7 +24,6 @@ from typing import Dict, List, NamedTuple, Optional
 
 from agir_db import AgirDB
 
-from .batch_list import BatchEntry, make_window_key
 from .input_manifest import (
     build_input_manifest_path,
     build_manifest_run_id,
@@ -67,7 +66,7 @@ class WindowStagingContext:
         self.input_manifest_path = input_manifest_path
         self.staging_report_path = staging_report_path
 
-        self.window_key = make_window_key(entry.start_epoch, entry.end_epoch)
+        self.window_key = f"{entry.start_epoch}_{entry.end_epoch}"
         self.result_key = f"{entry.batch_id}:{self.window_key}"
 
         self.transfer_id: Optional[str] = None
@@ -265,7 +264,7 @@ def stage_inputs_for_batches(
 
         for entry in batch_entries:
             batch_id = entry.batch_id
-            window_key = make_window_key(entry.start_epoch, entry.end_epoch)
+            window_key = f"{entry.start_epoch}_{entry.end_epoch}"
             result_key = f"{batch_id}:{window_key}"
             input_root = f"{dst_root}/{batch_id}"
 

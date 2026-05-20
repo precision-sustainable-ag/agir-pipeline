@@ -40,7 +40,6 @@ import yaml
 
 from agir_db import AgirDB
 
-from .batch_list import BatchEntry, make_window_key
 from .input_manifest import load_input_manifest, validate_input_manifest
 
 
@@ -120,7 +119,7 @@ def submit_stage_jobs(
         for entry in batch_entries:
             batch_id = entry.batch_id
 
-            window_key = make_window_key(entry.start_epoch, entry.end_epoch)
+            window_key = f"{entry.start_epoch}_{entry.end_epoch}"
             
             transfer = None
             input_manifest_path = None
