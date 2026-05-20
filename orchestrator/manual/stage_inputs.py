@@ -24,13 +24,15 @@ from typing import Dict, List, NamedTuple, Optional
 
 from agir_db import AgirDB
 
-from .input_manifest import (
+from ..input_manifest import (
     build_input_manifest_path,
     build_manifest_run_id,
-    build_raw_input_manifest,
+    build_input_manifest,
     build_staging_report_path,
     write_json,
 )
+from ..batch_list import BatchEntry
+from ..config import load_stage_config
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +126,7 @@ class WindowStagingContext:
         )
 
     def write_ready_input_manifest(self) -> Path:
-        manifest = build_raw_input_manifest(
+        manifest = build_input_manifest(
             stage=self.stage,
             batch_id=self.batch_id,
             window_key=self.window_key,
@@ -215,8 +217,8 @@ def stage_inputs_for_batches(
     """Transfer time-windowed files for each batch from LTS to 90daydata."""
     results: List[StageInputResult] = []
 
+    cfg = load_stage_config(config_path)
     with AgirDB() as db:
-        cfg = db.transfers.load_transfer_config(config_path)
         transfer_cfg = cfg.get("transfer", {})
         paths_cfg = cfg.get("paths", {})
 
@@ -290,7 +292,8 @@ def stage_inputs_for_batches(
                 entry.start_epoch,
                 entry.end_epoch,
             )
-            files = db.orchestration.get_raw_files_for_batch_window(
+            files = db.orchestration.get_files_for_batch_window(
+                stage=stage,
                 batch_id=batch_id,
                 start_epoch=entry.start_epoch,
                 end_epoch=entry.end_epoch,
@@ -306,11 +309,11 @@ def stage_inputs_for_batches(
             )
 
             if not files:
-                logger.warning("[%s] No RAW files found in window — skipping", batch_id)
+                logger.warning("[%s] No files found in window for stage '%s' — skipping", batch_id, stage)
                 ctx.mark_not_ready(
                     results,
                     status="no_files",
-                    error="No RAW files found in window",
+                    error=f"No files found in window for stage '{stage}'",
                 )
                 continue
 

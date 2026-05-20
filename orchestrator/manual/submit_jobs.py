@@ -34,13 +34,13 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional
-
-import yaml
+from typing import List, NamedTuple, Optional
 
 from agir_db import AgirDB
 
-from .input_manifest import load_input_manifest, validate_input_manifest
+from ..input_manifest import load_input_manifest, validate_input_manifest
+from ..batch_list import BatchEntry
+from ..config import load_stage_config
 
 
 logger = logging.getLogger(__name__)
@@ -55,12 +55,6 @@ class JobResult(NamedTuple):
     lease_id: Optional[str]
     error: Optional[str]
 
-
-def load_job_config(config_path: str) -> Dict:
-    with open(config_path, "r", encoding="utf-8") as fh:
-        return yaml.safe_load(fh)
-
-
 def submit_stage_jobs(
     batch_entries: List[BatchEntry],
     config_path: str,
@@ -73,7 +67,7 @@ def submit_stage_jobs(
 
     Returns a list of JobResult namedtuples (one per batch entry).
     """
-    cfg = load_job_config(config_path)
+    cfg = load_stage_config(config_path)
 
     stage_cfg = cfg.get("stage", {})
     stage_name = stage_cfg.get("name")

@@ -5,13 +5,12 @@ import time
 from pathlib import Path
 
 from agir_db import AgirDB
+from .config import load_stage_config
 
 
 def _route_for_stage(stage: str, transfer_cfg: dict) -> dict:
     routes = transfer_cfg.get("routes", {})
-    if stage == "raw_to_jpg":
-        return routes.get("raw_to_jpg", {})
-    return routes.get("post_raw_to_jpg", {})
+    return routes.get(stage, {})
 
 
 def build_globus_submission_context(item: dict, transfer_cfg: dict) -> dict:
@@ -55,7 +54,7 @@ def run_input_staging_once(
     completed = 0
     submitted_transfer_ids: set[str] = set()
     with AgirDB() as db:
-        cfg = db.transfers.load_transfer_config(config_path)
+        cfg = load_stage_config(config_path)
         transfer_cfg = cfg.get("transfer", {})
         poll_interval = int(transfer_cfg.get("poll_interval_seconds", 10))
         max_poll_attempts = int(transfer_cfg.get("max_poll_attempts", 180))
