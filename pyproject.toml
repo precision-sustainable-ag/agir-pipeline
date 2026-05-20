@@ -88,6 +88,8 @@ build-backend = "setuptools.build_meta"
 "stages.jpg_to_det" = "stages/jpg_to_det"
 "stages.det_to_seg" = "stages/det_to_seg"
 "stages.raw_to_jpg" = "stages/raw_to_jpg"
+"orchestrator" = "orchestrator"
+"orchestrator.manual" = "orchestrator/manual"
 
 [tool.setuptools]
 packages = [
@@ -98,6 +100,8 @@ packages = [
     "stages.jpg_to_det",
     "stages.det_to_seg",
     "stages.raw_to_jpg",
+    "orchestrator",
+    "orchestrator.manual",
 ]
 
 [tool.setuptools.package-data]
