@@ -8,8 +8,8 @@ EXIT_CONFIG_ERROR = 3  # Setup/config error
 EXIT_CODE_TO_STATUS = {
     EXIT_SUCCESS: "success",
     EXIT_PARTIAL: "partial",
-    EXIT_FAILURE: "failure",
-    EXIT_CONFIG_ERROR: "failure",
+    EXIT_FAILURE: "failed",
+    EXIT_CONFIG_ERROR: "failed",
 }
 
 # Standardized status codes

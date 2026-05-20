@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS logs.stage_leases (
     lease_id         UUID PRIMARY KEY DEFAULT ops.uuid_v4(),
     batch_id         TEXT NOT NULL,
     stage            TEXT NOT NULL,
+    window_key TEXT NOT NULL DEFAULT '',
     orchestrator_id  TEXT NOT NULL,
     leased_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at       TIMESTAMPTZ NOT NULL,
@@ -31,11 +32,12 @@ CREATE TABLE IF NOT EXISTS logs.stage_leases (
     state            TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'released')),
     released_at      TIMESTAMPTZ NULL,
     release_reason   TEXT NULL,
+    slurm_job_id     TEXT NULL,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    -- one mutable lease row per (batch_id, stage) for minimal Phase 1
-    CONSTRAINT stage_leases_batch_stage_key UNIQUE (batch_id, stage)
+    -- one mutable lease row per (batch_id, stage, window_key).
+    CONSTRAINT stage_leases_batch_stage_key UNIQUE (batch_id, stage, window_key)
 );
 
 CREATE INDEX IF NOT EXISTS idx_stage_leases_active_expiry

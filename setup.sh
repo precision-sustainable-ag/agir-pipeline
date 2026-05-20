@@ -150,8 +150,10 @@ install_agir() {
 }
 
 verify_agir() {
-  python -c "from agir_db import AgirDB; print('✓ AgirDB import OK')" \
+  python -c "from agir_db import AgirDB; print('✓ agir_db import OK')" \
     || die "Package import failed (agir_db)"
+  python -c "from orchestrator.config import load_stage_config; print('✓ orchestrator import OK')" \
+    || die "Package import failed (orchestrator)"
 }
 
 # -----------------------------
@@ -311,6 +313,9 @@ main() {
   echo ""
   echo "Next:"
   echo "  source ${VENV_PATH}/bin/activate"
+  echo "Next:"
+  echo "  source ${VENV_PATH}/bin/activate"
+  echo "  agir-run-stage --batches batches.txt --config configs/scinet_raw_to_jpg.yaml"
   
 }
 

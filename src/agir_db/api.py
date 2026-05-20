@@ -2,7 +2,10 @@
 Main API facade for AgirDB.
 
 This module provides the AgirDB class which coordinates all database operations
-through organized domain-specific components.
+through two domain managers:
+
+  - db.orchestration : lease claims, transfer tracking, run report ingestion
+  - db.transfers     : Globus transfer detection and execution helpers
 
 Usage
 -----
@@ -10,10 +13,10 @@ Usage
 >>>
 >>> # Using context manager (recommended)
 >>> with AgirDB() as db:
-...     batches = db.gaps.get_batches_with_gaps(stage='raw_to_jpg')
-...     db.stages.start(batch_id, 'raw_to_jpg')
-...     db.images.insert_bulk(image_data)
-...     db.events.log_bulk(events)
+...     transfer = db.orchestration.get_completed_windowed_input_transfer(
+...         batch_id, stage, window_key
+...     )
+...     db.orchestration.claim_stage_lease(batch_id, stage, ...)
 >>>
 >>> # Manual connection management
 >>> db = AgirDB()
@@ -46,18 +49,14 @@ class AgirDB:
     """
     Main interface for AgirDB operations.
     
-    This class provides organized access to all database operations through
-    domain-specific components:
-    
-    - gaps: Pipeline gap analysis (work discovery)
-    - stages: Stage status tracking (in-progress monitoring)
-    - images: Image metadata management
-    - transfers: JUNO transfer operations
-    - events: Processing event logging
-    - inventory: File inventory synchronization
-    - analytics: Reporting and statistics
-    - batches: Batch metadata management
-    - migration: SQLite data import
+    Attributes
+    ----------
+    orchestration : OrchestrationManager
+        Lease claims, windowed transfer tracking, run report ingestion, and
+        file-index queries. This is the primary interface for orchestration logic.
+    transfers : TransferManager
+        Globus transfer detection (gap views), command construction, submission,
+        and task polling. Also used by the legacy batch-level staging loop.
     
     Parameters
     ----------
@@ -72,37 +71,6 @@ class AgirDB:
     password : str, optional
         Database password. If None, uses .pgpass file.
     
-    Examples
-    --------
-    Basic usage with context manager:
-    
-    >>> with AgirDB() as db:
-    ...     # Get batches needing processing
-    ...     batches = db.gaps.get_batches_with_gaps('raw_to_jpg', limit=10)
-    ...     
-    ...     for batch in batches:
-    ...         # Mark stage as started
-    ...         db.stages.start(batch['batch_id'], 'raw_to_jpg')
-    ...         
-    ...         # Process and insert metadata
-    ...         images = process_batch(batch)
-    ...         db.images.insert_bulk(images)
-    ...         
-    ...         # Log completion
-    ...         db.stages.complete(batch['batch_id'], 'raw_to_jpg', success=True)
-    
-    Manual connection management:
-    
-    >>> db = AgirDB()
-    >>> db.connect()
-    >>> try:
-    ...     result = db.images.get('MD_1683434234')
-    ...     db.commit()
-    ... except Exception as e:
-    ...     db.rollback()
-    ...     raise
-    ... finally:
-    ...     db.close()
     """
     
     def __init__(

@@ -20,7 +20,7 @@ import uuid
 from pathlib import Path
 
 from agir_db import AgirDB
-from agir_db.input_staging_loop import run_input_staging_once
+from orchestrator.input_staging_loop import run_input_staging_once
 
 
 def load_env_from_file(env_path: Path) -> None:

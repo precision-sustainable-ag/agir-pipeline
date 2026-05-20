@@ -12,6 +12,14 @@ from uuid import UUID
 from .connection import ConnectionManager
 from .exceptions import ValidationError
 
+# Maps stage name -> the file index filters needed to find its inputs on LTS.
+# When ops.stages exists in the DB this can be replaced with a lookup query.
+_STAGE_FILE_FILTERS: Dict[str, Dict[str, str]] = {
+    "raw_to_jpg":     {"file_exts": ["raw"],              "data_state": "semifield-upload"},
+    "jpg_to_det":     {"file_exts": ["jpg", "jpeg"],      "data_state": "semifield-developed-images"},
+    "det_to_seg":     {"file_exts": ["jpg", "txt"],       "data_state": "semifield-developed-images"},
+    "seg_to_cutouts": {"file_exts": ["jpg"],              "data_state": "semifield-developed-images"},
+ }
 
 class OrchestrationManager:
     def __init__(self, connection: ConnectionManager):
@@ -47,6 +55,7 @@ class OrchestrationManager:
         orchestrator_id: str,
         ttl_seconds: int,
         attempt: Optional[int] = None,
+        window_key: str = "",
     ) -> Dict:
         row = self.conn.fetch_one(
             """
@@ -56,10 +65,11 @@ class OrchestrationManager:
                 p_stage := %s,
                 p_orchestrator_id := %s,
                 p_ttl_seconds := %s,
-                p_attempt := %s
+                p_attempt := %s,
+                p_window_key := %s
             )
             """,
-            (batch_id, stage, orchestrator_id, ttl_seconds, attempt),
+            (batch_id, stage, orchestrator_id, ttl_seconds, attempt, window_key),
         )
         return row or {}
 
@@ -84,7 +94,286 @@ class OrchestrationManager:
         )
         return row or {}
 
-    def ingest_run_report(self, run_report_path: str) -> Dict:
+    def request_windowed_input_transfer(
+        self,
+        batch_id: str,
+        stage: str,
+        start_epoch: int,
+        end_epoch: int,
+        src_lts_ref: str,
+        dst_staging_ref: str,
+        requested_by: Optional[str] = None,
+        priority: int = 100,
+        input_manifest_ref: Optional[str] = None,
+        staging_report_ref: Optional[str] = None,
+
+    ) -> Dict:
+        """Request a transfer for a specific epoch-windowed subset of a batch.
+
+        Checks whether the specific windowed files are already on 90daydata so
+        that different time windows of the same batch can be transferred and
+        processed independently.
+
+        Returns: {accepted, transfer_id, state, requested_at, input_manifest_ref,
+            staging_report_ref}
+        """
+        dedupe_key = f"input_stage:{batch_id}:{stage}:{start_epoch}_{end_epoch}"
+
+        existing = self.conn.fetch_one(
+            """
+            SELECT
+                transfer_id::text AS transfer_id,
+                status,
+                requested_at,
+                input_manifest_ref,
+                staging_report_ref
+            FROM logs.transfer_runs
+            WHERE dedupe_key = %s AND status <> 'failed'
+            ORDER BY requested_at DESC LIMIT 1
+            """,
+            (dedupe_key,),
+        )
+        if existing:
+            state = "already_completed" if existing["status"] == "completed" else "already_active"
+            return {
+                "accepted": True,
+                "transfer_id": existing["transfer_id"],
+                "state": state,
+                "requested_at": existing["requested_at"],
+                "input_manifest_ref": existing.get("input_manifest_ref"),
+                "staging_report_ref": existing.get("staging_report_ref"),
+            }
+
+
+        # Check whether all LTS files for this window are already on 90daydata
+        lts_row = self.conn.fetch_one(
+            """
+            SELECT COUNT(*) AS n FROM source.globus_file_index
+            WHERE batch_id = %s AND namespace = 'LTS'
+              AND data_state = 'semifield-upload' AND entry_type = 'file'
+              AND lower(file_ext) = 'raw'
+              AND fname_ts_epoch >= %s AND fname_ts_epoch <= %s
+            """,
+            (batch_id, start_epoch, end_epoch),
+        )
+        staged_row = self.conn.fetch_one(
+            """
+            SELECT COUNT(*) AS n FROM source.globus_file_index
+            WHERE batch_id = %s AND namespace = '90daydata'
+              AND data_state = 'semifield-upload' AND entry_type = 'file'
+              AND lower(file_ext) = 'raw'
+              AND fname_ts_epoch >= %s AND fname_ts_epoch <= %s
+            """,
+            (batch_id, start_epoch, end_epoch),
+        )
+        lts_count = int((lts_row or {}).get("n", 0))
+        staged_count = int((staged_row or {}).get("n", 0))
+        if lts_count > 0 and staged_count >= lts_count:
+            row = self.conn.fetch_one(
+                """
+                INSERT INTO logs.transfer_runs (
+                    transfer_id, direction, batch_id, stage, window_key, transfer_profile_id,
+                    src_lts_ref, dst_staging_ref, priority, requested_by,
+                    dedupe_key, status, requested_at, started_at, ended_at,
+                    input_manifest_ref, staging_report_ref
+                )
+                VALUES (
+                    ops.uuid_v4(), 'input_stage', %s, %s, %s, 'juno_to_ceres_targeted',
+                    %s, %s, %s, %s, %s, 'completed', now(), now(), now(),
+                    %s, %s
+                )
+                RETURNING
+                    transfer_id::text AS transfer_id,
+                    status,
+                    requested_at,
+                    input_manifest_ref,
+                    staging_report_ref
+                """,
+                (
+                    batch_id,
+                    stage,
+                    f"{start_epoch}_{end_epoch}",
+                    src_lts_ref,
+                    dst_staging_ref,
+                    priority,
+                    requested_by,
+                    dedupe_key,
+                    input_manifest_ref,
+                    staging_report_ref,
+                ),
+            )
+
+            return {
+                "accepted": True,
+                "transfer_id": (row or {}).get("transfer_id"),
+                "state": "already_completed",
+                "requested_at": (row or {}).get("requested_at"),
+                "input_manifest_ref": (row or {}).get("input_manifest_ref"),
+                "staging_report_ref": (row or {}).get("staging_report_ref"),
+            }
+
+        # Check for an in-flight transfer for this exact window
+        dedupe_key = f"input_stage:{batch_id}:{stage}:{start_epoch}_{end_epoch}"
+        existing = self.conn.fetch_one(
+            """
+            SELECT transfer_id::text AS transfer_id, status, requested_at
+            FROM logs.transfer_runs
+            WHERE dedupe_key = %s AND status IN ('requested', 'active')
+            ORDER BY requested_at DESC LIMIT 1
+            """,
+            (dedupe_key,),
+        )
+        if existing:
+            return {
+                "accepted": True,
+                "transfer_id": existing["transfer_id"],
+                "state": "already_active",
+                "requested_at": existing["requested_at"],
+            }
+
+        row = self.conn.fetch_one(
+            """
+            INSERT INTO logs.transfer_runs (
+                transfer_id, direction, batch_id, stage, window_key, transfer_profile_id,
+                src_lts_ref, dst_staging_ref, priority, requested_by,
+                dedupe_key, status, requested_at, input_manifest_ref, staging_report_ref
+            )
+            VALUES (
+                ops.uuid_v4(), 'input_stage', %s, %s, %s, 'juno_to_ceres_targeted',
+                %s, %s, %s, %s, %s, 'requested', now(), %s, %s
+            )
+            RETURNING transfer_id::text AS transfer_id, status, requested_at
+            """,
+            (
+                batch_id, stage, f"{start_epoch}_{end_epoch}", src_lts_ref, dst_staging_ref,
+                priority, requested_by, dedupe_key, input_manifest_ref, staging_report_ref,
+            ),
+        )
+        return {
+            "accepted": True,
+            "transfer_id": (row or {}).get("transfer_id"),
+            "state": "created",
+            "requested_at": (row or {}).get("requested_at"),
+            "input_manifest_ref": (row or {}).get("input_manifest_ref"),
+            "staging_report_ref": (row or {}).get("staging_report_ref"),
+
+        }
+    
+    def get_completed_windowed_input_transfer(
+        self,
+        batch_id: str,
+        stage: str,
+        window_key: str,
+    ) -> Optional[Dict]:
+        """Return the completed input transfer carrying the manifest for this window."""
+        return self.conn.fetch_one(
+            """
+            SELECT
+                transfer_id::text AS transfer_id,
+                batch_id,
+                stage,
+                window_key,
+                status,
+                input_manifest_ref,
+                staging_report_ref,
+                requested_at,
+                ended_at
+            FROM logs.transfer_runs
+            WHERE direction = 'input_stage'
+              AND batch_id = %s
+              AND stage = %s
+              AND window_key = %s
+              AND status = 'completed'
+              AND input_manifest_ref IS NOT NULL
+            ORDER BY ended_at DESC NULLS LAST, requested_at DESC
+            LIMIT 1
+            """,
+            (batch_id, stage, window_key),
+        )
+
+
+    def register_windowed_90daydata_files(
+        self,
+        batch_id: str,
+        start_epoch: int,
+        end_epoch: int,
+    ) -> None:
+        """Register only the epoch-windowed files as present on 90daydata.
+
+        Use instead of register_90daydata_index_for_batch for windowed
+        transfers so that files outside the window are not falsely marked
+        as staged.
+        """
+        self.conn.execute(
+            """
+            INSERT INTO source.globus_file_index (
+                endpoint, site, storage_domain, namespace, storage_root,
+                rel_path, full_path, parent_dir, file_name, entry_type, file_ext,
+                size_bytes, permissions, checksum, batch_id, batch_state, batch_date,
+                data_state, mtime_iso, fname_ts_epoch, fname_ts_iso, created_at_ts_iso
+            )
+            SELECT
+                g.endpoint, g.site, g.storage_domain,
+                '90daydata' AS namespace,
+                '/90daydata/dash_agir' AS storage_root,
+                g.rel_path,
+                ('/90daydata/dash_agir/' || g.rel_path) AS full_path,
+                ('/90daydata/dash_agir/' || regexp_replace(g.rel_path, '/[^/]+$', '')) AS parent_dir,
+                g.file_name, g.entry_type, g.file_ext,
+                g.size_bytes, g.permissions, g.checksum,
+                g.batch_id, g.batch_state, g.batch_date, g.data_state,
+                g.mtime_iso, g.fname_ts_epoch, g.fname_ts_iso, now()
+            FROM source.globus_file_index g
+            WHERE g.batch_id = %s
+              AND g.namespace = 'LTS'
+              AND g.entry_type = 'file'
+              AND g.fname_ts_epoch >= %s
+              AND g.fname_ts_epoch <= %s
+            ON CONFLICT DO NOTHING
+            """,
+            (batch_id, start_epoch, end_epoch),
+        )
+
+    def are_windowed_inputs_staged(
+        self,
+        batch_id: str,
+        start_epoch: int,
+        end_epoch: int,
+    ) -> bool:
+        """Return True if all LTS files for this epoch window are on 90daydata."""
+        lts_row = self.conn.fetch_one(
+            """
+            SELECT COUNT(*) AS n FROM source.globus_file_index
+            WHERE batch_id = %s AND namespace = 'LTS'
+              AND data_state = 'semifield-upload' AND entry_type = 'file'
+              AND lower(file_ext) = 'raw'
+              AND fname_ts_epoch >= %s AND fname_ts_epoch <= %s
+            """,
+            (batch_id, start_epoch, end_epoch),
+        )
+        staged_row = self.conn.fetch_one(
+            """
+            SELECT COUNT(*) AS n FROM source.globus_file_index
+            WHERE batch_id = %s AND namespace = '90daydata'
+              AND data_state = 'semifield-upload' AND entry_type = 'file'
+              AND lower(file_ext) = 'raw'
+              AND fname_ts_epoch >= %s AND fname_ts_epoch <= %s
+            """,
+            (batch_id, start_epoch, end_epoch),
+        )
+        lts_count = int((lts_row or {}).get("n", 0))
+        staged_count = int((staged_row or {}).get("n", 0))
+        return lts_count > 0 and staged_count >= lts_count
+
+    def get_lease_window_key(self, lease_id: str) -> str:
+        """Return the window_key stored on a lease row, or '' if not found."""
+        row = self.conn.fetch_one(
+            "SELECT window_key FROM logs.stage_leases WHERE lease_id = %s::uuid",
+            (lease_id,),
+        )
+        return (row or {}).get("window_key", "") or ""
+
+    def ingest_run_report(self, run_report_path: str, window_key: str = "") -> Dict:
         """
         Minimal Phase 1 ingest:
         - read JSON
@@ -98,7 +387,6 @@ class OrchestrationManager:
             "run_id",
             "batch_id",
             "stage",
-            "attempt",
             "status",
             "started_at",
             "ended_at",
@@ -106,6 +394,10 @@ class OrchestrationManager:
         missing = [k for k in required if k not in report]
         if missing:
             raise ValidationError(f"run_report missing required fields: {missing}")
+        
+                # attempt is tracked on the lease, not written by the stage CLI; default to 1
+        if "attempt" not in report:
+            report["attempt"] = 1
 
         if report["status"] not in {"success", "partial", "failed"}:
             raise ValidationError("status must be one of: success, partial, failed")
@@ -115,17 +407,18 @@ class OrchestrationManager:
         row = self.conn.fetch_one(
             """
             INSERT INTO logs.stage_runs (
-                run_id, batch_id, stage, attempt, status, exit_code,
+                run_id, batch_id, stage, window_key, attempt, status, exit_code,
                 started_at, ended_at, run_report_ref, output_ref, updated_at
             )
             VALUES (
-                %s::uuid, %s, %s, %s, %s, %s,
+                %s::uuid, %s, %s, %s, %s, %s, %s,
                 %s::timestamptz, %s::timestamptz, %s, %s, now()
             )
             ON CONFLICT (run_id) DO UPDATE
             SET
                 batch_id = EXCLUDED.batch_id,
                 stage = EXCLUDED.stage,
+                window_key = EXCLUDED.window_key,
                 attempt = EXCLUDED.attempt,
                 status = EXCLUDED.status,
                 exit_code = EXCLUDED.exit_code,
@@ -134,12 +427,13 @@ class OrchestrationManager:
                 run_report_ref = EXCLUDED.run_report_ref,
                 output_ref = EXCLUDED.output_ref,
                 updated_at = now()
-            RETURNING run_id::text AS run_id, batch_id, stage, status
+            RETURNING run_id::text AS run_id, batch_id, stage, window_key, status
             """,
             (
                 report["run_id"],
                 report["batch_id"],
                 report["stage"],
+                window_key,
                 int(report["attempt"]),
                 report["status"],
                 report.get("exit_code"),
@@ -355,6 +649,61 @@ class OrchestrationManager:
               ended_at
             """,
             (status, status, status, globus_status_text, error_summary, transfer_id),
+        )
+        return row or {}
+
+    def get_files_for_batch_window(
+        self,
+        stage: str,
+        batch_id: str,
+        start_epoch: int,
+        end_epoch: int,
+    ) -> List[Dict]:
+        """Return LTS files for a batch whose filename epoch falls within [start, end].
+
+        The file type and data state are resolved from ``_STAGE_FILE_FILTERS`` using
+        the stage name, so this method works for any pipeline stage.
+        """
+        filters = _STAGE_FILE_FILTERS.get(stage)
+        if not filters:
+            raise ValueError(
+                f"No file index filters defined for stage '{stage}'. "
+                f"Add an entry to _STAGE_FILE_FILTERS in orchestration.py."
+            )
+        file_exts = filters["file_exts"]
+        data_state = filters["data_state"]
+        
+        return self.conn.fetch_all(
+            """
+            SELECT file_id, full_path, file_name, fname_ts_epoch, size_bytes
+            FROM source.globus_file_index
+            WHERE batch_id = %s
+              AND namespace = 'LTS'
+              AND data_state = %s
+              AND entry_type = 'file'
+              AND lower(file_ext) = ANY(%s)
+              AND fname_ts_epoch >= %s
+              AND fname_ts_epoch <= %s
+            ORDER BY fname_ts_epoch ASC
+            """,
+            (batch_id, data_state, file_exts, start_epoch, end_epoch),
+        )
+
+
+    def update_lease_slurm_job_id(
+        self,
+        lease_id: str,
+        slurm_job_id: str,
+    ) -> Dict:
+        """Record the SLURM job ID on the active lease row."""
+        row = self.conn.fetch_one(
+            """
+            UPDATE logs.stage_leases
+            SET slurm_job_id = %s, updated_at = now()
+            WHERE lease_id = %s::uuid
+            RETURNING lease_id::text AS lease_id, slurm_job_id, batch_id, stage
+            """,
+            (slurm_job_id, lease_id),
         )
         return row or {}
 

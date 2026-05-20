@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS logs.stage_runs (
     run_id           UUID PRIMARY KEY,
     batch_id         TEXT NOT NULL,
     stage            TEXT NOT NULL,
+    window_key       TEXT NOT NULL DEFAULT '',
     attempt          INTEGER NOT NULL CHECK (attempt >= 1),
     status           TEXT NOT NULL CHECK (status IN ('success', 'partial', 'failed')),
     exit_code        INTEGER NULL,
@@ -22,3 +23,6 @@ CREATE INDEX IF NOT EXISTS idx_stage_runs_batch_stage_time
 
 CREATE INDEX IF NOT EXISTS idx_stage_runs_stage_status_time
     ON logs.stage_runs (stage, status, ended_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_stage_runs_batch_stage_window
+    ON logs.stage_runs (batch_id, stage, window_key);
