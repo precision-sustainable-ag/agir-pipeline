@@ -30,6 +30,8 @@ CREATE TABLE logs.transfer_runs (
   globus_dst_endpoint  TEXT NULL,
   globus_label         TEXT NULL,
   submission_details   TEXT NULL,
+  input_manifest_ref   TEXT NULL,
+  staging_report_ref   TEXT NULL,
   globus_status_text   TEXT NULL,
   last_polled_at       TIMESTAMPTZ NULL,
   poll_attempts        INTEGER NOT NULL DEFAULT 0,
@@ -53,3 +55,9 @@ CREATE INDEX idx_transfer_runs_status_time
 CREATE INDEX idx_transfer_runs_globus_task_id
   ON logs.transfer_runs (globus_task_id)
   WHERE globus_task_id IS NOT NULL;
+
+CREATE INDEX idx_transfer_runs_completed_manifest
+  ON logs.transfer_runs (batch_id, stage, window_key, requested_at DESC)
+  WHERE direction = 'input_stage'
+    AND status = 'completed'
+    AND input_manifest_ref IS NOT NULL;

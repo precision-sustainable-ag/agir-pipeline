@@ -7,7 +7,7 @@ Physical files are staged into the existing flat batch directory:
 
 The exact per-window workset is recorded in an input manifest:
 
-    <input_manifest_root>/<stage>/<batch_id>/<window_key>/input_manifest.json
+    <input_manifest_root>/<stage>/<batch_id>/<window_key>/input_manifest.<manifest_run_id>.json
 
 Downstream jobs should use the manifest, not directory contents, to decide which
 files belong to a window.
@@ -27,6 +27,7 @@ from agir_db import AgirDB
 from .batch_list import BatchEntry, make_window_key
 from .input_manifest import (
     build_input_manifest_path,
+    build_manifest_run_id,
     build_raw_input_manifest,
     build_staging_report_path,
     write_json,
@@ -268,17 +269,20 @@ def stage_inputs_for_batches(
             result_key = f"{batch_id}:{window_key}"
             input_root = f"{dst_root}/{batch_id}"
 
+            manifest_run_id = build_manifest_run_id()
             input_manifest_path = build_input_manifest_path(
                 input_manifest_root,
                 stage,
                 batch_id,
                 window_key,
+                manifest_run_id=manifest_run_id,
             )
             staging_report_path = build_staging_report_path(
                 input_manifest_root,
                 stage,
                 batch_id,
                 window_key,
+                manifest_run_id=manifest_run_id,
             )
 
             logger.info(
@@ -345,6 +349,8 @@ def stage_inputs_for_batches(
                     dst_staging_ref=dst_dir,
                     requested_by=requested_by,
                     priority=100,
+                    input_manifest_ref=str(ctx.input_manifest_path),
+                    staging_report_ref=str(ctx.staging_report_path),
                 )
 
                 if not req.get("accepted"):
@@ -355,6 +361,12 @@ def stage_inputs_for_batches(
                         error="Transfer request rejected by DB",
                     )
                     continue
+
+                if req.get("input_manifest_ref"):
+                    ctx.input_manifest_path = Path(req["input_manifest_ref"])
+
+                if req.get("staging_report_ref"):
+                    ctx.staging_report_path = Path(req["staging_report_ref"])
 
                 state = req.get("state")
 

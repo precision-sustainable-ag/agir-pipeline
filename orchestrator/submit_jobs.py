@@ -40,7 +40,9 @@ import yaml
 
 from agir_db import AgirDB
 
-from .batch_list import BatchEntry
+from .batch_list import BatchEntry, make_window_key
+from .input_manifest import load_input_manifest, validate_input_manifest
+
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ ORCHESTRATOR_ID = f"orchestrator.manual.{os.getpid()}"
 
 class JobResult(NamedTuple):
     batch_id: str
-    status: str  # submitted | lease_conflict | no_staged_inputs | sbatch_failed
+    status: str  # submitted | lease_conflict | no_input_manifest | sbatch_failed
     slurm_job_id: Optional[str]
     lease_id: Optional[str]
     error: Optional[str]
@@ -118,22 +120,57 @@ def submit_stage_jobs(
         for entry in batch_entries:
             batch_id = entry.batch_id
 
+            window_key = make_window_key(entry.start_epoch, entry.end_epoch)
+            
+            transfer = None
+            input_manifest_path = None
+            
             if require_transfer_complete:
-                if not db.orchestration.are_windowed_inputs_staged(
-                    batch_id, entry.start_epoch, entry.end_epoch
-                ):
+
+                transfer = db.orchestration.get_completed_windowed_input_transfer(
+                    batch_id=batch_id,
+                    stage=stage_name,
+                    window_key=window_key,
+                )
+                if not transfer or not transfer.get("input_manifest_ref"):
                     logger.warning(
-                        "[%s] Windowed inputs not found on 90daydata — run stage_inputs first",
+                        "[%s] No completed input transfer with manifest for window %s — run stage_inputs first",
                         batch_id,
+                        window_key,
                     )
-                    results.append(JobResult(batch_id, "no_staged_inputs", None, None, None))
+                    results.append(
+                        JobResult(
+                            batch_id,
+                            "no_input_manifest",
+                            None,
+                            None,
+                            "No completed input transfer with input_manifest_ref",
+                        )
+                    )
                     continue
-                else:
-                    logger.info("[%s] Confirmed staged inputs on 90daydata", batch_id)
+
+                input_manifest_path = str(transfer["input_manifest_ref"])
+                try:
+                    manifest = load_input_manifest(input_manifest_path)
+                    validate_input_manifest(
+                        manifest,
+                        expected_stage=stage_name,
+                        expected_batch_id=batch_id,
+                        expected_window_key=window_key,
+                    )
+                except (OSError, ValueError) as exc:
+                    logger.warning(
+                        "[%s] Input manifest %s is not usable: %s",
+                        batch_id,
+                        input_manifest_path,
+                        exc,
+                    )
+                    results.append(
+                        JobResult(batch_id, "no_input_manifest", None, None, str(exc))
+                    )
             else:
                 logger.info("[%s] Skipping transfer check (require_transfer_complete=False)", batch_id)
-
-            window_key = f"{entry.start_epoch}_{entry.end_epoch}"
+                input_manifest_path = ""
             lease = db.orchestration.claim_stage_lease(
                 batch_id=batch_id,
                 stage=stage_name,
@@ -162,6 +199,7 @@ def submit_stage_jobs(
                 window_key=window_key,
                 stage_config=stage_config,
                 input_dir=input_dir,
+                input_manifest_path=input_manifest_path or "",
                 output_stage_runs=output_stage_runs,
                 final_dest=final_dest,
                 agir_pipeline_dir=agir_pipeline_dir,
@@ -244,6 +282,7 @@ def _render_slurm_script(
     window_key: str,
     stage_config: str,
     input_dir: str,
+    input_manifest_path: str,
     output_stage_runs: str,
     final_dest: str,
     agir_pipeline_dir: str,
@@ -277,6 +316,7 @@ WINDOW_KEY="{window_key}"
 ORCHESTRATOR_ID="{ORCHESTRATOR_ID}"
 CONFIG_PATH="{stage_config}"
 INPUT_DIR="{input_dir}"
+INPUT_MANIFEST_PATH="{input_manifest_path}"
 OUTPUT_STAGE_RUNS="{output_stage_runs}"
 FINAL_DEST="{final_dest}"
 AGIR_DIR="{agir_pipeline_dir}"
@@ -286,9 +326,40 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] START stage={stage_name} batch=$BATCH_ID 
 
 mkdir -p "$TMPDIR/input" "$TMPDIR/output"
 
-# ── 1. Copy staged inputs to local scratch ────────────────────────────────────
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Copying inputs from $INPUT_DIR"
-rsync -a --info=progress2 "$INPUT_DIR/" "$TMPDIR/input/"
+# ── 1. Materialize exactly the manifest workset on local scratch ─────────────
+if [ -n "$INPUT_MANIFEST_PATH" ]; then
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Copying manifest-defined inputs from $INPUT_MANIFEST_PATH"
+  cp "$INPUT_MANIFEST_PATH" "$TMPDIR/input_manifest.json"
+  python - <<'PY'
+import json
+import os
+import shutil
+from pathlib import Path
+
+manifest_path = Path(os.environ["TMPDIR"]) / "input_manifest.json"
+input_dir = Path(os.environ["TMPDIR"]) / "input"
+manifest = json.loads(manifest_path.read_text())
+for idx, item in enumerate(manifest.get("items", [])):
+    source = Path(item["staged_path"])
+    dest = input_dir / item.get("file_name", source.name)
+    if not source.exists():
+        raise FileNotFoundError('manifest item %d source file not found: %s' % (idx, source))
+    shutil.copy2(source, dest)
+PY
+  COPY_EXIT=$?
+else
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] WARNING: INPUT_MANIFEST_PATH empty; copying full input dir $INPUT_DIR"
+  rsync -a --info=progress2 "$INPUT_DIR/" "$TMPDIR/input/"
+  COPY_EXIT=$?
+fi
+if [ "$COPY_EXIT" -ne 0 ]; then
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: input materialization failed with exit $COPY_EXIT"
+  python "$AGIR_DIR/scripts/ingest_and_release.py" \
+    --lease-id "$LEASE_ID" \
+    --orchestrator-id "$ORCHESTRATOR_ID" \
+    --release-reason "input_materialization_failed"
+  exit "$COPY_EXIT"
+fi
 
 # ── 2. Run stage ──────────────────────────────────────────────────────────────
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Running {stage_name}"

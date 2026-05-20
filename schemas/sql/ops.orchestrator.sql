@@ -56,7 +56,7 @@ BEGIN
             now(), now() + make_interval(secs => p_ttl_seconds), 1, 'active',
             NULL, NULL, now()
         )
-        ON CONFLICT ON CONSTRAINT stage_leases_batch_stage_window_key DO UPDATE
+        ON CONFLICT ON CONSTRAINT stage_leases_batch_stage_key DO UPDATE
         SET
             lease_id = ops.uuid_v4(),
             orchestrator_id = EXCLUDED.orchestrator_id,

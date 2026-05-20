@@ -11,21 +11,35 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from uuid import uuid4
+
+
+def build_manifest_run_id() -> str:
+    """Return a unique id for one input-staging manifest attempt."""
+    return uuid4().hex
+
 
 def build_input_manifest_path(
     manifest_root: str | Path,
     stage: str,
     batch_id: str,
     window_key: str,
+    manifest_run_id: Optional[str] = None,
 ) -> Path:
-    """Return canonical input_manifest.json path for a stage/batch/window."""
-    return (
-        Path(manifest_root)
-        / stage
-        / batch_id
-        / window_key
-        / f"input_manifest.json"
+    """Return input manifest path for a stage/batch/window.
+
+    ``manifest_run_id`` makes each staging attempt addressable in
+    ``logs.transfer_runs``.  When omitted, the legacy canonical filename is
+    returned for backwards compatibility.
+    """
+    filename = (
+        f"input_manifest.{manifest_run_id}.json"
+        if manifest_run_id
+        else "input_manifest.json"
     )
+    return Path(manifest_root) / stage / batch_id / window_key / filename
+
+
 
 
 def build_staging_report_path(
@@ -33,15 +47,17 @@ def build_staging_report_path(
     stage: str,
     batch_id: str,
     window_key: str,
+    manifest_run_id: str | None = None,
 ) -> Path:
-    """Return canonical staging_report.json path for a stage/batch/window."""
-    return (
-        Path(manifest_root)
-        / stage
-        / batch_id
-        / window_key
-        / f"staging_report.json"
+    """Return staging report path for a stage/batch/window."""
+    filename = (
+        f"staging_report.{manifest_run_id}.json"
+        if manifest_run_id
+        else "staging_report.json"
     )
+    return Path(manifest_root) / stage / batch_id / window_key / filename
+
+
 
 
 def derive_image_id(file_name: str) -> str:

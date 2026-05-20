@@ -98,6 +98,9 @@ class OrchestrationManager:
         dst_staging_ref: str,
         requested_by: Optional[str] = None,
         priority: int = 100,
+        input_manifest_ref: Optional[str] = None,
+        staging_report_ref: Optional[str] = None,
+
     ) -> Dict:
         """Request a transfer for a specific epoch-windowed subset of a batch.
 
@@ -109,6 +112,34 @@ class OrchestrationManager:
         Returns the same shape as request_input_transfer:
           {accepted, transfer_id, state, requested_at}
         """
+        dedupe_key = f"input_stage:{batch_id}:{stage}:{make_window_key(start_epoch, end_epoch)}"
+
+        existing = self.conn.fetch_one(
+            """
+            SELECT
+                transfer_id::text AS transfer_id,
+                status,
+                requested_at,
+                input_manifest_ref,
+                staging_report_ref
+            FROM logs.transfer_runs
+            WHERE dedupe_key = %s AND status <> 'failed'
+            ORDER BY requested_at DESC LIMIT 1
+            """,
+            (dedupe_key,),
+        )
+        if existing:
+            state = "already_completed" if existing["status"] == "completed" else "already_active"
+            return {
+                "accepted": True,
+                "transfer_id": existing["transfer_id"],
+                "state": state,
+                "requested_at": existing["requested_at"],
+                "input_manifest_ref": existing.get("input_manifest_ref"),
+                "staging_report_ref": existing.get("staging_report_ref"),
+            }
+
+
         # Check whether all LTS files for this window are already on 90daydata
         lts_row = self.conn.fetch_one(
             """
@@ -133,11 +164,47 @@ class OrchestrationManager:
         lts_count = int((lts_row or {}).get("n", 0))
         staged_count = int((staged_row or {}).get("n", 0))
         if lts_count > 0 and staged_count >= lts_count:
+            row = self.conn.fetch_one(
+                """
+                INSERT INTO logs.transfer_runs (
+                    transfer_id, direction, batch_id, stage, window_key, transfer_profile_id,
+                    src_lts_ref, dst_staging_ref, priority, requested_by,
+                    dedupe_key, status, requested_at, started_at, ended_at,
+                    input_manifest_ref, staging_report_ref
+                )
+                VALUES (
+                    ops.uuid_v4(), 'input_stage', %s, %s, %s, 'juno_to_ceres_targeted',
+                    %s, %s, %s, %s, %s, 'completed', now(), now(), now(),
+                    %s, %s
+                )
+                RETURNING
+                    transfer_id::text AS transfer_id,
+                    status,
+                    requested_at,
+                    input_manifest_ref,
+                    staging_report_ref
+                """,
+                (
+                    batch_id,
+                    stage,
+                    make_window_key(start_epoch, end_epoch),
+                    src_lts_ref,
+                    dst_staging_ref,
+                    priority,
+                    requested_by,
+                    dedupe_key,
+                    input_manifest_ref,
+                    staging_report_ref,
+                ),
+            )
+
             return {
                 "accepted": True,
-                "transfer_id": None,
+                "transfer_id": (row or {}).get("transfer_id"),
                 "state": "already_completed",
-                "requested_at": None,
+                "requested_at": (row or {}).get("requested_at"),
+                "input_manifest_ref": (row or {}).get("input_manifest_ref"),
+                "staging_report_ref": (row or {}).get("staging_report_ref"),
             }
 
         # Check for an in-flight transfer for this exact window
@@ -164,17 +231,17 @@ class OrchestrationManager:
             INSERT INTO logs.transfer_runs (
                 transfer_id, direction, batch_id, stage, window_key, transfer_profile_id,
                 src_lts_ref, dst_staging_ref, priority, requested_by,
-                dedupe_key, status, requested_at
+                dedupe_key, status, requested_at, input_manifest_ref, staging_report_ref
             )
             VALUES (
                 ops.uuid_v4(), 'input_stage', %s, %s, %s, 'juno_to_ceres_targeted',
-                %s, %s, %s, %s, %s, 'requested', now()
+                %s, %s, %s, %s, %s, 'requested', now(), %s, %s
             )
             RETURNING transfer_id::text AS transfer_id, status, requested_at
             """,
             (
                 batch_id, stage, make_window_key(start_epoch, end_epoch), src_lts_ref, dst_staging_ref,
-                priority, requested_by, dedupe_key,
+                priority, requested_by, dedupe_key, input_manifest_ref, staging_report_ref,
             ),
         )
         return {
@@ -182,7 +249,43 @@ class OrchestrationManager:
             "transfer_id": (row or {}).get("transfer_id"),
             "state": "created",
             "requested_at": (row or {}).get("requested_at"),
+            "input_manifest_ref": (row or {}).get("input_manifest_ref"),
+            "staging_report_ref": (row or {}).get("staging_report_ref"),
+
         }
+    
+    def get_completed_windowed_input_transfer(
+        self,
+        batch_id: str,
+        stage: str,
+        window_key: str,
+    ) -> Optional[Dict]:
+        """Return the completed input transfer carrying the manifest for this window."""
+        return self.conn.fetch_one(
+            """
+            SELECT
+                transfer_id::text AS transfer_id,
+                batch_id,
+                stage,
+                window_key,
+                status,
+                input_manifest_ref,
+                staging_report_ref,
+                requested_at,
+                ended_at
+            FROM logs.transfer_runs
+            WHERE direction = 'input_stage'
+              AND batch_id = %s
+              AND stage = %s
+              AND window_key = %s
+              AND status = 'completed'
+              AND input_manifest_ref IS NOT NULL
+            ORDER BY ended_at DESC NULLS LAST, requested_at DESC
+            LIMIT 1
+            """,
+            (batch_id, stage, window_key),
+        )
+
 
     def register_windowed_90daydata_files(
         self,
