@@ -22,13 +22,10 @@ python scripts/submit_jobs.py \\
 
 import argparse
 import logging
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from orchestrator.batch_list import parse_batch_list
-from orchestrator.submit_jobs import submit_stage_jobs
+from orchestrator.manual.submit_jobs import submit_stage_jobs
 
 
 def main() -> int:
@@ -82,17 +79,29 @@ def main() -> int:
         return 1
 
     any_failed = False
-    print("\n── Job submission results ────────────────────────────────")
+    no_manifest_count = 0
+    logging.info("── Job submission results ────────────────────────────────")
     for r in results:
         if r.status == "submitted":
-            print(f"  ✓  {r.batch_id:<25}  job={r.slurm_job_id}  lease={r.lease_id}")
+            logging.info("  ✓  %-25s  job=%s  lease=%s", r.batch_id, r.slurm_job_id, r.lease_id)
         else:
-            print(f"  ✗  {r.batch_id:<25}  {r.status}", end="")
-            if r.error:
-                print(f"  ({r.error[:80]})", end="")
-            print()
+            logging.warning("  ✗  %-25s  %s  (%s)", r.batch_id, r.status, (r.error or "")[:80])
             any_failed = True
-    print()
+            if r.status == "no_input_manifest":
+                no_manifest_count += 1
+
+    if no_manifest_count == len(results):
+        logging.error(
+            "All batches are missing input manifests. "
+            "Run stage_inputs.py first to transfer and stage inputs, then re-run this script. "
+            "To skip the transfer check entirely, pass --skip-transfer-check."
+        )
+    elif no_manifest_count > 0:
+        logging.warning(
+            "%d batch(es) are missing input manifests. "
+            "Run stage_inputs.py for those batches before resubmitting.",
+            no_manifest_count,
+        )
 
     return 1 if any_failed else 0
 

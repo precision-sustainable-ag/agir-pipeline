@@ -24,15 +24,12 @@ Batch list format (one batch per line, times in GMT):
 
 import argparse
 import logging
-import sys
 from pathlib import Path
 
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from orchestrator.batch_list import parse_batch_list
-from orchestrator.stage_inputs import stage_inputs_for_batches
+from orchestrator.manual.stage_inputs import stage_inputs_for_batches
 
 
 def _read_stage_name(config_path: Path) -> str:
