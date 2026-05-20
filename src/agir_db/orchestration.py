@@ -12,6 +12,14 @@ from uuid import UUID
 from .connection import ConnectionManager
 from .exceptions import ValidationError
 
+# Maps stage name -> the file index filters needed to find its inputs on LTS.
+# When ops.stages exists in the DB this can be replaced with a lookup query.
+_STAGE_FILE_FILTERS: Dict[str, Dict[str, str]] = {
+    "raw_to_jpg":     {"file_exts": ["raw"],              "data_state": "semifield-upload"},
+    "jpg_to_det":     {"file_exts": ["jpg", "jpeg"],      "data_state": "semifield-developed-images"},
+    "det_to_seg":     {"file_exts": ["jpg", "txt"],       "data_state": "semifield-developed-images"},
+    "seg_to_cutouts": {"file_exts": ["jpg"],              "data_state": "semifield-developed-images"},
+ }
 
 class OrchestrationManager:
     def __init__(self, connection: ConnectionManager):
@@ -644,27 +652,41 @@ class OrchestrationManager:
         )
         return row or {}
 
-    def get_raw_files_for_batch_window(
+    def get_files_for_batch_window(
         self,
+        stage: str,
         batch_id: str,
         start_epoch: int,
         end_epoch: int,
     ) -> List[Dict]:
-        """Return LTS RAW files for a batch whose filename epoch falls within [start, end]."""
+        """Return LTS files for a batch whose filename epoch falls within [start, end].
+
+        The file type and data state are resolved from ``_STAGE_FILE_FILTERS`` using
+        the stage name, so this method works for any pipeline stage.
+        """
+        filters = _STAGE_FILE_FILTERS.get(stage)
+        if not filters:
+            raise ValueError(
+                f"No file index filters defined for stage '{stage}'. "
+                f"Add an entry to _STAGE_FILE_FILTERS in orchestration.py."
+            )
+        file_exts = filters["file_exts"]
+        data_state = filters["data_state"]
+        
         return self.conn.fetch_all(
             """
             SELECT file_id, full_path, file_name, fname_ts_epoch, size_bytes
             FROM source.globus_file_index
             WHERE batch_id = %s
               AND namespace = 'LTS'
-              AND data_state = 'semifield-upload'
+              AND data_state = %s
               AND entry_type = 'file'
-              AND lower(file_ext) = 'raw'
+              AND lower(file_ext) = ANY(%s)
               AND fname_ts_epoch >= %s
               AND fname_ts_epoch <= %s
             ORDER BY fname_ts_epoch ASC
             """,
-            (batch_id, start_epoch, end_epoch),
+            (batch_id, data_state, file_exts, start_epoch, end_epoch),
         )
 
 

@@ -61,11 +61,15 @@ def build_staging_report_path(
 
 
 def derive_image_id(file_name: str) -> str:
-    """Derive image_id from a filename by removing the final suffix."""
+    """Derive a stable item ID from a filename by stripping its extension.
+
+    Works for any file type (RAW, JPG, TXT, etc.). The stem of the filename
+    is used as the canonical ID for that item across pipeline stages.
+    """
     return Path(file_name).stem
 
 
-def build_raw_input_manifest(
+def build_input_manifest(
     *,
     stage: str,
     batch_id: str,
@@ -75,7 +79,11 @@ def build_raw_input_manifest(
     input_root: str,
     files: Iterable[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Build an input manifest for RAW files staged into a flat batch directory."""
+    """Build an input manifest for files staged into a flat batch directory.
+ 
+     Works for any stage and file type. Each item's ID is derived from its
+     filename stem via ``derive_image_id``.
+     """
     items: List[Dict[str, Any]] = []
 
     for f in files:
