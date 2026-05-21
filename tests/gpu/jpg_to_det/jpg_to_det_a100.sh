@@ -162,8 +162,17 @@ python3 "$VIZ_SCRIPT" \
   --sample-size "$VIZ_SAMPLE_SIZE" \
   --max-width "$VIZ_MAX_WIDTH"
 
+# promote detection artifacts to final destination
+FINAL_DEST="/90daydata/dash_agir/semifield-developed-images/${BATCH_ID}/detections"
+
+echo "Promoting artifacts to $FINAL_DEST..."
+python3 -m stages.jpg_to_det.promote \
+  --run-dir "$DET_RUN_DIR" \
+  --dest "$FINAL_DEST"
+
 echo "Job finished at $(date)"
 echo "Detection root:     $FINAL_DET_DIR"
 echo "Detection run:      $DET_RUN_DIR"
 echo "Artifacts:          $DET_ARTIFACT_DIR"
 echo "Visualizations:     $FINAL_VIZ_DIR"
+echo "Promoted to:        $FINAL_DEST"
