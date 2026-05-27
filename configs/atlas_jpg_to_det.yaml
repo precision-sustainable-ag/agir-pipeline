@@ -4,6 +4,12 @@
 
 paths:
 
+  db: /90daydata/dash_agir/semifield-tools/pipeline_registry.db
+
+  uv_env: /project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/activate
+
+  locks_root: /90daydata/dash_agir/locks
+
   input_manifest_root: /90daydata/dash_agir/semifield-input-manifests
   
   # Root of the agir-pipeline repository on the SciNet system
@@ -90,6 +96,7 @@ slurm:
   cpus_per_task: 16
   mem: 128G
   time: "4:00:00"
+  det_workers: 4      # --t argument: parallel worker processes for detection
 
 # configs/config.yaml defines the stages to run and how to run them. The "cli_args" field is a template string that can reference any of the config fields defined above, as well as the following special variables that are filled in by find:
 stage:
