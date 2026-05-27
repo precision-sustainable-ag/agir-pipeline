@@ -19,7 +19,7 @@ stage — they are reported as info but not included in the output list.
 By default only returns batches whose files are indexed under site=JUNO,
 since those are the ones Atlas can pull via Globus. Use --site to override.
 
-Queries v_semifield_batch_status (defined in schemas/sqlite/pipeline.sql).
+Queries v_batches_needing_jpg_to_det (defined in schemas/sqlite/pipeline.sql).
 
 Usage
 -----
@@ -81,7 +81,7 @@ def load_config(config_path: Path) -> dict:
 
 _BACKLOG_QUERY = """
 SELECT batch_id, jpg_count, site, storage_domain, storage_root
-FROM v_semifield_batch_status
+FROM v_batches_needing_jpg_to_det
 WHERE pipeline_status = 'needs_jpg_to_det'
   AND site = ?
 ORDER BY batch_id
@@ -89,7 +89,7 @@ LIMIT ?
 """
 
 _NEEDS_FORMATTING_QUERY = """
-SELECT COUNT(*) FROM v_semifield_batch_status
+SELECT COUNT(*) FROM v_batches_needing_jpg_to_det
 WHERE pipeline_status = 'needs_metadata_formatting'
   AND site = ?
 """
