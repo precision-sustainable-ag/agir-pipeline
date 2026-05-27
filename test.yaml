@@ -1,8 +1,0 @@
-weights: /project/dash_agir/matthew.kutugata/repos/AgIR-CVToolkit/data/plant_segmentation_model/epoch=47-step=37200-val_loss=0.00.ckpt
-arch: Unet
-encoder: mit_b4
-threshold: 0.5
-pad_divisor: 32
-tile_size: 1024
-overlap: 128
-tiling: true
