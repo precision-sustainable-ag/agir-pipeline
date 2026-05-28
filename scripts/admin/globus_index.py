@@ -469,7 +469,7 @@ def init_db(db_path: str, logger: logging.Logger) -> sqlite3.Connection:
 
     logger.info("Connecting to SQLite database: %s", db)
     conn = sqlite3.connect(str(db), timeout=120)
-    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA journal_mode=DELETE;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA temp_store=MEMORY;")
     conn.execute("PRAGMA cache_size=-200000;")  # about 200 MB

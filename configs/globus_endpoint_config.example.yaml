@@ -29,7 +29,7 @@ endpoints:
     storage_root: "/rsstu/users/s/screberg/longterm_images"
     data_state: "semifield-developed-images"
 
-  - enabled: true
+  - enabled: false
     endpoint: "2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
     site: "NCSU"
     storage_domain: "screberg"
@@ -56,7 +56,7 @@ endpoints:
     storage_root: "/rsstu/users/s/screberg/longterm_images2"
     data_state: "semifield-developed-images"
 
-  - enabled: true
+  - enabled: false
     endpoint: "2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
     site: "NCSU"
     storage_domain: "screberg"
@@ -83,7 +83,7 @@ endpoints:
     storage_root: "/rsstu/users/s/screberg/GROW_DATA"
     data_state: "semifield-developed-images"
 
-  - enabled: true
+  - enabled: false
     endpoint: "2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
     site: "NCSU"
     storage_domain: "screberg"
@@ -110,7 +110,7 @@ endpoints:
     storage_root: "/LTS/project/dash_agir"
     data_state: "semifield-developed-images"
 
-  - enabled: true
+  - enabled: false
     endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
     site: "JUNO"
     storage_domain: "dash_agir"

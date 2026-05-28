@@ -1,0 +1,96 @@
+# configs/scinet_raw_to_jpg.example.yaml
+# ============================================================
+# Stage configuration for raw_to_jpg on SciNet/CERES.
+# Copy to configs/scinet_raw_to_jpg.yaml and fill in values.
+# ============================================================
+
+# ── Stage identity ────────────────────────────────────────────────────────────
+stage:
+  name: raw_to_jpg
+  cli_module: stages.raw_to_jpg.cli
+  cli_args: >-
+    --c $CONFIG_PATH
+    --i $TMPDIR/input
+    --o $TMPDIR/output
+    --t $CPUS
+    --batch-id $BATCH_ID
+  output_subdir: raw_to_jpg
+  # promote_script: stages/raw_to_jpg/promote.py   # uncomment if needed
+  # promote_args: "--run-dir $RUN_DIR --dest $FINAL_DEST"
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+paths:
+  # Root of the agir-pipeline repository on the cluster.
+  agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
+
+  # Camera config YAML passed to raw_to_jpg --c.
+  stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/configs/config.raw_to_jpg.example.yaml
+
+  # Where staged RAW inputs land after transfer (one subdir per batch_id).
+  # In SQLite mode this is the path operators rsync/Globus files to directly.
+  input_staging_root: /90daydata/dash_agir/semifield-upload
+
+  # Where per-run artifacts (run_report.json, manifest.json) are saved after
+  # the job completes and copies back from $TMPDIR.
+  output_stage_runs: /90daydata/dash_agir/tmp/stage_runs/raw_to_jpg
+
+  # Root under which final promoted JPGs are written as:
+  #   <final_dest_root>/<batch_id>/images/<image_id>.jpg
+  final_dest_root: /90daydata/dash_agir/semifield-developed-images
+
+  # SLURM job stdout/stderr logs.
+  log_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs/raw_to_jpg
+
+  # ── SQLite DB (optional — enables SQLite mode) ────────────────────────────
+  # When this key is present, submit_jobs.py uses SQLite for lease claiming and
+  # the SLURM job calls scripts/sqlite/ingest_and_release.py instead of the
+  # PostgreSQL version.  When absent, the PostgreSQL AgirDB path is used.
+  #
+  # This must point to the same file populated by scripts/admin/globus_index.py
+  # and have the schema from schemas/sqlite/pipeline.sql applied.
+  db: /project/dash_agir/globus_index/globus_file_index.sqlite3
+
+  # Filesystem lock directory (one subdir per stage, one file per batch_id).
+  # Used by find_raw_to_jpg.py to skip in-flight batches.
+  locks_root: /project/dash_agir/locks
+
+  # ── Input manifests (PostgreSQL / windowed-transfer mode only) ────────────
+  # Not required in SQLite mode; leave empty or omit if paths.db is set.
+  input_manifest_root:
+
+  # ── raw_to_jpg camera pipeline paths ─────────────────────────────────────
+  rawtherapee_cli: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/squashfs-root/usr/bin/rawtherapee-cli
+  pp3_profile: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/configs/profiles/MD_shr661CXGE_raw16.pp3
+  temp_dng_dir: /tmp/dash_agir/dng
+  color_matrix: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/configs/profiles/MD_shr661CXGE_calibration_matrix_optimized.npy
+  svs_tags: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/configs/profiles/shr661CXGE_tags.yaml
+  rawtherapee_validate_script: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/scripts/setup/validate_rawtherapee.sh
+  setup_exiftool_script: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/scripts/setup/setup_exiftool.sh
+
+# ── SLURM job parameters ──────────────────────────────────────────────────────
+slurm:
+  account: dash_agir
+  cpus_per_task: 16
+  mem: 128G
+  time: "4:00:00"
+
+# ── Globus transfer settings (PostgreSQL / windowed-transfer mode only) ────────
+# Not required in SQLite mode; omit this block if paths.db is set.
+transfer:
+  juno_endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
+  ceres_endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+  dry_run: false
+  poll_interval_seconds: 30
+  poll_timeout_seconds: 7200
+  max_poll_attempts: 240
+
+  routes:
+    raw_to_jpg:
+      data_state: semifield-upload
+      source_root_juno: /LTS/project/dash_agir/semifield-upload
+      source_root_ncsu: /ncsu/staging/semifield-upload
+      destination_root: /90daydata/dash_agir/semifield-upload
+
+# ── Processing ────────────────────────────────────────────────────────────────
+processing:
+  threads_per_image: 4
