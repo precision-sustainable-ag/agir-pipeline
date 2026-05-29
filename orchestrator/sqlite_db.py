@@ -43,6 +43,78 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+_JPG_EXTS = "('jpg','jpeg')"
+
+def get_batches_needing_jpg_to_det(
+    conn: sqlite3.Connection,
+    *,
+    site: Optional[str] = None,
+    limit: int = 200,
+) -> List[Dict]:
+    """
+    Return rows from ``v_batches_needing_jpg_to_det``.
+
+    The view already excludes:
+    * batches with existing detection files
+    * batches with an active, unexpired lease in stage_leases
+    * batches that have ever had a successful stage_run for jpg_to_det
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Read-only or read-write connection.
+    site : str, optional
+        If given, restrict to batches whose JPG files are indexed under
+        this site (e.g. ``"JUNO"``).
+    limit : int
+        Maximum rows to return.
+
+    Returns
+    -------
+    list[dict]
+        Each dict has at minimum ``batch_id``, ``batch_date``,
+        ``jpg_count``, ``det_count``.  When *site* is given, also
+        includes ``site``, ``storage_domain``, ``storage_root``.
+    """
+    if site:
+        rows = conn.execute(
+            f"""
+            SELECT
+                v.batch_id,
+                v.batch_date,
+                v.jpg_count,
+                v.det_count,
+                g.site,
+                g.storage_domain,
+                g.storage_root
+            FROM v_batches_needing_jpg_to_det v
+            JOIN globus_file_index g
+              ON  g.batch_id   = v.batch_id
+             AND  g.data_state = 'semifield-developed-images'
+             AND  g.entry_type = 'file'
+             AND  g.is_current = 1
+             AND  g.file_ext   IN {_JPG_EXTS}
+             AND  g.parent_dir = 'images'
+             AND  g.site       = ?
+            GROUP BY v.batch_id
+            ORDER BY v.batch_date ASC, v.batch_id ASC
+            LIMIT ?
+            """,
+            (site, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT batch_id, batch_date, jpg_count, det_count
+            FROM   v_batches_needing_jpg_to_det
+            ORDER  BY batch_date ASC, batch_id ASC
+            LIMIT  ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
 class _TempConnection:
     """
     Wraps a sqlite3.Connection opened against a temp file copy of the DB.
