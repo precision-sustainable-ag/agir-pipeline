@@ -15,13 +15,17 @@ stage:
     --t $CPUS
     --batch-id $BATCH_ID
   output_subdir: raw_to_jpg
-  # promote_script: stages/raw_to_jpg/promote.py   # uncomment if needed
-  # promote_args: "--run-dir $RUN_DIR --dest $FINAL_DEST"
+  final_dest_suffix: images
+  viz_sample_size: 50    # how many images to sample
+  viz_scale: 0.15        # downscale factor (raw_to_jpg only)
+  viz_max_width: 1800
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 paths:
   # Root of the agir-pipeline repository on the cluster.
   agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
+
+  uv_env: /project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/activate
 
   # Camera config YAML passed to raw_to_jpg --c.
   stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/configs/config.raw_to_jpg.example.yaml
@@ -70,6 +74,7 @@ paths:
 # ── SLURM job parameters ──────────────────────────────────────────────────────
 slurm:
   account: dash_agir
+  partition: compute
   cpus_per_task: 16
   mem: 128G
   time: "4:00:00"
