@@ -38,6 +38,8 @@ cv = [
   "scikit-image>=0.21.0",
   "opencv-python>=4.8.0",
   "pytz>=2023.3",
+  "geopandas>=0.14.0",
+  "packaging>=23.0",
 ]
 
 ml = [
@@ -66,6 +68,8 @@ all = [
   "scikit-image>=0.21.0",
   "opencv-python>=4.8.0",
   "pytz>=2023.3",
+  "geopandas>=0.14.0",
+  "packaging>=23.0",
   "torch>=2.0.0",
   "torchvision>=0.15.0",
   "ultralytics>=8.0.0",
@@ -88,6 +92,7 @@ build-backend = "setuptools.build_meta"
 "stages.jpg_to_det" = "stages/jpg_to_det"
 "stages.det_to_seg" = "stages/det_to_seg"
 "stages.raw_to_jpg" = "stages/raw_to_jpg"
+"stages.assign_species" = "stages/assign_species"
 
 [tool.setuptools]
 packages = [
@@ -98,6 +103,7 @@ packages = [
     "stages.jpg_to_det",
     "stages.det_to_seg",
     "stages.raw_to_jpg",
+    "stages.assign_species",
 ]
 
 [tool.setuptools.package-data]

@@ -103,6 +103,7 @@ class RunReportBuilder:
             "skipped": False,
             "skip_reason": None,
         }
+        self._extra = {}
 
 
     # Monitor Timing
@@ -255,6 +256,11 @@ class RunReportBuilder:
             self._pointers["logs_path"] = str(logs_path)
         return self
 
+    def set_extra(self, **kwargs):
+        """Merge arbitrary stage-specific fields into the run report."""
+        self._extra.update(kwargs)
+        return self
+
     def set_skip(self, skipped: bool, skip_reason: str = None):
         self._skip["skipped"] = bool(skipped)
         self._skip["skip_reason"] = skip_reason
@@ -291,6 +297,7 @@ class RunReportBuilder:
         if self._skip["skipped"]:
             report["skipped"] = True
             report["skip_reason"] = self._skip["skip_reason"]
+        report.update(self._extra)
         return report
 
     def write(self, path: Path) -> Path:
