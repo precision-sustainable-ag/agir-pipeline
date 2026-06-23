@@ -244,7 +244,7 @@ TMPINPUT="$TMPDIR/input"
 TMPOUTPUT="$TMPDIR/output"
 mkdir -p "$TMPINPUT" "$TMPOUTPUT"
 
-cp -r "$INPUT_STAGING_DIR"/. "$TMPINPUT"/
+rsync -av "$INPUT_STAGING_DIR"/. "$TMPINPUT"/
 log "Copied $FILE_COUNT file(s) to $TMPINPUT"
 
 # ── Step 3: Run stage CLI ─────────────────────────────────────────────────────
