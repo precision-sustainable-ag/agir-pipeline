@@ -12,6 +12,8 @@ Public API
 open_db(db_path, *, readonly=False)  → sqlite3.Connection
 claim_stage_lease(conn, batch_id, stage, orchestrator_id, ttl_seconds)  → dict
 release_stage_lease(conn, lease_id, orchestrator_id)  → bool
+request_input_staging(conn, ...)  → dict
+mark_input_staging_status(conn, staging_id, status, ...)  → dict
 ingest_run_report(conn, run_report_path)  → dict
 get_batches_needing_raw_to_jpg(conn, *, site=None, limit=200)  → list[dict]
 
@@ -39,12 +41,15 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
 
 _JPG_EXTS = "('jpg','jpeg')"
+_ACTIVE_STAGING_STATUSES = ("planned", "requested", "submitted", "active")
+_TERMINAL_STAGING_STATUSES = ("completed", "failed", "canceled")
+_VALID_STAGING_STATUSES = _ACTIVE_STAGING_STATUSES + _TERMINAL_STAGING_STATUSES
 
 def get_batches_needing_jpg_to_det(
     conn: sqlite3.Connection,
@@ -352,6 +357,243 @@ def release_stage_lease(
             lease_id, orchestrator_id,
         )
     return deleted
+
+
+# ---------------------------------------------------------------------------
+# Input staging tracking
+# ---------------------------------------------------------------------------
+
+def request_input_staging(
+    conn: sqlite3.Connection,
+    *,
+    batch_id: str,
+    stage: str,
+    src_path: str,
+    dst_path: str,
+    src_endpoint: str = "",
+    dst_endpoint: str = "",
+    requested_by: str = "",
+    priority: int = 100,
+) -> Dict:
+    """
+    Idempotently record an input-staging request.
+
+    A request is unique by ``(batch_id, stage, src_path, dst_path)``. Existing
+    completed requests are returned as ``already_completed``. Existing active
+    requests are returned as ``already_active``. Failed or canceled requests are
+    reopened with a fresh ``requested`` status and cleared error/task metadata.
+    """
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT staging_id, status, globus_task_id
+            FROM staged_inputs
+            WHERE batch_id = ? AND stage = ? AND src_path = ? AND dst_path = ?
+            """,
+            (batch_id, stage, src_path, dst_path),
+        ).fetchone()
+
+        if row:
+            staging_id = row["staging_id"]
+            status = row["status"]
+            if status == "completed":
+                conn.execute("COMMIT")
+                return {
+                    "accepted": False,
+                    "state": "already_completed",
+                    "staging_id": staging_id,
+                    "batch_id": batch_id,
+                    "stage": stage,
+                    "status": status,
+                    "globus_task_id": row["globus_task_id"],
+                }
+            if status in _ACTIVE_STAGING_STATUSES:
+                conn.execute("COMMIT")
+                return {
+                    "accepted": False,
+                    "state": "already_active",
+                    "staging_id": staging_id,
+                    "batch_id": batch_id,
+                    "stage": stage,
+                    "status": status,
+                    "globus_task_id": row["globus_task_id"],
+                }
+
+            conn.execute(
+                """
+                UPDATE staged_inputs
+                SET status = 'requested',
+                    src_endpoint = ?,
+                    dst_endpoint = ?,
+                    requested_by = ?,
+                    priority = ?,
+                    globus_task_id = NULL,
+                    error_summary = NULL,
+                    requested_at = ?,
+                    submitted_at = NULL,
+                    completed_at = NULL,
+                    updated_at = ?
+                WHERE staging_id = ?
+                """,
+                (
+                    src_endpoint,
+                    dst_endpoint,
+                    requested_by,
+                    int(priority),
+                    now_str,
+                    now_str,
+                    staging_id,
+                ),
+            )
+            conn.execute("COMMIT")
+            return {
+                "accepted": True,
+                "state": "reopened",
+                "staging_id": staging_id,
+                "batch_id": batch_id,
+                "stage": stage,
+                "status": "requested",
+            }
+
+        staging_id = str(uuid.uuid4())
+        conn.execute(
+            """
+            INSERT INTO staged_inputs (
+                staging_id, batch_id, stage,
+                src_endpoint, dst_endpoint, src_path, dst_path,
+                status, requested_by, priority, requested_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'requested', ?, ?, ?, ?)
+            """,
+            (
+                staging_id,
+                batch_id,
+                stage,
+                src_endpoint,
+                dst_endpoint,
+                src_path,
+                dst_path,
+                requested_by,
+                int(priority),
+                now_str,
+                now_str,
+            ),
+        )
+        conn.execute("COMMIT")
+        return {
+            "accepted": True,
+            "state": "created",
+            "staging_id": staging_id,
+            "batch_id": batch_id,
+            "stage": stage,
+            "status": "requested",
+        }
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+
+
+def mark_input_staging_status(
+    conn: sqlite3.Connection,
+    *,
+    staging_id: str,
+    status: str,
+    globus_task_id: Optional[str] = None,
+    error_summary: Optional[str] = None,
+) -> Dict:
+    """Update one staged-input row after transfer submission or polling."""
+    if status not in _VALID_STAGING_STATUSES:
+        raise ValueError(
+            f"Invalid input staging status {status!r}; expected one of {_VALID_STAGING_STATUSES}"
+        )
+
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    submitted_at = now_str if status in {"submitted", "active", "completed"} else None
+    completed_at = now_str if status in _TERMINAL_STAGING_STATUSES else None
+
+    row = conn.execute(
+        """
+        SELECT submitted_at, completed_at
+        FROM staged_inputs
+        WHERE staging_id = ?
+        """,
+        (staging_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"Unknown staging_id: {staging_id}")
+
+    conn.execute(
+        """
+        UPDATE staged_inputs
+        SET status = ?,
+            globus_task_id = COALESCE(?, globus_task_id),
+            error_summary = ?,
+            submitted_at = COALESCE(submitted_at, ?),
+            completed_at = COALESCE(completed_at, ?),
+            updated_at = ?
+        WHERE staging_id = ?
+        """,
+        (
+            status,
+            globus_task_id,
+            error_summary,
+            submitted_at,
+            completed_at,
+            now_str,
+            staging_id,
+        ),
+    )
+    conn.commit()
+
+    updated = conn.execute(
+        "SELECT * FROM staged_inputs WHERE staging_id = ?",
+        (staging_id,),
+    ).fetchone()
+    return dict(updated)
+
+
+def get_input_staging_requests(
+    conn: sqlite3.Connection,
+    *,
+    statuses: Optional[Sequence[str]] = None,
+    stage: Optional[str] = None,
+    limit: int = 200,
+) -> List[Dict]:
+    """Return staged-input rows ordered for transfer execution/polling."""
+    clauses: List[str] = []
+    params: List[object] = []
+
+    if statuses:
+        invalid = [s for s in statuses if s not in _VALID_STAGING_STATUSES]
+        if invalid:
+            raise ValueError(f"Invalid input staging statuses: {invalid}")
+        placeholders = ",".join("?" for _ in statuses)
+        clauses.append(f"status IN ({placeholders})")
+        params.extend(statuses)
+
+    if stage:
+        clauses.append("stage = ?")
+        params.append(stage)
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(int(limit))
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM staged_inputs
+        {where}
+        ORDER BY priority ASC, requested_at ASC, batch_id ASC
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------
