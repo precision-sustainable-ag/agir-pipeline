@@ -21,6 +21,13 @@ from orchestrator.sqlite_db import (
 
 @dataclass(frozen=True)
 class StageInputSpec:
+"""
+    Defines how a pipeline stage finds staged input data.
+
+    Empty subdir values mean the stage uses the root source/destination
+    directory directly.
+    """
+   ...
     stage_name: str
     readiness_view: str
     source_subdir: str = ""
