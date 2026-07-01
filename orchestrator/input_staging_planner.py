@@ -73,17 +73,17 @@ def _rows_for_stage(
     *,
     site: Optional[str],
     limit: int,
+    batch_ids: Optional[Sequence[str]] = None,
 ) -> List[Dict]:
     if stage not in STAGE_INPUT_SPECS:
         raise ValueError(f"Unsupported stage for input staging: {stage!r}")
     spec = STAGE_INPUT_SPECS[stage]
 
     if spec.readiness_view == "v_batches_needing_raw_to_jpg":
-        return get_batches_needing_raw_to_jpg(conn, site=site, limit=limit)
+        return get_batches_needing_raw_to_jpg(conn, site=site, limit=limit, batch_ids=batch_ids)
     if spec.readiness_view == "v_batches_needing_jpg_to_det":
-        return get_batches_needing_jpg_to_det(conn, site=site, limit=limit)
+        return get_batches_needing_jpg_to_det(conn, site=site, limit=limit, batch_ids=batch_ids)
     raise ValueError(f"Unsupported readiness view: {spec.readiness_view!r}")
-
 
 def plan_input_staging(
     conn: sqlite3.Connection,
@@ -127,7 +127,10 @@ def plan_input_staging(
         raise ValueError("Config transfer block must define atlas_endpoint or ceres_endpoint")
 
     wanted = set(batch_ids or [])
-    rows = _rows_for_stage(conn, stage, site=site, limit=limit)
+    # When targeting specific batches, don't let the default/passed limit
+    # truncate the readiness query before the batch_id filter is applied.
+    effective_limit = max(limit, len(wanted)) if wanted else limit
+    rows = _rows_for_stage(conn, stage, site=site, limit=effective_limit, batch_ids=batch_ids)
 
     requests: List[StagingRequest] = []
     for row in rows:

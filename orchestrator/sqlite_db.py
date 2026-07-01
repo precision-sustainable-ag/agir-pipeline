@@ -47,7 +47,7 @@ from typing import Dict, List, Optional, Sequence
 logger = logging.getLogger(__name__)
 
 
-_JPG_EXTS = "('jpg','jpeg')"
+_JPG_EXTS = "('jpg','jpeg','JPG','JPEG')"
 _ACTIVE_STAGING_STATUSES = ("planned", "requested", "submitted", "active")
 _TERMINAL_STAGING_STATUSES = ("completed", "failed", "canceled")
 _VALID_STAGING_STATUSES = _ACTIVE_STAGING_STATUSES + _TERMINAL_STAGING_STATUSES
@@ -57,43 +57,21 @@ def get_batches_needing_jpg_to_det(
     *,
     site: Optional[str] = None,
     limit: int = 200,
+    batch_ids: Optional[Sequence[str]] = None,
 ) -> List[Dict]:
-    """
-    Return rows from ``v_batches_needing_jpg_to_det``.
+    batch_filter_sql = ""
+    filter_params: List = []
+    if batch_ids:
+        placeholders = ",".join("?" for _ in batch_ids)
+        batch_filter_sql = f"AND v.batch_id IN ({placeholders})"
+        filter_params = list(batch_ids)
 
-    The view already excludes:
-    * batches with existing detection files
-    * batches with an active, unexpired lease in stage_leases
-    * batches that have ever had a successful stage_run for jpg_to_det
-
-    Parameters
-    ----------
-    conn : sqlite3.Connection
-        Read-only or read-write connection.
-    site : str, optional
-        If given, restrict to batches whose JPG files are indexed under
-        this site (e.g. ``"JUNO"``).
-    limit : int
-        Maximum rows to return.
-
-    Returns
-    -------
-    list[dict]
-        Each dict has at minimum ``batch_id``, ``batch_date``,
-        ``jpg_count``, ``det_count``.  When *site* is given, also
-        includes ``site``, ``storage_domain``, ``storage_root``.
-    """
     if site:
         rows = conn.execute(
             f"""
             SELECT
-                v.batch_id,
-                v.batch_date,
-                v.jpg_count,
-                v.det_count,
-                g.site,
-                g.storage_domain,
-                g.storage_root
+                v.batch_id, v.batch_date, v.jpg_count, v.det_count,
+                g.site, g.storage_domain, g.storage_root
             FROM v_batches_needing_jpg_to_det v
             JOIN globus_file_index g
               ON  g.batch_id   = v.batch_id
@@ -103,21 +81,23 @@ def get_batches_needing_jpg_to_det(
              AND  g.file_ext   IN {_JPG_EXTS}
              AND  g.parent_dir = 'images'
              AND  g.site       = ?
+            WHERE 1=1 {batch_filter_sql}
             GROUP BY v.batch_id
             ORDER BY v.batch_date ASC, v.batch_id ASC
             LIMIT ?
             """,
-            (site, limit),
+            (site, *filter_params, limit),
         ).fetchall()
     else:
         rows = conn.execute(
-            """
-            SELECT batch_id, batch_date, jpg_count, det_count
-            FROM   v_batches_needing_jpg_to_det
-            ORDER  BY batch_date ASC, batch_id ASC
+            f"""
+            SELECT v.batch_id, v.batch_date, v.jpg_count, v.det_count
+            FROM   v_batches_needing_jpg_to_det v
+            WHERE  1=1 {batch_filter_sql}
+            ORDER  BY v.batch_date ASC, v.batch_id ASC
             LIMIT  ?
             """,
-            (limit,),
+            (*filter_params, limit),
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -154,7 +134,7 @@ class _TempConnection:
 
 
 # RAW extensions recognised by globus_file_index and v_batches_needing_raw_to_jpg.
-_RAW_EXTS = "('raw','arw','nef','cr2','cr3','dng','rw2','raf','orf')"
+_RAW_EXTS = "('RAW','raw','arw','nef','cr2','cr3','dng','rw2','raf','orf')"
 
 # Maps run_report.status values to the SQLite stage_runs CHECK constraint values.
 _STATUS_MAP: Dict[str, str] = {
@@ -773,33 +753,23 @@ def get_batches_needing_raw_to_jpg(
     *,
     site: Optional[str] = None,
     limit: int = 200,
+    batch_ids: Optional[Sequence[str]] = None,
 ) -> List[Dict]:
     """
     Return rows from ``v_batches_needing_raw_to_jpg``.
-
-    The view already excludes:
-    * batches with existing JPG files in semifield-developed-images/*/images/
-    * batches with an active, unexpired lease in stage_leases
-    * batches that have ever had a successful stage_run for raw_to_jpg
-
-    Parameters
-    ----------
-    conn : sqlite3.Connection
-        Read-only or read-write connection.
-    site : str, optional
-        If given, restrict to batches whose RAW files are indexed under this
-        site (e.g. ``"JUNO"``).  Implemented via a JOIN on globus_file_index
-        because the view does not expose site directly.
-    limit : int
-        Maximum rows to return.
-
-    Returns
-    -------
-    list[dict]
-        Each dict has at minimum ``batch_id``, ``batch_date``,
-        ``raw_file_count``, ``jpg_file_count``.  When *site* is given, also
-        includes ``site``, ``storage_domain``, ``storage_root``.
+    ...
+    batch_ids : sequence of str, optional
+        If given, restrict to these batch_ids. Applied in SQL *before*
+        ``limit`` so targeted batches are never truncated out by the
+        default row limit.
     """
+    batch_filter_sql = ""
+    filter_params: List = []
+    if batch_ids:
+        placeholders = ",".join("?" for _ in batch_ids)
+        batch_filter_sql = f"AND v.batch_id IN ({placeholders})"
+        filter_params = list(batch_ids)
+
     if site:
         rows = conn.execute(
             f"""
@@ -819,20 +789,22 @@ def get_batches_needing_raw_to_jpg(
              AND  g.is_current = 1
              AND  g.file_ext   IN {_RAW_EXTS}
              AND  g.site       = ?
+            WHERE 1=1 {batch_filter_sql}
             GROUP BY v.batch_id
-            ORDER BY v.batch_date ASC, v.batch_id ASC
+            ORDER BY v.batch_date DESC, v.batch_id DESC
             LIMIT ?
             """,
-            (site, limit),
+            (site, *filter_params, limit),
         ).fetchall()
     else:
         rows = conn.execute(
-            """
-            SELECT batch_id, batch_date, raw_file_count, jpg_file_count
-            FROM   v_batches_needing_raw_to_jpg
-            ORDER  BY batch_date ASC, batch_id ASC
+            f"""
+            SELECT v.batch_id, v.batch_date, v.raw_file_count, v.jpg_file_count
+            FROM   v_batches_needing_raw_to_jpg v
+            WHERE  1=1 {batch_filter_sql}
+            ORDER  BY v.batch_date ASC, v.batch_id ASC
             LIMIT  ?
             """,
-            (limit,),
+            (*filter_params, limit),
         ).fetchall()
     return [dict(r) for r in rows]
