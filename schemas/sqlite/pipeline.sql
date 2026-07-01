@@ -7,7 +7,7 @@
 -- ------
 --   Inventory:      inventory_runs, globus_file_index,
 --                   batch_inventory_summary, storage_gap_summary
---   Orchestration:  stage_runs, stage_leases
+--   Orchestration:  stage_runs, stage_leases, staged_inputs
 --
 -- Views
 -- -----
@@ -241,6 +241,43 @@ CREATE TABLE IF NOT EXISTS stage_leases (
     UNIQUE (batch_id, stage)
 );
 
+-- Input staging requests/results for pre-submit data movement.
+-- This records JUNO/LTS -> 90daydata availability without making the
+-- orchestrator infer staged state from the filesystem.
+CREATE TABLE IF NOT EXISTS staged_inputs (
+    staging_id        TEXT PRIMARY KEY,
+    batch_id          TEXT NOT NULL,
+    stage             TEXT NOT NULL,
+
+    src_endpoint      TEXT NOT NULL DEFAULT '',
+    dst_endpoint      TEXT NOT NULL DEFAULT '',
+    src_path          TEXT NOT NULL,
+    dst_path          TEXT NOT NULL,
+
+    status            TEXT NOT NULL DEFAULT 'planned'
+                          CHECK (status IN (
+                              'planned',
+                              'requested',
+                              'submitted',
+                              'active',
+                              'completed',
+                              'failed',
+                              'canceled'
+                          )),
+    requested_by      TEXT NOT NULL DEFAULT '',
+    priority          INTEGER NOT NULL DEFAULT 100,
+
+    globus_task_id    TEXT,
+    error_summary     TEXT,
+
+    requested_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    submitted_at      TEXT,
+    completed_at      TEXT,
+    updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+
+    UNIQUE (batch_id, stage, src_path, dst_path)
+);
+
 
 -- =============================================================================
 -- INDEXES
@@ -289,6 +326,14 @@ CREATE INDEX IF NOT EXISTS idx_sr_ended_at
 -- Covers the active-lease CTE in both views: stage + expiry + batch_id.
 CREATE INDEX IF NOT EXISTS idx_sl_stage_expires
     ON stage_leases (stage, expires_at, batch_id);
+
+-- staged_inputs  ──────────────────────────────────────────────────────────────
+
+CREATE INDEX IF NOT EXISTS idx_si_batch_stage_status
+    ON staged_inputs (batch_id, stage, status);
+
+CREATE INDEX IF NOT EXISTS idx_si_stage_status_priority
+    ON staged_inputs (stage, status, priority, requested_at);
 
 -- Summary tables  ─────────────────────────────────────────────────────────────
 
@@ -437,5 +482,5 @@ ORDER BY j.batch_date ASC, j.batch_id ASC;
 
 
 -- =============================================================================
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;
 COMMIT;

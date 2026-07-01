@@ -12,6 +12,9 @@ Public API
 open_db(db_path, *, readonly=False)  → sqlite3.Connection
 claim_stage_lease(conn, batch_id, stage, orchestrator_id, ttl_seconds)  → dict
 release_stage_lease(conn, lease_id, orchestrator_id)  → bool
+request_input_staging(conn, ...)  → dict
+mark_input_staging_status(conn, staging_id, status, ...)  → dict
+get_completed_input_staging_batch_ids(conn, stage, batch_ids)  → set[str]
 ingest_run_report(conn, run_report_path)  → dict
 get_batches_needing_raw_to_jpg(conn, *, site=None, limit=200)  → list[dict]
 
@@ -39,55 +42,36 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
 
-_JPG_EXTS = "('jpg','jpeg')"
+_JPG_EXTS = "('jpg','jpeg','JPG','JPEG')"
+_ACTIVE_STAGING_STATUSES = ("planned", "requested", "submitted", "active")
+_TERMINAL_STAGING_STATUSES = ("completed", "failed", "canceled")
+_VALID_STAGING_STATUSES = _ACTIVE_STAGING_STATUSES + _TERMINAL_STAGING_STATUSES
 
 def get_batches_needing_jpg_to_det(
     conn: sqlite3.Connection,
     *,
     site: Optional[str] = None,
     limit: int = 200,
+    batch_ids: Optional[Sequence[str]] = None,
 ) -> List[Dict]:
-    """
-    Return rows from ``v_batches_needing_jpg_to_det``.
+    batch_filter_sql = ""
+    filter_params: List = []
+    if batch_ids:
+        placeholders = ",".join("?" for _ in batch_ids)
+        batch_filter_sql = f"AND v.batch_id IN ({placeholders})"
+        filter_params = list(batch_ids)
 
-    The view already excludes:
-    * batches with existing detection files
-    * batches with an active, unexpired lease in stage_leases
-    * batches that have ever had a successful stage_run for jpg_to_det
-
-    Parameters
-    ----------
-    conn : sqlite3.Connection
-        Read-only or read-write connection.
-    site : str, optional
-        If given, restrict to batches whose JPG files are indexed under
-        this site (e.g. ``"JUNO"``).
-    limit : int
-        Maximum rows to return.
-
-    Returns
-    -------
-    list[dict]
-        Each dict has at minimum ``batch_id``, ``batch_date``,
-        ``jpg_count``, ``det_count``.  When *site* is given, also
-        includes ``site``, ``storage_domain``, ``storage_root``.
-    """
     if site:
         rows = conn.execute(
             f"""
             SELECT
-                v.batch_id,
-                v.batch_date,
-                v.jpg_count,
-                v.det_count,
-                g.site,
-                g.storage_domain,
-                g.storage_root
+                v.batch_id, v.batch_date, v.jpg_count, v.det_count,
+                g.site, g.storage_domain, g.storage_root
             FROM v_batches_needing_jpg_to_det v
             JOIN globus_file_index g
               ON  g.batch_id   = v.batch_id
@@ -97,21 +81,23 @@ def get_batches_needing_jpg_to_det(
              AND  g.file_ext   IN {_JPG_EXTS}
              AND  g.parent_dir = 'images'
              AND  g.site       = ?
+            WHERE 1=1 {batch_filter_sql}
             GROUP BY v.batch_id
             ORDER BY v.batch_date ASC, v.batch_id ASC
             LIMIT ?
             """,
-            (site, limit),
+            (site, *filter_params, limit),
         ).fetchall()
     else:
         rows = conn.execute(
-            """
-            SELECT batch_id, batch_date, jpg_count, det_count
-            FROM   v_batches_needing_jpg_to_det
-            ORDER  BY batch_date ASC, batch_id ASC
+            f"""
+            SELECT v.batch_id, v.batch_date, v.jpg_count, v.det_count
+            FROM   v_batches_needing_jpg_to_det v
+            WHERE  1=1 {batch_filter_sql}
+            ORDER  BY v.batch_date ASC, v.batch_id ASC
             LIMIT  ?
             """,
-            (limit,),
+            (*filter_params, limit),
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -148,7 +134,7 @@ class _TempConnection:
 
 
 # RAW extensions recognised by globus_file_index and v_batches_needing_raw_to_jpg.
-_RAW_EXTS = "('raw','arw','nef','cr2','cr3','dng','rw2','raf','orf')"
+_RAW_EXTS = "('RAW','raw','arw','nef','cr2','cr3','dng','rw2','raf','orf')"
 
 # Maps run_report.status values to the SQLite stage_runs CHECK constraint values.
 _STATUS_MAP: Dict[str, str] = {
@@ -355,6 +341,272 @@ def release_stage_lease(
 
 
 # ---------------------------------------------------------------------------
+# Input staging tracking
+# ---------------------------------------------------------------------------
+
+def request_input_staging(
+    conn: sqlite3.Connection,
+    *,
+    batch_id: str,
+    stage: str,
+    src_path: str,
+    dst_path: str,
+    src_endpoint: str = "",
+    dst_endpoint: str = "",
+    requested_by: str = "",
+    priority: int = 100,
+) -> Dict:
+    """
+    Idempotently record an input-staging request.
+
+    A request is unique by ``(batch_id, stage, src_path, dst_path)``. Existing
+    completed requests are returned as ``already_completed``. Existing active
+    requests are returned as ``already_active``. Failed or canceled requests are
+    reopened with a fresh ``requested`` status and cleared error/task metadata.
+    """
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT staging_id, status, globus_task_id
+            FROM staged_inputs
+            WHERE batch_id = ? AND stage = ? AND src_path = ? AND dst_path = ?
+            """,
+            (batch_id, stage, src_path, dst_path),
+        ).fetchone()
+
+        if row:
+            staging_id = row["staging_id"]
+            status = row["status"]
+            if status == "completed":
+                conn.execute("COMMIT")
+                return {
+                    "accepted": False,
+                    "state": "already_completed",
+                    "staging_id": staging_id,
+                    "batch_id": batch_id,
+                    "stage": stage,
+                    "status": status,
+                    "globus_task_id": row["globus_task_id"],
+                }
+            if status in _ACTIVE_STAGING_STATUSES:
+                conn.execute("COMMIT")
+                return {
+                    "accepted": False,
+                    "state": "already_active",
+                    "staging_id": staging_id,
+                    "batch_id": batch_id,
+                    "stage": stage,
+                    "status": status,
+                    "globus_task_id": row["globus_task_id"],
+                }
+
+            conn.execute(
+                """
+                UPDATE staged_inputs
+                SET status = 'requested',
+                    src_endpoint = ?,
+                    dst_endpoint = ?,
+                    requested_by = ?,
+                    priority = ?,
+                    globus_task_id = NULL,
+                    error_summary = NULL,
+                    requested_at = ?,
+                    submitted_at = NULL,
+                    completed_at = NULL,
+                    updated_at = ?
+                WHERE staging_id = ?
+                """,
+                (
+                    src_endpoint,
+                    dst_endpoint,
+                    requested_by,
+                    int(priority),
+                    now_str,
+                    now_str,
+                    staging_id,
+                ),
+            )
+            conn.execute("COMMIT")
+            return {
+                "accepted": True,
+                "state": "reopened",
+                "staging_id": staging_id,
+                "batch_id": batch_id,
+                "stage": stage,
+                "status": "requested",
+            }
+
+        staging_id = str(uuid.uuid4())
+        conn.execute(
+            """
+            INSERT INTO staged_inputs (
+                staging_id, batch_id, stage,
+                src_endpoint, dst_endpoint, src_path, dst_path,
+                status, requested_by, priority, requested_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'requested', ?, ?, ?, ?)
+            """,
+            (
+                staging_id,
+                batch_id,
+                stage,
+                src_endpoint,
+                dst_endpoint,
+                src_path,
+                dst_path,
+                requested_by,
+                int(priority),
+                now_str,
+                now_str,
+            ),
+        )
+        conn.execute("COMMIT")
+        return {
+            "accepted": True,
+            "state": "created",
+            "staging_id": staging_id,
+            "batch_id": batch_id,
+            "stage": stage,
+            "status": "requested",
+        }
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+
+
+def mark_input_staging_status(
+    conn: sqlite3.Connection,
+    *,
+    staging_id: str,
+    status: str,
+    globus_task_id: Optional[str] = None,
+    error_summary: Optional[str] = None,
+) -> Dict:
+    """Update one staged-input row after transfer submission or polling."""
+    if status not in _VALID_STAGING_STATUSES:
+        raise ValueError(
+            f"Invalid input staging status {status!r}; expected one of {_VALID_STAGING_STATUSES}"
+        )
+
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    submitted_at = now_str if status in {"submitted", "active", "completed"} else None
+    completed_at = now_str if status in _TERMINAL_STAGING_STATUSES else None
+
+    row = conn.execute(
+        """
+        SELECT submitted_at, completed_at
+        FROM staged_inputs
+        WHERE staging_id = ?
+        """,
+        (staging_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"Unknown staging_id: {staging_id}")
+
+    conn.execute(
+        """
+        UPDATE staged_inputs
+        SET status = ?,
+            globus_task_id = COALESCE(?, globus_task_id),
+            error_summary = ?,
+            submitted_at = COALESCE(submitted_at, ?),
+            completed_at = COALESCE(completed_at, ?),
+            updated_at = ?
+        WHERE staging_id = ?
+        """,
+        (
+            status,
+            globus_task_id,
+            error_summary,
+            submitted_at,
+            completed_at,
+            now_str,
+            staging_id,
+        ),
+    )
+    conn.commit()
+
+    updated = conn.execute(
+        "SELECT * FROM staged_inputs WHERE staging_id = ?",
+        (staging_id,),
+    ).fetchone()
+    return dict(updated)
+
+
+def get_input_staging_requests(
+    conn: sqlite3.Connection,
+    *,
+    statuses: Optional[Sequence[str]] = None,
+    stage: Optional[str] = None,
+    require_globus_task_id: bool = False,
+    limit: int = 200,
+) -> List[Dict]:
+    """Return staged-input rows ordered for transfer execution/polling."""
+    clauses: List[str] = []
+    params: List[object] = []
+
+    if statuses:
+        invalid = [s for s in statuses if s not in _VALID_STAGING_STATUSES]
+        if invalid:
+            raise ValueError(f"Invalid input staging statuses: {invalid}")
+        placeholders = ",".join("?" for _ in statuses)
+        clauses.append(f"status IN ({placeholders})")
+        params.extend(statuses)
+
+    if stage:
+        clauses.append("stage = ?")
+        params.append(stage)
+
+    if require_globus_task_id:
+        clauses.append("globus_task_id IS NOT NULL")
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(int(limit))
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM staged_inputs
+        {where}
+        ORDER BY priority ASC, requested_at ASC, batch_id ASC
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_completed_input_staging_batch_ids(
+    conn: sqlite3.Connection,
+    *,
+    stage: str,
+    batch_ids: Sequence[str],
+) -> set[str]:
+    """Return batch_ids with completed input staging for the given stage."""
+    unique_batch_ids = list(dict.fromkeys(batch_ids))
+    if not unique_batch_ids:
+        return set()
+
+    placeholders = ",".join("?" for _ in unique_batch_ids)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT batch_id
+        FROM staged_inputs
+        WHERE stage = ?
+          AND status = 'completed'
+          AND batch_id IN ({placeholders})
+        """,
+        [stage, *unique_batch_ids],
+    ).fetchall()
+    return {row["batch_id"] for row in rows}
+
+
+# ---------------------------------------------------------------------------
 # Run report ingestion
 # ---------------------------------------------------------------------------
 
@@ -501,33 +753,23 @@ def get_batches_needing_raw_to_jpg(
     *,
     site: Optional[str] = None,
     limit: int = 200,
+    batch_ids: Optional[Sequence[str]] = None,
 ) -> List[Dict]:
     """
     Return rows from ``v_batches_needing_raw_to_jpg``.
-
-    The view already excludes:
-    * batches with existing JPG files in semifield-developed-images/*/images/
-    * batches with an active, unexpired lease in stage_leases
-    * batches that have ever had a successful stage_run for raw_to_jpg
-
-    Parameters
-    ----------
-    conn : sqlite3.Connection
-        Read-only or read-write connection.
-    site : str, optional
-        If given, restrict to batches whose RAW files are indexed under this
-        site (e.g. ``"JUNO"``).  Implemented via a JOIN on globus_file_index
-        because the view does not expose site directly.
-    limit : int
-        Maximum rows to return.
-
-    Returns
-    -------
-    list[dict]
-        Each dict has at minimum ``batch_id``, ``batch_date``,
-        ``raw_file_count``, ``jpg_file_count``.  When *site* is given, also
-        includes ``site``, ``storage_domain``, ``storage_root``.
+    ...
+    batch_ids : sequence of str, optional
+        If given, restrict to these batch_ids. Applied in SQL *before*
+        ``limit`` so targeted batches are never truncated out by the
+        default row limit.
     """
+    batch_filter_sql = ""
+    filter_params: List = []
+    if batch_ids:
+        placeholders = ",".join("?" for _ in batch_ids)
+        batch_filter_sql = f"AND v.batch_id IN ({placeholders})"
+        filter_params = list(batch_ids)
+
     if site:
         rows = conn.execute(
             f"""
@@ -547,20 +789,22 @@ def get_batches_needing_raw_to_jpg(
              AND  g.is_current = 1
              AND  g.file_ext   IN {_RAW_EXTS}
              AND  g.site       = ?
+            WHERE 1=1 {batch_filter_sql}
             GROUP BY v.batch_id
-            ORDER BY v.batch_date ASC, v.batch_id ASC
+            ORDER BY v.batch_date DESC, v.batch_id DESC
             LIMIT ?
             """,
-            (site, limit),
+            (site, *filter_params, limit),
         ).fetchall()
     else:
         rows = conn.execute(
-            """
-            SELECT batch_id, batch_date, raw_file_count, jpg_file_count
-            FROM   v_batches_needing_raw_to_jpg
-            ORDER  BY batch_date ASC, batch_id ASC
+            f"""
+            SELECT v.batch_id, v.batch_date, v.raw_file_count, v.jpg_file_count
+            FROM   v_batches_needing_raw_to_jpg v
+            WHERE  1=1 {batch_filter_sql}
+            ORDER  BY v.batch_date ASC, v.batch_id ASC
             LIMIT  ?
             """,
-            (limit,),
+            (*filter_params, limit),
         ).fetchall()
     return [dict(r) for r in rows]
