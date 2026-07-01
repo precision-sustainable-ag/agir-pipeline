@@ -802,7 +802,7 @@ def get_batches_needing_raw_to_jpg(
             SELECT v.batch_id, v.batch_date, v.raw_file_count, v.jpg_file_count
             FROM   v_batches_needing_raw_to_jpg v
             WHERE  1=1 {batch_filter_sql}
-            ORDER  BY v.batch_date ASC, v.batch_id ASC
+            ORDER  BY v.batch_date DESC, v.batch_id DESC
             LIMIT  ?
             """,
             (*filter_params, limit),
