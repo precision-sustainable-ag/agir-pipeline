@@ -11,3 +11,6 @@ examples/
 !docs/examples
 scripts/*.txt
 .pytest_cache/
+logs/
+uv.lock
+run.sh

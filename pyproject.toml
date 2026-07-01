@@ -8,7 +8,12 @@ requires-python = ">=3.12"
 # Core deps: only what "agir_db" truly needs at runtime.
 dependencies = [
   "psycopg2-binary>=2.9.0",
+  "pycolmap",
   "pyyaml>=6.0",
+  "pidng>=4.0.9",
+  "pytz>=2026.2",
+  "opencv-python>=4.13.0.92"
+
 ]
 
 [project.optional-dependencies]
@@ -89,7 +94,6 @@ build-backend = "setuptools.build_meta"
 "stages.det_to_seg" = "stages/det_to_seg"
 "stages.raw_to_jpg" = "stages/raw_to_jpg"
 "orchestrator" = "orchestrator"
-"orchestrator.manual" = "orchestrator/manual"
 
 [tool.setuptools]
 packages = [
@@ -100,8 +104,7 @@ packages = [
     "stages.jpg_to_det",
     "stages.det_to_seg",
     "stages.raw_to_jpg",
-    "orchestrator",
-    "orchestrator.manual",
+    "orchestrator"
 ]
 
 [tool.setuptools.package-data]

@@ -1,0 +1,71 @@
+# configs/atlas_jpg_to_det.yaml
+# Configuration for jpg_to_det on Atlas (GPU cluster).
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+paths:
+  db: /project/dash_agir/globus_index/globus_file_index.sqlite3
+  uv_env: /project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/activate
+  locks_root: /90daydata/dash_agir/locks
+
+  agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
+
+  # Detection YAML config passed to jpg_to_det --c
+  stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/configs/jpg_to_det.yaml
+
+  # Detection model weights passed to jpg_to_det --m
+  det_model_path: /90daydata/dash_agir/semifield-tools/models/plant_detector/With_Synthetic_Train_Data/weights/last.pt
+
+  # JPG inputs live here: <input_staging_root>/<batch_id>/images/
+  input_staging_root: /90daydata/dash_agir/semifield-developed-images
+
+  # Per-run artifacts saved here after job completes
+  output_stage_runs: /90daydata/dash_agir/tmp/stage_runs
+
+  # Promote writes to: <final_dest_root>/<batch_id>/detections/
+  final_dest_root: /90daydata/dash_agir/semifield-developed-images
+
+  # Slurm job stdout/stderr logs
+  log_dir: /project/dash_agir/logs/jpg_to_det
+
+# ── Globus transfer settings ──────────────────────────────────────────────────
+transfer:
+  juno_endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
+  atlas_endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+
+  dry_run: false
+  poll_interval_seconds: 30
+  poll_timeout_seconds: 7200
+
+  routes:
+    jpg_to_det:
+      # Source on Juno: <source_root_juno>/<batch_id>/images/
+      source_root_juno: /LTS/project/dash_agir/semifield-developed-images
+      # Subdirectory under <input_staging_root>/<batch_id>/ where JPGs live
+      input_subdir: images
+
+# ── Slurm job parameters ──────────────────────────────────────────────────────
+slurm:
+  account: dash_agir
+  partition: gpu-a100
+  gres: gpu:1
+  cpus_per_task: 16
+  mem: 128G
+  time: "4:00:00"
+
+# ── Stage identity ────────────────────────────────────────────────────────────
+stage:
+  name: jpg_to_det
+  cli_module: stages.jpg_to_det.cli
+  cli_args: >-
+    --c $CONFIG_PATH
+    --m $MODEL_PATH
+    --i $TMPDIR/input
+    --o $TMPDIR/output
+    --t $CPUS
+    --batch-id $BATCH_ID
+    --device cuda
+  output_subdir: jpg_to_det
+  final_dest_suffix: detections
+  viz_sample_size: 50    # how many images to sample
+  viz_scale: 0.15        # downscale factor (raw_to_jpg only)
+  viz_max_width: 1800  
