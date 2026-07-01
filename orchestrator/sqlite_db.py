@@ -14,6 +14,7 @@ claim_stage_lease(conn, batch_id, stage, orchestrator_id, ttl_seconds)  → dict
 release_stage_lease(conn, lease_id, orchestrator_id)  → bool
 request_input_staging(conn, ...)  → dict
 mark_input_staging_status(conn, staging_id, status, ...)  → dict
+get_completed_input_staging_batch_ids(conn, stage, batch_ids)  → set[str]
 ingest_run_report(conn, run_report_path)  → dict
 get_batches_needing_raw_to_jpg(conn, *, site=None, limit=200)  → list[dict]
 
@@ -563,6 +564,7 @@ def get_input_staging_requests(
     *,
     statuses: Optional[Sequence[str]] = None,
     stage: Optional[str] = None,
+    require_globus_task_id: bool = False,
     limit: int = 200,
 ) -> List[Dict]:
     """Return staged-input rows ordered for transfer execution/polling."""
@@ -581,6 +583,9 @@ def get_input_staging_requests(
         clauses.append("stage = ?")
         params.append(stage)
 
+    if require_globus_task_id:
+        clauses.append("globus_task_id IS NOT NULL")
+
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(int(limit))
     rows = conn.execute(
@@ -594,6 +599,31 @@ def get_input_staging_requests(
         params,
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_completed_input_staging_batch_ids(
+    conn: sqlite3.Connection,
+    *,
+    stage: str,
+    batch_ids: Sequence[str],
+) -> set[str]:
+    """Return batch_ids with completed input staging for the given stage."""
+    unique_batch_ids = list(dict.fromkeys(batch_ids))
+    if not unique_batch_ids:
+        return set()
+
+    placeholders = ",".join("?" for _ in unique_batch_ids)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT batch_id
+        FROM staged_inputs
+        WHERE stage = ?
+          AND status = 'completed'
+          AND batch_id IN ({placeholders})
+        """,
+        [stage, *unique_batch_ids],
+    ).fetchall()
+    return {row["batch_id"] for row in rows}
 
 
 # ---------------------------------------------------------------------------

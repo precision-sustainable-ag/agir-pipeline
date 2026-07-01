@@ -5,7 +5,7 @@ Plan and execute input staging for SQLite-backed orchestration.
 This is the operator-facing wrapper around:
   * orchestrator.input_staging_planner  - find what should move
   * orchestrator.sqlite_db              - record staged_inputs state
-  * orchestrator.globus_transfer        - submit/poll Globus transfers
+  * orchestrator.globus_transfer        - submit Globus transfers
 """
 
 from __future__ import annotations
@@ -23,9 +23,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from orchestrator.config import load_stage_config
 from orchestrator.globus_transfer import (
-    TransferPollResult,
     TransferSubmitResult,
-    poll_task,
     submit_transfer,
 )
 from orchestrator.input_staging_planner import (
@@ -43,7 +41,6 @@ from orchestrator.sqlite_db import (
 logger = logging.getLogger(__name__)
 
 SubmitFunc = Callable[..., TransferSubmitResult]
-PollFunc = Callable[..., TransferPollResult]
 
 
 @dataclass(frozen=True)
@@ -67,9 +64,7 @@ def process_requests(
     *,
     requested_by: str,
     dry_run: bool,
-    poll: bool,
     submit_func: SubmitFunc = submit_transfer,
-    poll_func: PollFunc = poll_task,
 ) -> List[StageInputResult]:
     """
     Record and optionally submit planned staging requests.
@@ -131,17 +126,6 @@ def process_requests(
             status = updated["status"]
             message = submit_result.details
             globus_task_id = submit_result.globus_task_id
-
-            if poll and globus_task_id:
-                poll_result = poll_func(globus_task_id)
-                updated = mark_input_staging_status(
-                    conn,
-                    staging_id=staging_id,
-                    status=poll_result.status,
-                    error_summary=poll_result.details if poll_result.status in {"failed", "canceled"} else None,
-                )
-                status = updated["status"]
-                message = poll_result.details
         else:
             updated = mark_input_staging_status(
                 conn,
@@ -217,11 +201,6 @@ def main() -> int:
         help="Print planned requests only. Does not write SQLite or call Globus.",
     )
     parser.add_argument(
-        "--poll",
-        action="store_true",
-        help="Poll each submitted Globus task once and update staged_inputs.",
-    )
-    parser.add_argument(
         "--limit",
         type=int,
         default=50,
@@ -276,7 +255,6 @@ def main() -> int:
             requests,
             requested_by=args.requested_by,
             dry_run=args.dry_run,
-            poll=args.poll,
         )
     finally:
         conn.close()
