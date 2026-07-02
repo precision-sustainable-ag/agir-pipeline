@@ -109,6 +109,7 @@ packages = [
 
 [tool.setuptools.package-data]
 agir_db = ["py.typed"]
+orchestrator = ["templates/*.j2"]
 
 # =============================================================================
 # CODE FORMATTING & LINTING
