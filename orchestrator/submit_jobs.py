@@ -120,6 +120,21 @@ def _job_template_name(cfg: dict) -> str:
     return render_cfg.get("template", DEFAULT_JOB_TEMPLATE)
 
 
+def _visualization_command(stage_name: str, visualization_cfg: Optional[dict]) -> str:
+    if not visualization_cfg or not visualization_cfg.get("enabled", False):
+        return f'log "No visualization configured for stage {stage_name}"'
+
+    mode = visualization_cfg.get("mode", stage_name)
+    args = visualization_cfg.get("args", {})
+    parts = [("mode", mode), *args.items()]
+    lines = ['python "$AGIR_DIR/scripts/job/visualize.py" \\']
+    for index, (name, value) in enumerate(parts):
+        suffix = " \\" if index < len(parts) - 1 else ""
+        flag = str(name).replace("_", "-")
+        lines.append(f"    --{flag} {value}{suffix}")
+    return "\n".join(lines)
+
+
 def _render_slurm_script(
     *,
     stage_name: str,
@@ -215,11 +230,7 @@ def submit_jobs(
     cli_module     = stage_cfg["cli_module"]
     cli_args       = stage_cfg["cli_args"].strip()
     output_subdir  = stage_cfg.get("output_subdir", stage_name)
-
-    # Visualization config — read from stage block with sensible defaults
-    viz_sample_size = int(stage_cfg.get("viz_sample_size", 24))
-    viz_scale       = float(stage_cfg.get("viz_scale", 0.15))
-    viz_max_width   = int(stage_cfg.get("viz_max_width", 1800))
+    visualization_cfg = cfg.get("visualization")
 
     # ── Paths block ───────────────────────────────────────────────────────────
     paths          = cfg["paths"]
@@ -290,29 +301,7 @@ def submit_jobs(
             # Visualization destination: <final_dest_root>/<batch_id>/<stage>/
             viz_dest = f"{final_dest_root}/{batch_id}/{stage_name}"
 
-            # Build the visualize command for this stage
-            if stage_name == "raw_to_jpg":
-                viz_cmd = (
-                    f'python "$AGIR_DIR/scripts/job/visualize.py" \\\n'
-                    f'    --mode raw_to_jpg \\\n'
-                    f'    --images "$RUN_DIR/artifacts" \\\n'
-                    f'    --output "$VIZ_DIR" \\\n'
-                    f'    --sample-size {viz_sample_size} \\\n'
-                    f'    --scale {viz_scale}'
-                )
-            elif stage_name == "jpg_to_det":
-                viz_cmd = (
-                    f'python "$AGIR_DIR/scripts/job/visualize.py" \\\n'
-                    f'    --mode jpg_to_det \\\n'
-                    f'    --images "$TMPINPUT" \\\n'
-                    f'    --detections "$RUN_DIR/artifacts" \\\n'
-                    f'    --output "$VIZ_DIR" \\\n'
-                    f'    --sample-size {viz_sample_size} \\\n'
-                    f'    --max-width {viz_max_width}'
-                )
-            else:
-                # Unknown stage — skip visualization gracefully
-                viz_cmd = f'log "No visualization configured for stage {stage_name}"'
+            viz_cmd = _visualization_command(stage_name, visualization_cfg)
 
             # src_batch_path: per-stage subpath on Juno where inputs live
             src_batch_path = f"{src_root}/{batch_id}"
