@@ -5,12 +5,15 @@ scripts/job/submit.py
 
 Login-node entry point for the AgIR pipeline.
 
-Does exactly two things:
+Does exactly three things:
   1. Query SQLite to find batches that need processing.
-  2. Submit one Slurm job per batch (via orchestrator/submit_jobs.py).
+  2. Keep only batches whose inputs are completed in staged_inputs.
+  3. Submit one Slurm job per batch (via orchestrator/submit_jobs.py).
 
-Everything else (Globus transfer, stage CLI, promote, ingest) happens
-inside the Slurm job on the compute node.
+Input staging and Globus polling happen before this script, through the
+stage-input workflow. The Slurm job assumes inputs are already staged and
+handles downstream compute work: stage CLI, promote, artifact copy, ingest, and
+lease release.
 
 Usage
 -----
