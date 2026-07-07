@@ -97,8 +97,7 @@ log_section "[3/6] Running {{ stage_name }}"
 
 set +e
 python -m {{ cli_module }} \
-    {{ cli_args }} \
-    --batch-id "$BATCH_ID"
+    {{ cli_args }}
 STAGE_EXIT=$?
 set -e
 log "Stage exit code: $STAGE_EXIT"
