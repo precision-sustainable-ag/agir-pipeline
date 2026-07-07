@@ -31,15 +31,21 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 from typing import List
 
 import yaml
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from orchestrator.sqlite_db import (
     open_db,
     get_batches_needing_raw_to_jpg,
     get_batches_needing_jpg_to_det,
+    get_completed_input_staging_batch_ids,
 )
 from orchestrator.submit_jobs import submit_jobs, JobResult
 
@@ -95,6 +101,40 @@ def write_batch_file(path: Path, batch_ids: List[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(f"{b}\n" for b in batch_ids))
     logger.info("Wrote %d batch(es) to %s", len(batch_ids), path)
+
+
+def filter_completed_staged_inputs(cfg: dict, stage: str, batch_ids: List[str]) -> List[str]:
+    """Keep only batches whose inputs are marked completed in staged_inputs."""
+    if not batch_ids:
+        return []
+
+    db_path = Path(cfg["paths"]["db"])
+    conn = open_db(db_path, readonly=True, local_copy=True)
+    try:
+        completed = get_completed_input_staging_batch_ids(
+            conn,
+            stage=stage,
+            batch_ids=batch_ids,
+        )
+    finally:
+        conn.close()
+
+    staged = [batch_id for batch_id in batch_ids if batch_id in completed]
+    skipped = [batch_id for batch_id in batch_ids if batch_id not in completed]
+    if skipped:
+        logger.info(
+            "Skipping %d batch(es) without completed input staging for %s: %s",
+            len(skipped),
+            stage,
+            ", ".join(skipped[:10]) + (" ..." if len(skipped) > 10 else ""),
+        )
+    logger.info(
+        "Input staging gate kept %d/%d batch(es) for %s",
+        len(staged),
+        len(batch_ids),
+        stage,
+    )
+    return staged
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +220,8 @@ def main() -> int:
         logger.info("Loaded %d batch(es) from %s", len(batch_ids), args.batches)
     else:
         batch_ids = find_batches(cfg, args.stage, site=args.site, limit=args.limit)
+
+    batch_ids = filter_completed_staged_inputs(cfg, args.stage, batch_ids)
 
     if not batch_ids:
         logger.info("No batches to process.")
