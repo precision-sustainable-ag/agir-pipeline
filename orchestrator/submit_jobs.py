@@ -96,6 +96,7 @@ class JobResult(NamedTuple):
 # ---------------------------------------------------------------------------
 
 _TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+DEFAULT_JOB_TEMPLATE = "slurm_job.sh.j2"
 
 
 def _template_env():
@@ -112,6 +113,11 @@ def _template_env():
 def _render_template(template_name: str, context: dict) -> str:
     template = _template_env().get_template(template_name)
     return template.render(**context)
+
+
+def _job_template_name(cfg: dict) -> str:
+    render_cfg = cfg.get("render", {})
+    return render_cfg.get("template", DEFAULT_JOB_TEMPLATE)
 
 
 def _render_slurm_script(
@@ -143,6 +149,7 @@ def _render_slurm_script(
     cpus: int,
     mem: str,
     time_limit: str,
+    template_name: str = DEFAULT_JOB_TEMPLATE,
 ) -> str:
     context = {
         "stage_name": stage_name,
@@ -170,7 +177,7 @@ def _render_slurm_script(
         "mem": mem,
         "time_limit": time_limit,
     }
-    return _render_template("slurm_job.sh.j2", context)
+    return _render_template(template_name, context)
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +207,7 @@ def submit_jobs(
     list[JobResult]
     """
     cfg = load_stage_config(config_path)
+    template_name = _job_template_name(cfg)
 
     # ── Stage block ───────────────────────────────────────────────────────────
     stage_cfg      = cfg["stage"]
@@ -337,6 +345,7 @@ def submit_jobs(
                 cpus=cpus,
                 mem=mem,
                 time_limit=time_limit,
+                template_name=template_name,
             )
 
             script_path = script_dir / f"{stage_name}_{batch_id}.sh"

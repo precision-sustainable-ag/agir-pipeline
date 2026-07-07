@@ -20,6 +20,10 @@ stage:
   viz_scale: 0.15        # downscale factor (raw_to_jpg only)
   viz_max_width: 1800
 
+# ── Render template ───────────────────────────────────────────────────────────
+render:
+  template: slurm_job.sh.j2
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 paths:
   # Root of the agir-pipeline repository on the cluster.

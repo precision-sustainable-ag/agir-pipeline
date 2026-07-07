@@ -68,4 +68,8 @@ stage:
   final_dest_suffix: detections
   viz_sample_size: 50    # how many images to sample
   viz_scale: 0.15        # downscale factor (raw_to_jpg only)
-  viz_max_width: 1800  
+  viz_max_width: 1800
+
+# ── Render template ───────────────────────────────────────────────────────────
+render:
+  template: slurm_job.sh.j2
