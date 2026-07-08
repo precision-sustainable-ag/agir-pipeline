@@ -8,8 +8,9 @@ The login node does exactly two things:
   1. Claim an exclusive lease in SQLite (prevents duplicate submissions).
   2. Render a per-batch Slurm script and call sbatch.
 
-Everything else — Globus transfer, stage CLI, promote, ingest — happens
-*inside* the Slurm job on the compute node.
+Input staging happens before submission. Everything downstream — stage CLI,
+promote, artifact copy, ingest — happens inside the Slurm job on the compute
+node.
 
 Stage identity and the CLI invocation are declared in the config YAML
 under a ``stage:`` block so this module works for any pipeline stage
@@ -49,8 +50,8 @@ script and may reference any variable set earlier in that script
 $FINAL_DEST, $AGIR_DIR, ...).
 
 Generated job script lifecycle (on compute node):
-  1. Globus transfer  Juno → 90daydata
-  2. cp              90daydata → $TMPDIR/input
+  1. validate staged inputs already exist
+  2. rsync           staged inputs → $TMPDIR/input
   3. python -m       stage CLI
   4. python          promote script
   5. rsync           $TMPDIR/output → 90daydata/stage_runs/<run_id>/
@@ -94,253 +95,44 @@ class JobResult(NamedTuple):
 # Slurm script rendering
 # ---------------------------------------------------------------------------
 
-_SLURM_TEMPLATE = """\
-#!/usr/bin/env bash
-#SBATCH --job-name={stage_name}_{batch_id}
-#SBATCH --account={account}
-#SBATCH --partition={partition}
-{gres_line}
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task={cpus}
-#SBATCH --mem={mem}
-#SBATCH --time={time_limit}
-#SBATCH -o {log_dir}/{batch_id}-%j.out
-#SBATCH -e {log_dir}/{batch_id}-%j.err
+_TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+DEFAULT_JOB_TEMPLATE = "slurm_job.sh.j2"
 
-# ── Job-level constants ───────────────────────────────────────────────────────
-BATCH_ID="{batch_id}"
-LEASE_ID="{lease_id}"
-ORCHESTRATOR_ID="{orchestrator_id}"
-AGIR_DIR="{agir_pipeline_dir}"
-CONFIG_PATH="{stage_config}"
-MODEL_PATH="{model_path}"
-CPUS={cpus}
-DB_PATH="{db_path}"
 
-SRC_ENDPOINT="{src_endpoint}"
-DST_ENDPOINT="{dst_endpoint}"
-# Source is the per-batch subdirectory on Juno LTS
-SRC_BATCH_PATH="{src_batch_path}"
-INPUT_STAGING_DIR="{input_staging_dir}"
+def _template_env():
+    from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-OUTPUT_STAGE_RUNS="{output_stage_runs}"
-FINAL_DEST="{final_dest}"
+    return Environment(
+        loader=FileSystemLoader(_TEMPLATE_DIR),
+        undefined=StrictUndefined,
+        trim_blocks=True,
+        lstrip_blocks=True,
+    )
 
-# ── Logging helpers ───────────────────────────────────────────────────────────
-JOB_LOG="{log_dir}/{batch_id}-${{SLURM_JOB_ID}}.log"
 
-log() {{
-    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$JOB_LOG"
-}}
-log_section() {{
-    log "════════════════════════════════════════"
-    log "$*"
-    log "════════════════════════════════════════"
-}}
-on_exit() {{
-    local rc=$?
-    if [[ $rc -ne 0 ]]; then
-        log "[ERROR] Job exited with code $rc"
-    fi
-    log "Job finished — exit=$rc"
-}}
-trap on_exit EXIT
-set -euo pipefail
+def _render_template(template_name: str, context: dict) -> str:
+    template = _template_env().get_template(template_name)
+    return template.render(**context)
 
-# ── Environment ───────────────────────────────────────────────────────────────
-source "{uv_env}"
-cd "$AGIR_DIR"
-export PYTHONPATH="$AGIR_DIR${{PYTHONPATH:+:$PYTHONPATH}}"
 
-export OMP_NUM_THREADS=1
-export OPENBLAS_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export NUMEXPR_NUM_THREADS=1
+def _job_template_name(cfg: dict) -> str:
+    render_cfg = cfg.get("render", {})
+    return render_cfg.get("template", DEFAULT_JOB_TEMPLATE)
 
-log_section "{stage_name} starting"
-log "Batch:   $BATCH_ID"
-log "Node:    $(hostname -f)"
-log "Job ID:  $SLURM_JOB_ID"
 
-# ── Step 1: Globus transfer Juno → 90daydata ──────────────────────────────────
-log_section "[1/5] Globus transfer"
-log "Source: $SRC_BATCH_PATH"
-log "Dest:   $DST_ENDPOINT:$INPUT_STAGING_DIR"
+def _visualization_command(stage_name: str, visualization_cfg: Optional[dict]) -> str:
+    if not visualization_cfg or not visualization_cfg.get("enabled", False):
+        return f'log "No visualization configured for stage {stage_name}"'
 
-mkdir -p "$INPUT_STAGING_DIR"
-
-set +e
-EXISTING=$(find "$INPUT_STAGING_DIR" -maxdepth 1 -type f 2>/dev/null | wc -l)
-set -e
-
-if [[ "$EXISTING" -gt 0 ]]; then
-    log "Already staged — $EXISTING file(s) found — skipping Globus transfer"
-else
-    log "No files found locally — initiating Globus transfer ..."
-
-    TRANSFER_OUT=$(mktemp)
-    set +e
-    globus transfer \\
-        --recursive \\
-        --sync-level mtime \\
-        --label "{stage_name}-$BATCH_ID-$SLURM_JOB_ID" \\
-        --format json \\
-        "$SRC_ENDPOINT:$SRC_BATCH_PATH" \\
-        "$DST_ENDPOINT:$INPUT_STAGING_DIR" \\
-        > "$TRANSFER_OUT" 2>&1
-    TRANSFER_RC=$?
-    set -e
-
-    cat "$TRANSFER_OUT" | tee -a "$JOB_LOG"
-
-    if [[ $TRANSFER_RC -ne 0 ]]; then
-        log "[ERROR] globus transfer failed (exit=$TRANSFER_RC)"
-        rm -f "$TRANSFER_OUT"
-        python "$AGIR_DIR/scripts/job/ingest_and_release.py" \\
-            --db "$DB_PATH" \\
-            --lease-id "$LEASE_ID" \\
-            --orchestrator-id "$ORCHESTRATOR_ID" \\
-            --release-reason "globus_transfer_failed"
-        exit 1
-    fi
-
-    TASK_ID=$(python3 -c "import json,sys; print(json.load(open('$TRANSFER_OUT'))['task_id'])")
-    rm -f "$TRANSFER_OUT"
-    log "Transfer submitted: task_id=$TASK_ID"
-
-    set +e
-    globus task wait --timeout 7200 --polling-interval 30 "$TASK_ID"
-    WAIT_RC=$?
-    set -e
-
-    if [[ $WAIT_RC -ne 0 ]]; then
-        log "[ERROR] globus task wait failed (exit=$WAIT_RC)"
-        python "$AGIR_DIR/scripts/job/ingest_and_release.py" \\
-            --db "$DB_PATH" \\
-            --lease-id "$LEASE_ID" \\
-            --orchestrator-id "$ORCHESTRATOR_ID" \\
-            --release-reason "globus_transfer_failed"
-        exit 1
-    fi
-    log "Transfer complete"
-fi
-
-FILE_COUNT=$(find "$INPUT_STAGING_DIR" -maxdepth 1 -type f | wc -l)
-log "Files available: $FILE_COUNT"
-if [[ "$FILE_COUNT" -eq 0 ]]; then
-    log "[ERROR] No input files found at $INPUT_STAGING_DIR"
-    python "$AGIR_DIR/scripts/job/ingest_and_release.py" \\
-        --db "$DB_PATH" \\
-        --lease-id "$LEASE_ID" \\
-        --orchestrator-id "$ORCHESTRATOR_ID" \\
-        --release-reason "no_input_files"
-    exit 1
-fi
-
-# ── Step 2: Copy inputs to TMPDIR ─────────────────────────────────────────────
-log_section "[2/6] Copy inputs to TMPDIR"
-TMPINPUT="$TMPDIR/input"
-TMPOUTPUT="$TMPDIR/output"
-mkdir -p "$TMPINPUT" "$TMPOUTPUT"
-
-rsync -av "$INPUT_STAGING_DIR"/. "$TMPINPUT"/
-log "Copied $FILE_COUNT file(s) to $TMPINPUT"
-
-# ── Step 3: Run stage CLI ─────────────────────────────────────────────────────
-log_section "[3/6] Running {stage_name}"
-
-set +e
-python -m {cli_module} \\
-    {cli_args} \\
-    --batch-id "$BATCH_ID"
-STAGE_EXIT=$?
-set -e
-log "Stage exit code: $STAGE_EXIT"
-
-# Resolve run dir from output
-RUN_DIR=$(ls -td "$TMPOUTPUT/{output_subdir}"/*/  2>/dev/null | head -1)
-RUN_ID=$(basename "$RUN_DIR" 2>/dev/null || echo "unknown")
-
-if [[ -z "$RUN_DIR" || ! -d "$RUN_DIR" ]]; then
-    log "[ERROR] Could not resolve run directory under $TMPOUTPUT/{output_subdir}"
-    python "$AGIR_DIR/scripts/job/ingest_and_release.py" \\
-        --db "$DB_PATH" \\
-        --lease-id "$LEASE_ID" \\
-        --orchestrator-id "$ORCHESTRATOR_ID" \\
-        --release-reason "no_run_dir"
-    exit 1
-fi
-log "Run dir: $RUN_DIR"
-log "Run ID:  $RUN_ID"
-
-# ── Step 4: Visualize sample ──────────────────────────────────────────────────
-log_section "[4/6] Generating visualization sample"
-VIZ_DIR="$TMPDIR/visualizations"
-mkdir -p "$VIZ_DIR"
-VIZ_EXIT=0
-
-if [[ "$STAGE_EXIT" -le 1 ]]; then
-    set +e
-    {viz_cmd}
-    VIZ_EXIT=$?
-    set -e
-    if [[ $VIZ_EXIT -eq 0 ]]; then
-        log "Visualization sample written to $VIZ_DIR"
-    else
-        log "[WARN] Visualization step exited $VIZ_EXIT — continuing"
-        VIZ_EXIT=0   # non-fatal
-    fi
-else
-    log "Skipping visualization — stage_exit=$STAGE_EXIT"
-fi
-
-# ── Step 5: Promote outputs ───────────────────────────────────────────────────
-log_section "[5/6] Promoting outputs"
-PROMOTE_EXIT=0
-VIZ_DEST="{viz_dest}"
-
-if [[ "$STAGE_EXIT" -le 1 ]]; then
-    mkdir -p "$FINAL_DEST"
-    set +e
-    python "$AGIR_DIR/scripts/job/promote.py" \\
-        --run-dir "$RUN_DIR" \\
-        --dest "$FINAL_DEST"
-    PROMOTE_EXIT=$?
-    set -e
-    log "Promote exit: $PROMOTE_EXIT"
-
-    # Promote visualization sample (non-fatal)
-    if [[ -d "$VIZ_DIR" && "$(ls -A "$VIZ_DIR" 2>/dev/null)" ]]; then
-        mkdir -p "$VIZ_DEST"
-        VIZ_ZIP="$TMPDIR/{stage_name}_sample_${{BATCH_ID}}.zip"
-        zip -j "$VIZ_ZIP" "$VIZ_DIR"/*
-        cp "$VIZ_ZIP" "$VIZ_DEST/"
-        log "Visualization sample zipped and promoted to $VIZ_DEST"
-    else
-        log "No visualization files to promote"
-    fi
-else
-    log "Skipping promotion — stage_exit=$STAGE_EXIT"
-fi
-
-# ── Step 6: Copy artifacts to 90daydata and ingest ───────────────────────────
-log_section "[6/6] Copy artifacts + ingest"
-ARTIFACT_DEST="$OUTPUT_STAGE_RUNS/$RUN_ID"
-mkdir -p "$ARTIFACT_DEST"
-rsync -a "$RUN_DIR/" "$ARTIFACT_DEST/"
-log "Artifacts saved to $ARTIFACT_DEST"
-
-RELEASE_REASON="stage_exit_${{STAGE_EXIT}}_promote_exit_${{PROMOTE_EXIT}}"
-python "$AGIR_DIR/scripts/job/ingest_and_release.py" \\
-    --db "$DB_PATH" \\
-    --run-report "$ARTIFACT_DEST/run_report.json" \\
-    --lease-id "$LEASE_ID" \\
-    --orchestrator-id "$ORCHESTRATOR_ID" \\
-    --release-reason "$RELEASE_REASON"
-
-log "DONE — stage={stage_name} batch=$BATCH_ID stage_exit=$STAGE_EXIT promote_exit=$PROMOTE_EXIT"
-"""
+    mode = visualization_cfg.get("mode", stage_name)
+    args = visualization_cfg.get("args", {})
+    parts = [("mode", mode), *args.items()]
+    lines = ['python "$AGIR_DIR/scripts/job/visualize.py" \\']
+    for index, (name, value) in enumerate(parts):
+        suffix = " \\" if index < len(parts) - 1 else ""
+        flag = str(name).replace("_", "-")
+        lines.append(f"    --{flag} {value}{suffix}")
+    return "\n".join(lines)
 
 
 def _render_slurm_script(
@@ -372,37 +164,35 @@ def _render_slurm_script(
     cpus: int,
     mem: str,
     time_limit: str,
+    template_name: str = DEFAULT_JOB_TEMPLATE,
 ) -> str:
-    gres_line = f"#SBATCH --gres={gres}" if gres else ""
-    return _SLURM_TEMPLATE.format(
-        stage_name=stage_name,
-        cli_module=cli_module,
-        cli_args=cli_args,
-        output_subdir=output_subdir,
-        viz_cmd=viz_cmd,
-        viz_dest=viz_dest,
-        batch_id=batch_id,
-        lease_id=lease_id,
-        orchestrator_id=orchestrator_id,
-        agir_pipeline_dir=agir_pipeline_dir,
-        stage_config=stage_config,
-        model_path=model_path,
-        uv_env=uv_env,
-        db_path=db_path,
-        src_endpoint=src_endpoint,
-        dst_endpoint=dst_endpoint,
-        src_batch_path=src_batch_path,
-        input_staging_dir=input_staging_dir,
-        output_stage_runs=output_stage_runs,
-        final_dest=final_dest,
-        log_dir=log_dir,
-        account=account,
-        partition=partition,
-        gres_line=gres_line,
-        cpus=cpus,
-        mem=mem,
-        time_limit=time_limit,
-    )
+    context = {
+        "stage_name": stage_name,
+        "cli_module": cli_module,
+        "cli_args": cli_args,
+        "output_subdir": output_subdir,
+        "viz_cmd": viz_cmd,
+        "viz_dest": viz_dest,
+        "batch_id": batch_id,
+        "lease_id": lease_id,
+        "orchestrator_id": orchestrator_id,
+        "agir_pipeline_dir": agir_pipeline_dir,
+        "stage_config": stage_config,
+        "model_path": model_path,
+        "uv_env": uv_env,
+        "db_path": db_path,
+        "input_staging_dir": input_staging_dir,
+        "output_stage_runs": output_stage_runs,
+        "final_dest": final_dest,
+        "log_dir": log_dir,
+        "account": account,
+        "partition": partition,
+        "gres": gres,
+        "cpus": cpus,
+        "mem": mem,
+        "time_limit": time_limit,
+    }
+    return _render_template(template_name, context)
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +222,7 @@ def submit_jobs(
     list[JobResult]
     """
     cfg = load_stage_config(config_path)
+    template_name = _job_template_name(cfg)
 
     # ── Stage block ───────────────────────────────────────────────────────────
     stage_cfg      = cfg["stage"]
@@ -439,11 +230,7 @@ def submit_jobs(
     cli_module     = stage_cfg["cli_module"]
     cli_args       = stage_cfg["cli_args"].strip()
     output_subdir  = stage_cfg.get("output_subdir", stage_name)
-
-    # Visualization config — read from stage block with sensible defaults
-    viz_sample_size = int(stage_cfg.get("viz_sample_size", 24))
-    viz_scale       = float(stage_cfg.get("viz_scale", 0.15))
-    viz_max_width   = int(stage_cfg.get("viz_max_width", 1800))
+    visualization_cfg = cfg.get("visualization")
 
     # ── Paths block ───────────────────────────────────────────────────────────
     paths          = cfg["paths"]
@@ -514,29 +301,7 @@ def submit_jobs(
             # Visualization destination: <final_dest_root>/<batch_id>/<stage>/
             viz_dest = f"{final_dest_root}/{batch_id}/{stage_name}"
 
-            # Build the visualize command for this stage
-            if stage_name == "raw_to_jpg":
-                viz_cmd = (
-                    f'python "$AGIR_DIR/scripts/job/visualize.py" \\\n'
-                    f'    --mode raw_to_jpg \\\n'
-                    f'    --images "$RUN_DIR/artifacts" \\\n'
-                    f'    --output "$VIZ_DIR" \\\n'
-                    f'    --sample-size {viz_sample_size} \\\n'
-                    f'    --scale {viz_scale}'
-                )
-            elif stage_name == "jpg_to_det":
-                viz_cmd = (
-                    f'python "$AGIR_DIR/scripts/job/visualize.py" \\\n'
-                    f'    --mode jpg_to_det \\\n'
-                    f'    --images "$TMPINPUT" \\\n'
-                    f'    --detections "$RUN_DIR/artifacts" \\\n'
-                    f'    --output "$VIZ_DIR" \\\n'
-                    f'    --sample-size {viz_sample_size} \\\n'
-                    f'    --max-width {viz_max_width}'
-                )
-            else:
-                # Unknown stage — skip visualization gracefully
-                viz_cmd = f'log "No visualization configured for stage {stage_name}"'
+            viz_cmd = _visualization_command(stage_name, visualization_cfg)
 
             # src_batch_path: per-stage subpath on Juno where inputs live
             src_batch_path = f"{src_root}/{batch_id}"
@@ -569,6 +334,7 @@ def submit_jobs(
                 cpus=cpus,
                 mem=mem,
                 time_limit=time_limit,
+                template_name=template_name,
             )
 
             script_path = script_dir / f"{stage_name}_{batch_id}.sh"

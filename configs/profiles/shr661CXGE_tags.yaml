@@ -26,7 +26,7 @@ camera:
   FNumber: 13                                 #	Rational	The F number.
   FocalPlaneXResolution: 289.6                     # 13376 / 46.2  # Rational Number of pixels per FocalPlaneResolutionUnit (37392) in ImageWidth direction for main image.
   FocalPlaneYResolution: 289.9                     # 9528 / 32.87  # Rational Number of pixels per FocalPlaneResolutionUnit (37391) in ImageLength direction for main image.
-  FocalPlaneResolutionUnit: 3                      # Short   Unit of measurement for FocalPlaneXResolution(37390) and FocalPlaneYResolution(37391). 3 means millimeters.
+  FocalPlaneResolutionUnit: 4                      # Short   Unit of measurement for FocalPlaneXResolution(37390) and FocalPlaneYResolution(37391). 4 means millimeters, 3 = centimeters.
   PixelSize: 3.45        # Pixel size in um (h and v are same)
 
 dng:

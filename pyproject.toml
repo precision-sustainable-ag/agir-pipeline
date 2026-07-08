@@ -12,8 +12,8 @@ dependencies = [
   "pyyaml>=6.0",
   "pidng>=4.0.9",
   "pytz>=2026.2",
-  "opencv-python>=4.13.0.92"
-
+  "opencv-python>=4.13.0.92",
+  "jinja2>=3.1.0",
 ]
 
 [project.optional-dependencies]
@@ -109,6 +109,7 @@ packages = [
 
 [tool.setuptools.package-data]
 agir_db = ["py.typed"]
+orchestrator = ["templates/*.j2"]
 
 # =============================================================================
 # CODE FORMATTING & LINTING
