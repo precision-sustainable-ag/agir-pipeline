@@ -25,6 +25,13 @@ log_error() {
 }
 trap log_error ERR
 
+RUNNING_COUNT=$(squeue -u "$USER" -n globus_index_sqlite -h | wc -l)
+
+if [ "${RUNNING_COUNT}" -gt 1 ]; then
+    echo "[WARN] Another globus_index_sqlite job is already running. Exiting to avoid overlap."
+    exit 0
+fi
+
 on_exit() {
     local exit_code=$?
     echo "[INFO] Script exiting with code ${exit_code} at $(date)"
@@ -106,8 +113,11 @@ echo "========================================"
 
 find "${LOG_DIR}" -name "*.log" -type f -mtime +30 -delete
 
-# Uncomment if you want this job to resubmit itself daily.
-# SCRIPT_PATH="$(readlink -f "$0")"
-# sbatch --begin=now+1days "${SCRIPT_PATH}"
+# Resubmit this job for tomorrow at midnight.
+SCRIPT_PATH="$(readlink -f "$0")"
+NEXT_MIDNIGHT=$(date -d "tomorrow 00:00" +"%Y-%m-%dT%H:%M:%S")
+
+echo "[INFO] Resubmitting ${SCRIPT_PATH} for ${NEXT_MIDNIGHT}."
+sbatch --begin="${NEXT_MIDNIGHT}" "${SCRIPT_PATH}"
 
 exit 0

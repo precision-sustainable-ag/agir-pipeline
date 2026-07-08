@@ -47,6 +47,7 @@ import argparse
 import logging
 import random
 from pathlib import Path
+import shutil
 
 import cv2
 
@@ -73,9 +74,16 @@ def _render_raw_to_jpg(image_path: Path, out_path: Path, scale: float) -> bool:
         logger.warning("Could not read: %s", image_path)
         return False
     h, w = im.shape[:2]
-    im = cv2.resize(im, (max(1, int(w * scale)), max(1, int(h * scale))))
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    ok = cv2.imwrite(str(out_path), im)
+
+    if scale != 1.0:
+        im = cv2.resize(im, (max(1, int(w * scale)), max(1, int(h * scale))))
+        ok = cv2.imwrite(str(out_path), im)
+    else:
+        # If scale is 1.0, just copy the file instead of re-encoding
+        shutil.copy(image_path, out_path)
+        ok = True
+
     if not ok:
         logger.warning("cv2.imwrite failed for %s", out_path)
     return ok
@@ -205,11 +213,18 @@ def main() -> int:
     )
 
     written = failed = 0
-    for image_path in sample:
+    # generate random list of indices of full-sized images to include in the sample (max 5)
+    fullsized_rdm_idx = random.sample(range(len(sample)), min(5, len(sample)))
+
+    for idx, image_path in enumerate(sample):
         out_path = args.output / image_path.name
 
         if args.mode == "raw_to_jpg":
+            if idx in fullsized_rdm_idx:
+                out_path_full_size = args.output / f"{image_path.stem}_fullsize.jpg"
+                ok = _render_raw_to_jpg(image_path, out_path_full_size, 1.0)  # full size        
             ok = _render_raw_to_jpg(image_path, out_path, args.scale)
+
         else:
             det_path = args.detections / f"{image_path.stem}.txt"
             ok = _render_jpg_to_det(image_path, det_path, out_path, args.max_width)
