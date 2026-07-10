@@ -32,6 +32,7 @@ from orchestrator.input_staging_planner import (
     plan_input_staging,
     requests_as_dicts,
 )
+from orchestrator.logging_utils import command_logging
 from orchestrator.sqlite_db import (
     mark_input_staging_status,
     open_db,
@@ -173,6 +174,31 @@ def print_results(results: Sequence[StageInputResult]) -> bool:
     return any_error
 
 
+def _resolve_log_dir(cfg: dict, override: Optional[Path], *, stage: str) -> Path:
+    if override is not None:
+        return override
+    configured = cfg.get("paths", {}).get("log_dir")
+    if configured:
+        return Path(configured)
+    return Path.cwd() / "logs" / stage
+
+
+def _log_results(results: Sequence[StageInputResult]) -> None:
+    counts: dict[str, int] = {}
+    for result in results:
+        counts[result.status] = counts.get(result.status, 0) + 1
+        logger.info(
+            "Input staging result batch_id=%s stage=%s status=%s staging_id=%s globus_task_id=%s message=%s",
+            result.batch_id,
+            result.stage,
+            result.status,
+            result.staging_id,
+            result.globus_task_id,
+            result.message,
+        )
+    logger.info("Input staging summary: %s", counts)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Plan and stage inputs for one pipeline stage."
@@ -221,6 +247,12 @@ def main() -> int:
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
+    parser.add_argument(
+        "--log-dir",
+        type=Path,
+        default=None,
+        help="Optional base directory for command logs. Defaults to paths.log_dir from config.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -231,36 +263,59 @@ def main() -> int:
 
     cfg = load_stage_config(args.config)
     batch_ids = load_batch_file(args.batches) if args.batches else None
+    log_dir = _resolve_log_dir(cfg, args.log_dir, stage=args.stage)
 
-    conn = open_db(cfg["paths"]["db"], readonly=args.dry_run)
-    try:
-        requests = plan_input_staging(
-            conn,
-            cfg,
-            stage=args.stage,
-            site=args.site,
-            limit=args.limit,
-            batch_ids=batch_ids,
+    with command_logging(
+        base_log_dir=log_dir,
+        command_name="stage_inputs",
+        log_level=args.log_level,
+    ) as log_paths:
+        logger.info("Writing command logs under %s", log_paths.directory)
+        logger.info(
+            "Starting input staging command stage=%s config=%s db=%s site=%s limit=%s batches=%s dry_run=%s requested_by=%s",
+            args.stage,
+            args.config,
+            cfg["paths"]["db"],
+            args.site,
+            args.limit,
+            args.batches,
+            args.dry_run,
+            args.requested_by,
         )
 
-        if not requests:
-            logger.info("No input staging requests found for stage=%s site=%s", args.stage, args.site)
-            return 0
+        conn = open_db(cfg["paths"]["db"], readonly=args.dry_run)
+        try:
+            requests = plan_input_staging(
+                conn,
+                cfg,
+                stage=args.stage,
+                site=args.site,
+                limit=args.limit,
+                batch_ids=batch_ids,
+            )
+            logger.info("Planned %d input staging request(s)", len(requests))
 
-        if args.dry_run:
-            print_planned_requests(requests)
+            if not requests:
+                print(f"No input staging requests found for stage={args.stage} site={args.site}")
+                logger.info("No input staging requests found for stage=%s site=%s", args.stage, args.site)
+                return 0
 
-        results = process_requests(
-            conn,
-            requests,
-            requested_by=args.requested_by,
-            dry_run=args.dry_run,
-        )
-    finally:
-        conn.close()
+            if args.dry_run:
+                print_planned_requests(requests)
 
-    any_error = print_results(results)
-    return 1 if any_error else 0
+            results = process_requests(
+                conn,
+                requests,
+                requested_by=args.requested_by,
+                dry_run=args.dry_run,
+            )
+        finally:
+            conn.close()
+
+        _log_results(results)
+        any_error = print_results(results)
+        logger.info("Finished input staging command exit_code=%s", 1 if any_error else 0)
+        return 1 if any_error else 0
 
 
 if __name__ == "__main__":
