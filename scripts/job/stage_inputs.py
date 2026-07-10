@@ -77,7 +77,22 @@ def process_requests(
     results: List[StageInputResult] = []
 
     for req in requests:
+        logger.info(
+            "Attempting input staging batch_id=%s stage=%s src=%s:%s dst=%s:%s dry_run=%s",
+            req.batch_id,
+            req.stage,
+            req.src_endpoint,
+            req.src_path,
+            req.dst_endpoint,
+            req.dst_path,
+            dry_run,
+        )
         if dry_run:
+            logger.info(
+                "Dry-run input staging planned batch_id=%s stage=%s",
+                req.batch_id,
+                req.stage,
+            )
             results.append(
                 StageInputResult(
                     batch_id=req.batch_id,
@@ -102,8 +117,24 @@ def process_requests(
             priority=req.priority,
         )
         staging_id = request_result["staging_id"]
+        logger.info(
+            "Recorded input staging request batch_id=%s stage=%s staging_id=%s accepted=%s state=%s status=%s",
+            req.batch_id,
+            req.stage,
+            staging_id,
+            request_result["accepted"],
+            request_result["state"],
+            request_result["status"],
+        )
 
         if not request_result["accepted"]:
+            logger.info(
+                "Skipping Globus submission for batch_id=%s stage=%s staging_id=%s because request status is %s",
+                req.batch_id,
+                req.stage,
+                staging_id,
+                request_result["status"],
+            )
             results.append(
                 StageInputResult(
                     batch_id=req.batch_id,
@@ -116,6 +147,12 @@ def process_requests(
             )
             continue
 
+        logger.info(
+            "Submitting Globus input staging transfer batch_id=%s stage=%s staging_id=%s",
+            req.batch_id,
+            req.stage,
+            staging_id,
+        )
         submit_result = submit_func(req)
         if submit_result.status == "submitted":
             updated = mark_input_staging_status(
@@ -127,6 +164,13 @@ def process_requests(
             status = updated["status"]
             message = submit_result.details
             globus_task_id = submit_result.globus_task_id
+            logger.info(
+                "Submitted Globus input staging transfer batch_id=%s stage=%s staging_id=%s globus_task_id=%s",
+                req.batch_id,
+                req.stage,
+                staging_id,
+                globus_task_id,
+            )
         else:
             updated = mark_input_staging_status(
                 conn,
@@ -137,6 +181,13 @@ def process_requests(
             status = updated["status"]
             message = submit_result.details
             globus_task_id = None
+            logger.error(
+                "Failed Globus input staging transfer batch_id=%s stage=%s staging_id=%s error=%s",
+                req.batch_id,
+                req.stage,
+                staging_id,
+                message,
+            )
 
         results.append(
             StageInputResult(
@@ -183,12 +234,51 @@ def _resolve_log_dir(cfg: dict, override: Optional[Path], *, stage: str) -> Path
     return Path.cwd() / "logs" / stage
 
 
+def _log_requested_batches(batch_ids: Optional[Sequence[str]], batch_file: Optional[Path]) -> None:
+    if not batch_ids:
+        logger.info("No batch list supplied; planning from readiness query.")
+        return
+
+    logger.info(
+        "Attempting input staging for %d requested batch(es) from %s",
+        len(batch_ids),
+        batch_file,
+    )
+    for batch_id in batch_ids:
+        logger.info("Requested input staging batch_id=%s", batch_id)
+
+
+def _warn_unplanned_requested_batches(
+    *,
+    requested_batch_ids: Optional[Sequence[str]],
+    requests: Sequence[StagingRequest],
+    stage: str,
+    site: str,
+) -> None:
+    if not requested_batch_ids:
+        return
+
+    planned = {request.batch_id for request in requests}
+    missing = [batch_id for batch_id in requested_batch_ids if batch_id not in planned]
+    for batch_id in missing:
+        logger.warning(
+            "Requested batch was not planned for input staging batch_id=%s stage=%s site=%s. "
+            "It was not returned by the readiness query; check the indexed source directory, "
+            "site filter, stage readiness, and existing staged_inputs state.",
+            batch_id,
+            stage,
+            site,
+        )
+
+
 def _log_results(results: Sequence[StageInputResult]) -> None:
     counts: dict[str, int] = {}
     for result in results:
         counts[result.status] = counts.get(result.status, 0) + 1
-        logger.info(
-            "Input staging result batch_id=%s stage=%s status=%s staging_id=%s globus_task_id=%s message=%s",
+        message = (
+            "Input staging result batch_id=%s stage=%s status=%s staging_id=%s globus_task_id=%s message=%s"
+        )
+        args = (
             result.batch_id,
             result.stage,
             result.status,
@@ -196,6 +286,10 @@ def _log_results(results: Sequence[StageInputResult]) -> None:
             result.globus_task_id,
             result.message,
         )
+        if result.status in {"failed", "canceled"}:
+            logger.warning(message, *args)
+        else:
+            logger.info(message, *args)
     logger.info("Input staging summary: %s", counts)
 
 
@@ -282,6 +376,7 @@ def main() -> int:
             args.dry_run,
             args.requested_by,
         )
+        _log_requested_batches(batch_ids, args.batches)
 
         conn = open_db(cfg["paths"]["db"], readonly=args.dry_run)
         try:
@@ -294,6 +389,12 @@ def main() -> int:
                 batch_ids=batch_ids,
             )
             logger.info("Planned %d input staging request(s)", len(requests))
+            _warn_unplanned_requested_batches(
+                requested_batch_ids=batch_ids,
+                requests=requests,
+                stage=args.stage,
+                site=args.site,
+            )
 
             if not requests:
                 print(f"No input staging requests found for stage={args.stage} site={args.site}")
