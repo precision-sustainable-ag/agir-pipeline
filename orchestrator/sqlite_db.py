@@ -9,7 +9,8 @@ and use *only* stdlib sqlite3 — no PostgreSQL AgirDB dependency.
 
 Public API
 ----------
-open_db(db_path, *, readonly=False)  → sqlite3.Connection
+open_db(db_path, *, readonly=False, local_copy=False, temp_dir=None)
+    → sqlite3.Connection
 claim_stage_lease(conn, batch_id, stage, orchestrator_id, ttl_seconds)  → dict
 release_stage_lease(conn, lease_id, orchestrator_id)  → bool
 request_input_staging(conn, ...)  → dict
@@ -156,6 +157,7 @@ def open_db(
     *,
     readonly: bool = False,
     local_copy: bool = False,
+    temp_dir: str | Path | None = None,
 ) -> sqlite3.Connection:
     """
     Open (or create) the SQLite database.
@@ -167,10 +169,13 @@ def open_db(
     readonly : bool
         If True, open without write pragmas.  No data is written.
     local_copy : bool
-        If True (and readonly=True), copy the DB to a temp file on local
-        disk before opening.  Use this when db_path is on a shared HPC
-        filesystem (Lustre, GPFS) where random I/O latency makes queries
-        very slow.  The temp file is deleted when the connection is closed.
+        If True (and readonly=True), copy the DB to a temporary file before
+        opening. Use this when querying the original DB directly is too slow.
+        The temporary file is deleted when the connection is closed.
+    temp_dir : str or Path, optional
+        Directory in which to create the temporary database copy. If omitted,
+        use the system temporary directory. This is useful on HPC login nodes
+        where the system temporary filesystem is too small for the index.
 
     Returns
     -------
@@ -182,9 +187,24 @@ def open_db(
     if readonly and local_copy:
         if not db_path.exists():
             raise FileNotFoundError(f"SQLite DB not found: {db_path}")
-        tmp = Path(tempfile.mktemp(suffix=".sqlite3"))
-        logger.debug("Copying DB to local scratch: %s -> %s", db_path, tmp)
-        shutil.copy2(db_path, tmp)
+
+        copy_dir = Path(temp_dir) if temp_dir is not None else None
+        if copy_dir is not None:
+            copy_dir.mkdir(parents=True, exist_ok=True)
+
+        with tempfile.NamedTemporaryFile(
+            prefix=f"{db_path.stem}.",
+            suffix=".sqlite3",
+            dir=copy_dir,
+            delete=False,
+        ) as tmp_file:
+            tmp = Path(tmp_file.name)
+        logger.debug("Copying DB to temporary storage: %s -> %s", db_path, tmp)
+        try:
+            shutil.copy2(db_path, tmp)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
         inner = sqlite3.connect(str(tmp), timeout=60)
         inner.row_factory = sqlite3.Row
         return _TempConnection(inner, tmp)
