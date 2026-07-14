@@ -62,10 +62,16 @@ SUPPORTED_STAGES = ("raw_to_jpg", "jpg_to_det")
 # ---------------------------------------------------------------------------
 
 def find_batches(cfg: dict, stage: str, *, site: str, limit: int) -> List[str]:
-    db_path    = Path(cfg["paths"]["db"])
+    db_path = Path(cfg["paths"]["db"])
+    db_temp_dir = cfg["paths"].get("db_temp_dir")
     locks_root = Path(cfg["paths"]["locks_root"])
 
-    conn = open_db(db_path, readonly=True, local_copy=True)
+    conn = open_db(
+        db_path,
+        readonly=True,
+        local_copy=True,
+        temp_dir=db_temp_dir,
+    )
     try:
         if stage == "raw_to_jpg":
             rows = get_batches_needing_raw_to_jpg(conn, site=site, limit=limit * 2)
@@ -112,7 +118,13 @@ def filter_completed_staged_inputs(cfg: dict, stage: str, batch_ids: List[str]) 
         return []
 
     db_path = Path(cfg["paths"]["db"])
-    conn = open_db(db_path, readonly=True, local_copy=True)
+    db_temp_dir = cfg["paths"].get("db_temp_dir")
+    conn = open_db(
+        db_path,
+        readonly=True,
+        local_copy=True,
+        temp_dir=db_temp_dir,
+    )
     try:
         completed = get_completed_input_staging_batch_ids(
             conn,
