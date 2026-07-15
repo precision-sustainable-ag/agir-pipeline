@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence
 
 from orchestrator.globus_transfer import TransferPollResult, poll_task
 from orchestrator.sqlite_db import get_input_staging_requests, mark_input_staging_status
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -68,11 +71,47 @@ def poll_staged_inputs(
         require_globus_task_id=True,
         limit=limit,
     )
+    logger.info(
+        "Found %d pollable input-staging row(s) stage=%s statuses=%s limit=%s",
+        len(rows),
+        stage,
+        ",".join(statuses),
+        limit,
+    )
 
     results: List[StagedInputPollResult] = []
     for row in rows:
         task_id = row.get("globus_task_id")
+        logger.info(
+            "Attempting input-staging poll batch_id=%s stage=%s staging_id=%s current_status=%s globus_task_id=%s",
+            row["batch_id"],
+            row["stage"],
+            row["staging_id"],
+            row["status"],
+            task_id,
+        )
         poll_result = poll_func(task_id)
+        if poll_result.status in {"failed", "canceled"}:
+            logger.warning(
+                "Globus poll returned terminal problem batch_id=%s stage=%s staging_id=%s globus_task_id=%s globus_status=%s mapped_status=%s details=%s",
+                row["batch_id"],
+                row["stage"],
+                row["staging_id"],
+                task_id,
+                poll_result.globus_status,
+                poll_result.status,
+                poll_result.details,
+            )
+        else:
+            logger.info(
+                "Globus poll completed batch_id=%s stage=%s staging_id=%s globus_task_id=%s globus_status=%s mapped_status=%s",
+                row["batch_id"],
+                row["stage"],
+                row["staging_id"],
+                task_id,
+                poll_result.globus_status,
+                poll_result.status,
+            )
         updated = mark_input_staging_status(
             conn,
             staging_id=row["staging_id"],
@@ -82,6 +121,14 @@ def poll_staged_inputs(
                 if poll_result.status in {"failed", "canceled"}
                 else None
             ),
+        )
+        logger.info(
+            "Updated input-staging row batch_id=%s stage=%s staging_id=%s status=%s->%s",
+            row["batch_id"],
+            row["stage"],
+            row["staging_id"],
+            row["status"],
+            updated["status"],
         )
         results.append(
             StagedInputPollResult(

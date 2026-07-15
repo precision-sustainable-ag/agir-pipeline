@@ -65,6 +65,10 @@ paths:
   # and have the schema from schemas/sqlite/pipeline.sql applied.
   db: /project/dash_agir/globus_index/globus_file_index.sqlite3
 
+  # Shared temporary directory for submit.py's read-only SQLite copies.
+  # Avoids filling the login node's system /tmp with the large file index.
+  db_temp_dir: /90daydata/dash_agir/tmp/db
+
   # Filesystem lock directory (one subdir per stage, one file per batch_id).
   # Used by find_raw_to_jpg.py to skip in-flight batches.
   locks_root: /project/dash_agir/locks

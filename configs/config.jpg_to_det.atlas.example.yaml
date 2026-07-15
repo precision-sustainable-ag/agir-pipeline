@@ -4,6 +4,9 @@
 # ── Paths ─────────────────────────────────────────────────────────────────────
 paths:
   db: /project/dash_agir/globus_index/globus_file_index.sqlite3
+  # Shared temporary directory for submit.py's read-only SQLite copies.
+  # Avoids filling the login node's system /tmp with the large file index.
+  db_temp_dir: /90daydata/dash_agir/tmp/db
   uv_env: /project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/activate
   locks_root: /90daydata/dash_agir/locks
 
