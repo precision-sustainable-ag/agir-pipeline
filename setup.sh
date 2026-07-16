@@ -6,7 +6,7 @@
 #   ./setup.sh --dev | --all
 #   ./setup.sh --hpc --dev
 #   ./setup.sh --local --all
-#   ./setup.sh --schema-only
+#   AGIR_SQLITE_DB=/path/to/pipeline.sqlite3 ./setup.sh --schema-only
 #   ./setup.sh --test-only
 #
 # Recreate env (non-interactive):
@@ -135,7 +135,7 @@ activate_or_create_venv() {
 # -----------------------------
 # Install / verify
 # -----------------------------
-install_agir() {
+install_pipeline() {
   local extras="${1:-}"  # "", "dev", "all"
 
   cd "${SCRIPT_DIR}"
@@ -149,64 +149,42 @@ install_agir() {
   fi
 }
 
-verify_agir() {
-  python -c "from agir_db import AgirDB; print('✓ agir_db import OK')" \
-    || die "Package import failed (agir_db)"
+verify_pipeline() {
   python -c "from orchestrator.config import load_stage_config; print('✓ orchestrator import OK')" \
     || die "Package import failed (orchestrator)"
+  python -c "from orchestrator.sqlite_db import open_db; print('✓ SQLite orchestration import OK')" \
+    || die "Package import failed (orchestrator.sqlite_db)"
 }
 
 # -----------------------------
 # DB helpers
 # -----------------------------
-maybe_load_hpc_modules() {
-  [[ "${AGIR_MODE}" == "hpc" ]] || return 0
-  command -v module &>/dev/null || return 0
-  module load postgresql || true
-}
+apply_schema() {
+  local schema_file="${SCRIPT_DIR}/schemas/sqlite/pipeline.sql"
+  local db_path="${AGIR_SQLITE_DB:-}"
 
-source_pg_coords_if_present() {
-  if [[ "${AGIR_MODE}" == "hpc" && -f "/project/dash_agir/postgres/pg_coords.env" ]]; then
-    # shellcheck disable=SC1091
-    source /project/dash_agir/postgres/pg_coords.env
-  elif [[ -f "${SCRIPT_DIR}/pg_coords.env" ]]; then
-    # shellcheck disable=SC1091
-    source "${SCRIPT_DIR}/pg_coords.env" || true
-  fi
-}
+  [[ -f "${schema_file}" ]] || die "Missing SQLite schema: ${schema_file}"
+  [[ -n "${db_path}" ]] || die "Set AGIR_SQLITE_DB to the target SQLite database path."
+  command -v python3 &>/dev/null || die "python3 is required to apply the SQLite schema."
 
-check_db() {
-  source_pg_coords_if_present
-  maybe_load_hpc_modules
+  log "Applying SQLite schema: ${schema_file} -> ${db_path}"
+  python3 -c '
+import sqlite3
+import sys
+from pathlib import Path
 
-  command -v psql &>/dev/null || return 1
-  [[ -n "${PGHOST:-}" ]] || return 1
-  psql -c "SELECT 1;" &>/dev/null
-}
-
-apply_schemas() {
-  local SCHEMA_DIR="${SCRIPT_DIR}/schemas"
-  [[ -d "${SCHEMA_DIR}" ]] || die "Missing schema dir: ${SCHEMA_DIR}"
-
-  check_db || die "DB not reachable. Set PG* env vars or source pg_coords.env; ensure psql exists."
-
-  log "Applying schemas..."
-  psql -f "${SCHEMA_DIR}/sql/source.globus_file_index.sql" || die "Failed: source schema"
-  psql -f "${SCHEMA_DIR}/sql/logs.transfer_requests.sql" || die "Failed: logs.transfer_requests"
-  psql -f "${SCHEMA_DIR}/sql/logs.transfer_runs.sql" || die "Failed: logs.transfer_runs"
-  psql -f "${SCHEMA_DIR}/sql/logs.stage_leases.sql" || die "Failed: logs.stage_leases"
-  psql -f "${SCHEMA_DIR}/sql/logs.stage_runs.sql" || die "Failed: logs.stage_runs"
-  psql -f "${SCHEMA_DIR}/sql/ops.orchestrator.sql" || die "Failed: ops orchestrator funcs"
-  psql -f "${SCHEMA_DIR}/views/report.missing_on_juno.sql" || die "Failed: report views"
-  psql -f "${SCHEMA_DIR}/views/report.batches_needing_input_staging.sql" || die "Failed: report.batches_needing_input_staging"
-  psql -f "${SCHEMA_DIR}/views/report.ready_work.sql" || die "Failed: report.ready_work"
+db_path = Path(sys.argv[1]).expanduser()
+schema_path = Path(sys.argv[2])
+db_path.parent.mkdir(parents=True, exist_ok=True)
+with sqlite3.connect(db_path) as conn:
+    conn.executescript(schema_path.read_text(encoding="utf-8"))
+' "${db_path}" "${schema_file}" || die "Failed to apply SQLite schema."
 }
 
 run_tests() {
   cd "${SCRIPT_DIR}"
-  [[ -f "tests/test_p1.py" ]] || { warn "No tests/test_p1.py found; skipping"; return 0; }
-  log "Running tests/test_p1.py"
-  python tests/test_p1.py
+  log "Running environment and SQLite schema smoke tests"
+  python tests/test_env.py
 }
 
 # -----------------------------
@@ -221,15 +199,15 @@ Options:
   --all            Install with all extras
   --hpc            Force HPC mode
   --local          Force local mode
-  --schema-only    Apply DB schemas only (no venv/install)
+  --schema-only    Apply the SQLite schema only (no venv/install)
   --test-only      Run tests only (assumes env already active)
   --help
 
 Env vars:
   AGIR_MODE=auto|hpc|local
   AGIR_RECREATE_ENV=1
+  AGIR_SQLITE_DB=/path/to/pipeline.sqlite3
   PYTHON_VERSION=3.12
-  PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD
 EOF
 }
 
@@ -240,7 +218,6 @@ main() {
   local install_extras=""     # "", "dev", "all"
   local do_install=1
   local do_verify=1
-  local do_schemas=1
   local do_tests=1
   local schema_only=0
   local test_only=0
@@ -253,7 +230,7 @@ main() {
       --hpc)  AGIR_MODE="hpc" ;;
       --local) AGIR_MODE="local" ;;
       --schema-only) schema_only=1; do_install=0; do_verify=0; do_tests=0 ;;
-      --test-only)   test_only=1; do_install=0; do_verify=0; do_schemas=0 ;;
+      --test-only)   test_only=1; do_install=0; do_verify=0 ;;
       --help) usage; exit 0 ;;
       *) die "Unknown option: $1" ;;
     esac
@@ -267,7 +244,7 @@ main() {
   configure_mode
 
   if [[ "${schema_only}" == "1" ]]; then
-    apply_schemas
+    apply_schema
     log "Done."
     exit 0
   fi
@@ -282,41 +259,25 @@ main() {
   activate_or_create_venv
 
   if [[ "${do_install}" == "1" ]]; then
-    install_agir "${install_extras}"
+    install_pipeline "${install_extras}"
   fi
   if [[ "${do_verify}" == "1" ]]; then
-    verify_agir
-  fi
-
-  if [[ "${do_schemas}" == "1" ]]; then
-    if check_db; then
-      apply_schemas
-    else
-      warn "DB not reachable; skipping schema apply."
-      warn "If on SciNet: start DB with your sbatch workflow, then rerun --schema-only."
-    fi
+    verify_pipeline
   fi
 
   if [[ "${do_tests}" == "1" ]]; then
-    if check_db; then
-      run_tests || warn "Tests failed"
-    else
-      warn "DB not reachable; skipping tests."
-    fi
+    run_tests || warn "Tests failed"
   fi
 
   echo ""
   log "Setup complete!"
   echo ""
   echo "Sanity check:"
-  echo "python -c 'from agir_db import AgirDB; db=AgirDB(); db.connect(); print(db.is_connected)'"
+  echo "python tests/test_env.py"
   echo ""
   echo "Next:"
   echo "  source ${VENV_PATH}/bin/activate"
-  echo "Next:"
-  echo "  source ${VENV_PATH}/bin/activate"
-  echo "  agir-run-stage --batches batches.txt --config configs/scinet_raw_to_jpg.yaml"
-  
+  echo "  python scripts/job/submit.py --help"
 }
 
 main "$@"

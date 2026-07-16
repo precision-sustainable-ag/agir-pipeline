@@ -1,13 +1,12 @@
 [project]
-name = "agir-db"
+name = "agir-pipeline"
 version = "1.2.0"
 description = "AgIR pipeline"
 license = { text = "MIT" }
 requires-python = ">=3.12"
 
-# Core deps: only what "agir_db" truly needs at runtime.
+# Core pipeline dependencies.
 dependencies = [
-  "psycopg2-binary>=2.9.0",
   "pycolmap",
   "pyyaml>=6.0",
   "pidng>=4.0.9",
@@ -97,7 +96,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = [
-    "agir_db",
     "stages",
     "stages.common",
     "stages.det_to_world",
@@ -108,7 +106,6 @@ packages = [
 ]
 
 [tool.setuptools.package-data]
-agir_db = ["py.typed"]
 orchestrator = ["templates/*.j2"]
 
 # =============================================================================
