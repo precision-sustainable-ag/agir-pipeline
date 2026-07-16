@@ -1,8 +1,7 @@
 # configs/globus_endpoint_config.example.yaml
 # Globus endpoint inventory configuration for globus_index.py
 #
-# This file mirrors the endpoint/root/state matrix from the original PostgreSQL
-# wrapper.
+# This file defines the endpoint/root/state matrix consumed by globus_index.py.
 #
 # Required keys per endpoint entry:
 #   endpoint, site, storage_domain, namespace, storage_root, data_state

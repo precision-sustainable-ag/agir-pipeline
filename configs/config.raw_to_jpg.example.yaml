@@ -56,13 +56,10 @@ paths:
   # SLURM job stdout/stderr logs.
   log_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs/raw_to_jpg
 
-  # ── SQLite DB (optional — enables SQLite mode) ────────────────────────────
-  # When this key is present, submit_jobs.py uses SQLite for lease claiming and
-  # the SLURM job calls scripts/sqlite/ingest_and_release.py instead of the
-  # PostgreSQL version.  When absent, the PostgreSQL AgirDB path is used.
-  #
-  # This must point to the same file populated by scripts/admin/globus_index.py
-  # and have the schema from schemas/sqlite/pipeline.sql applied.
+  # ── SQLite DB (required) ──────────────────────────────────────────
+  # Shared state for inventory, input staging, readiness, leases, and run
+  # ingestion. This must point to the file populated by
+  # scripts/admin/globus_index.py with schemas/sqlite/pipeline.sql applied.
   db: /project/dash_agir/globus_index/globus_file_index.sqlite3
 
   # Shared temporary directory for submit.py's read-only SQLite copies.
@@ -70,12 +67,8 @@ paths:
   db_temp_dir: /90daydata/dash_agir/tmp/db
 
   # Filesystem lock directory (one subdir per stage, one file per batch_id).
-  # Used by find_raw_to_jpg.py to skip in-flight batches.
+  # Used by submit.py to skip in-flight batches.
   locks_root: /project/dash_agir/locks
-
-  # ── Input manifests (PostgreSQL / windowed-transfer mode only) ────────────
-  # Not required in SQLite mode; leave empty or omit if paths.db is set.
-  input_manifest_root:
 
   # ── raw_to_jpg camera pipeline paths ─────────────────────────────────────
   rawtherapee_cli: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/squashfs-root/usr/bin/rawtherapee-cli
@@ -94,8 +87,8 @@ slurm:
   mem: 128G
   time: "4:00:00"
 
-# ── Globus transfer settings (PostgreSQL / windowed-transfer mode only) ────────
-# Not required in SQLite mode; omit this block if paths.db is set.
+# ── Globus input-staging settings ──────────────────────────────────────────
+# Used by stage_inputs.py and submit_jobs.py to map source and destination paths.
 transfer:
   juno_endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
   ceres_endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"

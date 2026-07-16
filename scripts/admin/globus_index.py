@@ -4,8 +4,8 @@
 Multiprocessing Globus file indexer for SQLite.
 
 This is a SQLite-oriented inventory scanner for AgIR storage locations.
-It preserves the complete source.globus_file_index column set from the
-PostgreSQL design while adding run tracking and current/stale inventory state.
+It stores the canonical file inventory fields together with run tracking and
+current/stale inventory state.
 
 Core behavior:
 - Full file/directory inventory from Globus `ls --format json`
@@ -19,7 +19,7 @@ Core behavior:
 SQLite notes:
 - Dates/timestamps are stored as ISO-8601 TEXT.
 - checksum is preserved but remains NULL unless a future scanner populates it.
-- The original PostgreSQL uniqueness rule is preserved:
+- File inventory rows use the uniqueness rule:
   UNIQUE(endpoint, data_state, storage_root, rel_path)
 """
 from __future__ import annotations
@@ -48,7 +48,7 @@ VALID_SITES = {"JUNO", "NCSU", "CERES", "ATLAS"}
 VALID_STORAGE_DOMAINS = {"screberg", "dash_agir", "national_plant_image_repository"}
 VALID_DATA_STATES = {"semifield-upload", "semifield-developed-images", "semifield-cutouts"}
 
-# Original globus_file_index columns from the PostgreSQL overview.
+# Canonical globus_file_index columns.
 BASE_GFI_COLUMNS = [
     "file_id",
     "endpoint",

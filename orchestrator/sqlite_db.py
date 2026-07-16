@@ -5,7 +5,7 @@ orchestrator/sqlite_db.py
 Minimal SQLite orchestration helpers for the AgIR pipeline.
 
 These functions operate on the schema defined in schemas/sqlite/pipeline.sql
-and use *only* stdlib sqlite3 — no PostgreSQL AgirDB dependency.
+and use only the Python standard-library sqlite3 module.
 
 Public API
 ----------
