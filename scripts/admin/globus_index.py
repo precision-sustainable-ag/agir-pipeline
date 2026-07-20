@@ -470,6 +470,30 @@ def upsert_rows(
     logger.info("Upserted %d rows into globus_file_index", len(rows))
 
 
+def commit_row_batch(
+    conn: sqlite3.Connection,
+    rows: List[Tuple],
+    run_id: int,
+    logger: logging.Logger,
+) -> None:
+    """Upsert one batch without holding the write lock during Globus crawling."""
+    if not rows:
+        return
+
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        upsert_rows(conn, rows, run_id, logger)
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+
+    logger.info("Committed row batch of %d rows", len(rows))
+
+
 def mark_stale_rows(conn: sqlite3.Connection, cfg: EndpointConfig, run_id: int, logger: logging.Logger) -> int:
     now = utc_now_iso()
     cur = conn.execute(
@@ -707,7 +731,6 @@ def crawl_tree_mp(
     cfg: EndpointConfig,
     run_id: int,
     batch_size: int,
-    commit_batch_size: int,
     max_workers: int,
     logger: logging.Logger,
 ) -> CrawlStats:
@@ -717,13 +740,11 @@ def crawl_tree_mp(
     dir_queue = deque([data_dir])
     futures: Dict = {}
     rows: List[Tuple] = []
-    rows_since_commit = 0
     max_inflight = max_workers * 4
 
     logger.info("Starting multiprocessing crawl at root: %s", data_dir)
     logger.info("max_workers=%d, max_inflight=%d", max_workers, max_inflight)
 
-    conn.execute("BEGIN IMMEDIATE;")
     try:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             while dir_queue or futures:
@@ -811,24 +832,14 @@ def crawl_tree_mp(
                             stats.total_files_seen += 1
 
                         if len(rows) >= batch_size:
-                            upsert_rows(conn, rows, run_id, logger)
+                            commit_row_batch(conn, rows, run_id, logger)
                             stats.total_batches_written += 1
-                            rows_since_commit += len(rows)
                             rows.clear()
 
-                            if rows_since_commit >= commit_batch_size:
-                                conn.commit()
-                                conn.execute("BEGIN IMMEDIATE;")
-                                logger.info("Committed after %d rows", rows_since_commit)
-                                rows_since_commit = 0
-
             if rows:
-                upsert_rows(conn, rows, run_id, logger)
+                commit_row_batch(conn, rows, run_id, logger)
                 stats.total_batches_written += 1
-                rows_since_commit += len(rows)
                 rows.clear()
-
-        conn.commit()
     except Exception:
         conn.rollback()
         raise
@@ -946,7 +957,6 @@ def run_one_config(
     conn: sqlite3.Connection,
     cfg: EndpointConfig,
     batch_size: int,
-    commit_batch_size: int,
     max_workers: int,
     clean_slate: bool,
     mark_stale: bool,
@@ -976,7 +986,6 @@ def run_one_config(
             cfg=cfg,
             run_id=run_id,
             batch_size=batch_size,
-            commit_batch_size=commit_batch_size,
             max_workers=max_workers,
             logger=logger,
         )
@@ -1026,7 +1035,11 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--batch-size", type=int, default=10_000, help="Rows per executemany upsert batch.")
-    parser.add_argument("--commit-batch-size", type=int, default=100_000, help="Rows between SQLite commits.")
+    parser.add_argument(
+        "--commit-batch-size",
+        type=int,
+        help="Deprecated; each --batch-size row batch is now committed immediately.",
+    )
     parser.add_argument("--max-workers", type=int, default=8, help="Number of worker processes for Globus ls.")
     parser.add_argument("--log-file", default="./globus_index_sqlite.log", help="Log file path.")
 
@@ -1090,7 +1103,11 @@ def main() -> None:
     logger.info("========================================")
     logger.info("SQLite DB: %s", args.db)
     logger.info("Batch size: %d", args.batch_size)
-    logger.info("Commit batch size: %d", args.commit_batch_size)
+    if args.commit_batch_size is not None:
+        logger.warning(
+            "--commit-batch-size is deprecated and ignored; each batch of %d rows is committed",
+            args.batch_size,
+        )
     logger.info("Max workers: %d", args.max_workers)
     logger.info("Clean slate: %s", args.clean_slate)
     logger.info("Mark stale: %s", not args.no_mark_stale)
@@ -1114,7 +1131,6 @@ def main() -> None:
                 conn=conn,
                 cfg=cfg,
                 batch_size=args.batch_size,
-                commit_batch_size=args.commit_batch_size,
                 max_workers=args.max_workers,
                 clean_slate=args.clean_slate,
                 mark_stale=not args.no_mark_stale,
