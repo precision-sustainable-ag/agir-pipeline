@@ -143,6 +143,23 @@ endpoints:
     namespace: "LTS"
     storage_root: "/LTS/project/national_plant_image_repository"
     data_state: "semifield-cutouts"
+  
+  - enabled: true
+    endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
+    site: "JUNO"
+    storage_domain: "national_plant_image_repository"
+    namespace: "LTS"
+    storage_root: "/LTS/project/national_plant_image_repository"
+    data_state: "semifield-utils"
+  
+  - enabled: true
+    endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
+    site: "JUNO"
+    storage_domain: "national_plant_image_repository"
+    namespace: "LTS"
+    storage_root: "/LTS/project/national_plant_image_repository"
+    data_state: "semifield-tools"
+  
 
   # ============================================================
   # CERES / dash_agir / 90daydata

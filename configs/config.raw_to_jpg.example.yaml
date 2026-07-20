@@ -54,7 +54,7 @@ paths:
   final_dest_root: /90daydata/dash_agir/semifield-developed-images
 
   # SLURM job stdout/stderr logs.
-  log_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs/raw_to_jpg
+  log_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs
 
   # ── SQLite DB (required) ──────────────────────────────────────────
   # Shared state for inventory, input staging, readiness, leases, and run
