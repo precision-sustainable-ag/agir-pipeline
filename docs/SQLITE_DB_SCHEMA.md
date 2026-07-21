@@ -583,20 +583,18 @@ Writable connections:
 - configure a 120-second busy timeout; and
 - use `synchronous=NORMAL`.
 
-Read-only-intent connections:
+Read-only connections:
 
 - require the database file to exist;
-- omit the writable connection pragmas; and
-- can query either the shared file or a temporary local copy.
+- enforce SQLite URI `mode=ro` and `query_only=ON`; and
+- can query either the shared file directly or a temporary snapshot.
 
-When `readonly=True` and `local_copy=True`, the helper copies the database to a
-unique temporary file and deletes the copy when the connection closes.
-`paths.db_temp_dir` selects the copy location used by `submit.py`.
+`submit.py` uses direct reads by default. Set `paths.db_read_mode: snapshot` to
+create a consistent SQLite backup in a unique temporary file instead;
+`paths.db_temp_dir` selects its location. The snapshot is deleted when its
+connection closes.
 
-The schema file configures write-ahead logging when it is applied. The current
-runtime write helper explicitly selects the delete journal mode when it opens a
-writable connection, so operators should treat the runtime helper's setting as
-the effective mode during orchestrator writes.
+The schema and runtime write helper both configure write-ahead logging.
 
 ## Transactions and Write Coordination
 
