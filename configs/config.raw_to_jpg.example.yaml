@@ -62,8 +62,11 @@ paths:
   # scripts/admin/globus_index.py with schemas/sqlite/pipeline.sql applied.
   db: /project/dash_agir/globus_index/globus_file_index.sqlite3
 
-  # Shared temporary directory for submit.py's read-only SQLite copies.
-  # Avoids filling the login node's system /tmp with the large file index.
+  # submit.py queries the shared DB directly by default. Use "snapshot" only
+  # as a fallback when direct queries perform poorly on the shared filesystem.
+  db_read_mode: direct  # direct | snapshot
+
+  # Used only when db_read_mode is "snapshot".
   db_temp_dir: /90daydata/dash_agir/tmp/db
 
   # Filesystem lock directory (one subdir per stage, one file per batch_id).

@@ -166,7 +166,7 @@ def open_db(
     db_path : str or Path
         Path to the SQLite file.
     readonly : bool
-        If True, open without write pragmas.  No data is written.
+        If True, enforce read-only access with SQLite URI mode and query_only.
     local_copy : bool
         If True (and readonly=True), create a consistent SQLite snapshot in a
         temporary file before opening. Use this when querying the original DB
@@ -221,13 +221,18 @@ def open_db(
             tmp.unlink(missing_ok=True)
             raise
         inner = sqlite3.connect(str(tmp), timeout=60)
+        inner.execute("PRAGMA query_only=ON;")
+        inner.execute("PRAGMA busy_timeout=60000;")
         inner.row_factory = sqlite3.Row
         return _TempConnection(inner, tmp)
 
     if readonly:
         if not db_path.exists():
             raise FileNotFoundError(f"SQLite DB not found: {db_path}")
-        conn = sqlite3.connect(str(db_path), timeout=60)
+        source_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        conn = sqlite3.connect(source_uri, uri=True, timeout=60)
+        conn.execute("PRAGMA query_only=ON;")
+        conn.execute("PRAGMA busy_timeout=60000;")
     else:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(db_path), timeout=120)

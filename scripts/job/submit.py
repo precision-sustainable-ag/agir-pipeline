@@ -61,17 +61,31 @@ SUPPORTED_STAGES = ("raw_to_jpg", "jpg_to_det")
 # Batch discovery
 # ---------------------------------------------------------------------------
 
-def find_batches(cfg: dict, stage: str, *, site: str, limit: int) -> List[str]:
-    db_path = Path(cfg["paths"]["db"])
-    db_temp_dir = cfg["paths"].get("db_temp_dir")
-    locks_root = Path(cfg["paths"]["locks_root"])
+def open_submission_read_db(cfg: dict):
+    """Open the shared DB directly by default, with snapshot mode as a fallback."""
+    paths = cfg["paths"]
+    db_path = Path(paths["db"])
+    read_mode = str(paths.get("db_read_mode", "direct")).strip().lower()
+    if read_mode not in {"direct", "snapshot"}:
+        raise ValueError(
+            f"Invalid paths.db_read_mode {read_mode!r}; expected 'direct' or 'snapshot'"
+        )
 
-    conn = open_db(
+    use_snapshot = read_mode == "snapshot"
+    db_temp_dir = paths.get("db_temp_dir") if use_snapshot else None
+    logger.info("Opening SQLite for submission reads (mode=%s, db=%s)", read_mode, db_path)
+    return open_db(
         db_path,
         readonly=True,
-        local_copy=True,
+        local_copy=use_snapshot,
         temp_dir=db_temp_dir,
     )
+
+
+def find_batches(cfg: dict, stage: str, *, site: str, limit: int) -> List[str]:
+    locks_root = Path(cfg["paths"]["locks_root"])
+
+    conn = open_submission_read_db(cfg)
     try:
         if stage == "raw_to_jpg":
             rows = get_batches_needing_raw_to_jpg(conn, site=site, limit=limit * 2)
@@ -117,14 +131,7 @@ def filter_completed_staged_inputs(cfg: dict, stage: str, batch_ids: List[str]) 
     if not batch_ids:
         return []
 
-    db_path = Path(cfg["paths"]["db"])
-    db_temp_dir = cfg["paths"].get("db_temp_dir")
-    conn = open_db(
-        db_path,
-        readonly=True,
-        local_copy=True,
-        temp_dir=db_temp_dir,
-    )
+    conn = open_submission_read_db(cfg)
     try:
         completed = get_completed_input_staging_batch_ids(
             conn,
