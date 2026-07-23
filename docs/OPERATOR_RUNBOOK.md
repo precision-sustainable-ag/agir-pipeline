@@ -86,7 +86,8 @@ At minimum, confirm these values point to the intended environment:
 ```text
 stage.name
 paths.db
-paths.db_temp_dir
+paths.db_read_mode
+paths.db_temp_dir (only when db_read_mode is snapshot)
 paths.input_staging_root
 paths.output_stage_runs
 paths.final_dest_root

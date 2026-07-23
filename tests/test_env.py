@@ -21,12 +21,18 @@ from __future__ import annotations
 import importlib
 import os
 import platform
+import sqlite3
 import shutil
 import subprocess
 import sys
 import textwrap
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Optional
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 
 @dataclass
@@ -92,33 +98,29 @@ def check_pyyaml() -> None:
     ok(f"pyyaml import OK ({import_and_version('yaml')})")
 
 
-def check_psycopg2() -> None:
-    import psycopg2  # type: ignore
+def check_sqlite_schema() -> None:
+    from orchestrator.sqlite_db import open_db
 
-    ok(f"psycopg2 import OK ({psycopg2.__version__})")
+    schema_path = Path(__file__).resolve().parents[1] / "schemas" / "sqlite" / "pipeline.sql"
+    schema = schema_path.read_text(encoding="utf-8")
 
-    # Optional connection test if PGHOST is set
-    if os.environ.get("PGHOST"):
-        try:
-            conn = psycopg2.connect(
-                host=os.environ.get("PGHOST"),
-                port=os.environ.get("PGPORT", "5432"),
-                dbname=os.environ.get("PGDATABASE", ""),
-                user=os.environ.get("PGUSER", ""),
-                password=os.environ.get("PGPASSWORD", ""),
-                connect_timeout=3,
-            )
-            cur = conn.cursor()
-            cur.execute("SELECT 1;")
-            res = cur.fetchone()
-            cur.close()
-            conn.close()
-            assert res and res[0] == 1
-            ok("psycopg2 DB connect OK (SELECT 1 succeeded)")
-        except Exception as e:
-            warn(f"psycopg2 imported, but DB connect failed (this may be normal): {e}")
-    else:
-        warn("PGHOST not set; skipping DB connection test.")
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(schema)
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+    required_tables = {"globus_file_index", "stage_leases", "stage_runs", "staged_inputs"}
+    missing = required_tables - tables
+    assert not missing, f"SQLite schema is missing required tables: {sorted(missing)}"
+    assert callable(open_db)
+    ok(f"SQLite schema loaded successfully ({sqlite3.sqlite_version})")
 
 
 def check_numpy() -> None:
@@ -203,13 +205,6 @@ def check_ultralytics() -> None:
 
     ok(f"ultralytics import OK ({getattr(ultralytics, '__version__', 'unknown')})")
 
-def check_agir_db() -> None:
-    # Adjust to whatever your installed package root is.
-    from agir_db import AgirDB  # type: ignore
-
-    _ = AgirDB  # just ensure symbol exists
-    ok("agir_db import OK")
-
 
 def main() -> int:
     header("AGIR Environment Smoke Test")
@@ -218,8 +213,7 @@ def main() -> int:
 
     checks: list[Check] = [
         Check("pyyaml", check_pyyaml, required=True),
-        Check("psycopg2-binary", check_psycopg2, required=True),
-        Check("agir_db", check_agir_db, required=True),
+        Check("sqlite schema", check_sqlite_schema, required=True),
 
         # Optional groups (if you installed extras)
         Check("numpy", check_numpy, required=False),
@@ -269,7 +263,7 @@ def main() -> int:
               - If using uv:
                   uv pip install -e ".[dev]"
                   uv pip install -e ".[all]"
-              - If DB connect failed, ensure PGHOST/PGUSER/PGDATABASE are set (or source pg_coords.env on HPC).
+              - If the SQLite check failed, confirm schemas/sqlite/pipeline.sql is present.
             """
         ).strip()
     )

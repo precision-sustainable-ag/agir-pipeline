@@ -4,8 +4,8 @@
 Multiprocessing Globus file indexer for SQLite.
 
 This is a SQLite-oriented inventory scanner for AgIR storage locations.
-It preserves the complete source.globus_file_index column set from the
-PostgreSQL design while adding run tracking and current/stale inventory state.
+It stores the canonical file inventory fields together with run tracking and
+current/stale inventory state.
 
 Core behavior:
 - Full file/directory inventory from Globus `ls --format json`
@@ -19,7 +19,7 @@ Core behavior:
 SQLite notes:
 - Dates/timestamps are stored as ISO-8601 TEXT.
 - checksum is preserved but remains NULL unless a future scanner populates it.
-- The original PostgreSQL uniqueness rule is preserved:
+- File inventory rows use the uniqueness rule:
   UNIQUE(endpoint, data_state, storage_root, rel_path)
 """
 from __future__ import annotations
@@ -46,8 +46,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 BATCH_PATTERN = re.compile(r"^([A-Z]{2})_(\d{4}-\d{2}-\d{2})$")
 VALID_SITES = {"JUNO", "NCSU", "CERES", "ATLAS"}
 VALID_STORAGE_DOMAINS = {"screberg", "dash_agir", "national_plant_image_repository"}
-VALID_DATA_STATES = {"semifield-upload", "semifield-developed-images", "semifield-cutouts"}
-
+VALID_DATA_STATES = {"semifield-upload", "semifield-developed-images", "semifield-cutouts", "semifield-utils", "semifield-tools", "semifield-asfm"}
+SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schemas" / "sqlite" / "pipeline.sql"
 # Original globus_file_index columns from the PostgreSQL overview.
 BASE_GFI_COLUMNS = [
     "file_id",
@@ -244,161 +244,16 @@ def get_parent_folder(rel_path: str, entry_type: str) -> Optional[str]:
 
 
 # ============================================================
-#                         SCHEMA
-# ============================================================
-
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS inventory_runs (
-    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    endpoint TEXT NOT NULL,
-    site TEXT NOT NULL,
-    storage_domain TEXT NOT NULL,
-    namespace TEXT NOT NULL,
-    storage_root TEXT NOT NULL,
-    data_state TEXT NOT NULL,
-    started_at_ts_iso TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    ended_at_ts_iso TEXT,
-    status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'success', 'partial', 'failed', 'skipped')),
-    total_seen INTEGER NOT NULL DEFAULT 0,
-    total_files_seen INTEGER NOT NULL DEFAULT 0,
-    total_dirs_seen INTEGER NOT NULL DEFAULT 0,
-    total_batches_written INTEGER NOT NULL DEFAULT 0,
-    total_errors INTEGER NOT NULL DEFAULT 0,
-    total_marked_stale INTEGER NOT NULL DEFAULT 0,
-    error_summary TEXT,
-    UNIQUE (run_id)
-);
-
-CREATE TABLE IF NOT EXISTS globus_file_index (
-    file_id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-    endpoint TEXT NOT NULL,
-    site TEXT NOT NULL,
-    storage_domain TEXT NOT NULL,
-    namespace TEXT NOT NULL,
-    storage_root TEXT NOT NULL,
-    rel_path TEXT NOT NULL,
-    full_path TEXT NOT NULL,
-    parent_dir TEXT,
-    file_name TEXT NOT NULL,
-
-    entry_type TEXT NOT NULL CHECK (entry_type IN ('file', 'dir')),
-    file_ext TEXT,
-    size_bytes INTEGER,
-    permissions TEXT,
-    checksum TEXT,
-
-    batch_id TEXT,
-    batch_state TEXT,
-    batch_date TEXT,
-
-    data_state TEXT NOT NULL,
-
-    mtime_iso TEXT,
-    fname_ts_epoch INTEGER,
-    fname_ts_iso TEXT,
-    created_at_ts_iso TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-
-    first_seen_ts_iso TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    last_seen_ts_iso TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    last_seen_run_id INTEGER,
-    missing_since_ts_iso TEXT,
-    is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1)),
-
-    UNIQUE (endpoint, data_state, storage_root, rel_path),
-    FOREIGN KEY (last_seen_run_id) REFERENCES inventory_runs(run_id)
-);
-
-CREATE TABLE IF NOT EXISTS batch_inventory_summary (
-    run_id INTEGER NOT NULL,
-    endpoint TEXT NOT NULL,
-    site TEXT NOT NULL,
-    storage_domain TEXT NOT NULL,
-    namespace TEXT NOT NULL,
-    storage_root TEXT NOT NULL,
-    data_state TEXT NOT NULL,
-    batch_id TEXT,
-    batch_state TEXT,
-    batch_date TEXT,
-
-    file_count INTEGER NOT NULL,
-    dir_count INTEGER NOT NULL,
-    total_size_bytes INTEGER NOT NULL,
-    raw_count INTEGER NOT NULL DEFAULT 0,
-    jpg_count INTEGER NOT NULL DEFAULT 0,
-    json_count INTEGER NOT NULL DEFAULT 0,
-    csv_count INTEGER NOT NULL DEFAULT 0,
-    png_count INTEGER NOT NULL DEFAULT 0,
-    metadata_count INTEGER NOT NULL DEFAULT 0,
-    detection_count INTEGER NOT NULL DEFAULT 0,
-    min_mtime_iso TEXT,
-    max_mtime_iso TEXT,
-    created_at_ts_iso TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-
-    PRIMARY KEY (run_id, endpoint, site, storage_domain, namespace, storage_root, data_state, batch_id),
-    FOREIGN KEY (run_id) REFERENCES inventory_runs(run_id)
-);
-
-CREATE TABLE IF NOT EXISTS storage_gap_summary (
-    run_id INTEGER NOT NULL,
-    batch_id TEXT NOT NULL,
-    batch_state TEXT,
-    batch_date TEXT,
-    storage_domain TEXT NOT NULL,
-    namespace TEXT NOT NULL,
-    site TEXT NOT NULL,
-    storage_root TEXT NOT NULL,
-
-    has_semifield_upload INTEGER NOT NULL DEFAULT 0 CHECK (has_semifield_upload IN (0, 1)),
-    has_semifield_developed_images INTEGER NOT NULL DEFAULT 0 CHECK (has_semifield_developed_images IN (0, 1)),
-    has_semifield_cutouts INTEGER NOT NULL DEFAULT 0 CHECK (has_semifield_cutouts IN (0, 1)),
-
-    upload_file_count INTEGER NOT NULL DEFAULT 0,
-    developed_file_count INTEGER NOT NULL DEFAULT 0,
-    cutout_file_count INTEGER NOT NULL DEFAULT 0,
-
-    raw_count INTEGER NOT NULL DEFAULT 0,
-    jpg_count INTEGER NOT NULL DEFAULT 0,
-    metadata_count INTEGER NOT NULL DEFAULT 0,
-    detection_count INTEGER NOT NULL DEFAULT 0,
-    cutout_png_count INTEGER NOT NULL DEFAULT 0,
-
-    created_at_ts_iso TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-
-    PRIMARY KEY (run_id, batch_id, storage_domain, namespace, site, storage_root),
-    FOREIGN KEY (run_id) REFERENCES inventory_runs(run_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_gfi_batch_state_current
-    ON globus_file_index(batch_id, data_state, site, is_current);
-
-CREATE INDEX IF NOT EXISTS idx_gfi_storage_current
-    ON globus_file_index(site, storage_domain, namespace, storage_root, data_state, is_current);
-
-CREATE INDEX IF NOT EXISTS idx_gfi_ext_parent
-    ON globus_file_index(data_state, file_ext, parent_dir);
-
-CREATE INDEX IF NOT EXISTS idx_gfi_run_current
-    ON globus_file_index(last_seen_run_id, is_current);
-
-CREATE INDEX IF NOT EXISTS idx_gfi_full_path
-    ON globus_file_index(full_path);
-
-CREATE INDEX IF NOT EXISTS idx_inventory_runs_scope_time
-    ON inventory_runs(endpoint, site, storage_domain, namespace, storage_root, data_state, started_at_ts_iso DESC);
-
-CREATE INDEX IF NOT EXISTS idx_batch_inventory_summary_batch
-    ON batch_inventory_summary(batch_id, data_state, site, storage_domain, namespace);
-
-CREATE INDEX IF NOT EXISTS idx_storage_gap_summary_batch
-    ON storage_gap_summary(batch_id, site, storage_domain, namespace);
-"""
-
-
-# ============================================================
 #                     DATABASE HELPERS
 # ============================================================
 
+def load_schema_sql() -> str:
+    if not SCHEMA_PATH.exists():
+        raise FileNotFoundError(
+            f"Schema file not found: {SCHEMA_PATH}. "
+            "globus_index.py requires schemas/sqlite/pipeline.sql to initialize the DB."
+        )
+    return SCHEMA_PATH.read_text(encoding="utf-8")
 
 def table_columns(conn: sqlite3.Connection, table_name: str) -> List[str]:
     rows = conn.execute(f"PRAGMA table_info({table_name});").fetchall()
@@ -413,13 +268,10 @@ def table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     return row is not None
 
 
-def migrate_legacy_globus_file_index(conn: sqlite3.Connection, logger: logging.Logger) -> None:
+def migrate_legacy_globus_file_index(conn: sqlite3.Connection, schema_sql: str, logger: logging.Logger) -> None:
     """
     Handle older SQLite conversion tables that omitted file_id/created_at_ts_iso.
-
-    SQLite cannot add an INTEGER PRIMARY KEY AUTOINCREMENT column to an existing
-    table in place. If a legacy table is detected, rename it, create the full
-    schema, and copy all matching inventory columns forward.
+    ...
     """
     if not table_exists(conn, "globus_file_index"):
         return
@@ -438,7 +290,7 @@ def migrate_legacy_globus_file_index(conn: sqlite3.Connection, logger: logging.L
         legacy_name,
     )
     conn.execute(f"ALTER TABLE globus_file_index RENAME TO {legacy_name};")
-    conn.executescript(SCHEMA_SQL)
+    conn.executescript(schema_sql)   # <-- was SCHEMA_SQL
 
     legacy_cols = set(table_columns(conn, legacy_name))
     copy_cols = [
@@ -469,17 +321,19 @@ def init_db(db_path: str, logger: logging.Logger) -> sqlite3.Connection:
 
     logger.info("Connecting to SQLite database: %s", db)
     conn = sqlite3.connect(str(db), timeout=120)
-    conn.execute("PRAGMA journal_mode=DELETE;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA temp_store=MEMORY;")
-    conn.execute("PRAGMA cache_size=-200000;")  # about 200 MB
-    conn.execute("PRAGMA busy_timeout=120000;")
-    conn.execute("PRAGMA foreign_keys=ON;")
 
-    migrate_legacy_globus_file_index(conn, logger)
-    conn.executescript(SCHEMA_SQL)
+    # Per-connection tuning not already covered by pipeline.sql's PRAGMAs.
+    # journal_mode/foreign_keys/synchronous/temp_store/busy_timeout are set
+    # by pipeline.sql itself — do not override them here, or the two
+    # sources of truth will disagree (this previously forced DELETE mode
+    # over the schema file's WAL setting).
+    conn.execute("PRAGMA cache_size=-200000;")  # about 200 MB, scanner-specific
+
+    schema_sql = load_schema_sql()
+    migrate_legacy_globus_file_index(conn, schema_sql, logger)
+    conn.executescript(schema_sql)
     conn.commit()
-    logger.info("SQLite schema ready.")
+    logger.info("SQLite schema ready (applied %s).", SCHEMA_PATH)
     return conn
 
 
@@ -614,6 +468,30 @@ def upsert_rows(
         run_rows,
     )
     logger.info("Upserted %d rows into globus_file_index", len(rows))
+
+
+def commit_row_batch(
+    conn: sqlite3.Connection,
+    rows: List[Tuple],
+    run_id: int,
+    logger: logging.Logger,
+) -> None:
+    """Upsert one batch without holding the write lock during Globus crawling."""
+    if not rows:
+        return
+
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        upsert_rows(conn, rows, run_id, logger)
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+
+    logger.info("Committed row batch of %d rows", len(rows))
 
 
 def mark_stale_rows(conn: sqlite3.Connection, cfg: EndpointConfig, run_id: int, logger: logging.Logger) -> int:
@@ -853,7 +731,6 @@ def crawl_tree_mp(
     cfg: EndpointConfig,
     run_id: int,
     batch_size: int,
-    commit_batch_size: int,
     max_workers: int,
     logger: logging.Logger,
 ) -> CrawlStats:
@@ -863,13 +740,11 @@ def crawl_tree_mp(
     dir_queue = deque([data_dir])
     futures: Dict = {}
     rows: List[Tuple] = []
-    rows_since_commit = 0
     max_inflight = max_workers * 4
 
     logger.info("Starting multiprocessing crawl at root: %s", data_dir)
     logger.info("max_workers=%d, max_inflight=%d", max_workers, max_inflight)
 
-    conn.execute("BEGIN IMMEDIATE;")
     try:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             while dir_queue or futures:
@@ -957,24 +832,14 @@ def crawl_tree_mp(
                             stats.total_files_seen += 1
 
                         if len(rows) >= batch_size:
-                            upsert_rows(conn, rows, run_id, logger)
+                            commit_row_batch(conn, rows, run_id, logger)
                             stats.total_batches_written += 1
-                            rows_since_commit += len(rows)
                             rows.clear()
 
-                            if rows_since_commit >= commit_batch_size:
-                                conn.commit()
-                                conn.execute("BEGIN IMMEDIATE;")
-                                logger.info("Committed after %d rows", rows_since_commit)
-                                rows_since_commit = 0
-
             if rows:
-                upsert_rows(conn, rows, run_id, logger)
+                commit_row_batch(conn, rows, run_id, logger)
                 stats.total_batches_written += 1
-                rows_since_commit += len(rows)
                 rows.clear()
-
-        conn.commit()
     except Exception:
         conn.rollback()
         raise
@@ -1092,7 +957,6 @@ def run_one_config(
     conn: sqlite3.Connection,
     cfg: EndpointConfig,
     batch_size: int,
-    commit_batch_size: int,
     max_workers: int,
     clean_slate: bool,
     mark_stale: bool,
@@ -1122,7 +986,6 @@ def run_one_config(
             cfg=cfg,
             run_id=run_id,
             batch_size=batch_size,
-            commit_batch_size=commit_batch_size,
             max_workers=max_workers,
             logger=logger,
         )
@@ -1172,7 +1035,11 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--batch-size", type=int, default=10_000, help="Rows per executemany upsert batch.")
-    parser.add_argument("--commit-batch-size", type=int, default=100_000, help="Rows between SQLite commits.")
+    parser.add_argument(
+        "--commit-batch-size",
+        type=int,
+        help="Deprecated; each --batch-size row batch is now committed immediately.",
+    )
     parser.add_argument("--max-workers", type=int, default=8, help="Number of worker processes for Globus ls.")
     parser.add_argument("--log-file", default="./globus_index_sqlite.log", help="Log file path.")
 
@@ -1236,7 +1103,11 @@ def main() -> None:
     logger.info("========================================")
     logger.info("SQLite DB: %s", args.db)
     logger.info("Batch size: %d", args.batch_size)
-    logger.info("Commit batch size: %d", args.commit_batch_size)
+    if args.commit_batch_size is not None:
+        logger.warning(
+            "--commit-batch-size is deprecated and ignored; each batch of %d rows is committed",
+            args.batch_size,
+        )
     logger.info("Max workers: %d", args.max_workers)
     logger.info("Clean slate: %s", args.clean_slate)
     logger.info("Mark stale: %s", not args.no_mark_stale)
@@ -1260,7 +1131,6 @@ def main() -> None:
                 conn=conn,
                 cfg=cfg,
                 batch_size=args.batch_size,
-                commit_batch_size=args.commit_batch_size,
                 max_workers=args.max_workers,
                 clean_slate=args.clean_slate,
                 mark_stale=not args.no_mark_stale,

@@ -55,7 +55,6 @@ SQLITE_DB="/project/dash_agir/globus_index/globus_file_index.sqlite3"
 # ---- Tuning ----
 MAX_WORKERS=12
 BATCH_SIZE=10000
-COMMIT_BATCH_SIZE=100000
 
 mkdir -p "$(dirname "${SQLITE_DB}")"
 
@@ -90,7 +89,6 @@ python3 "${PYTHON_SCRIPT}" \
     --db "${SQLITE_DB}" \
     --endpoint-config-yaml "${ENDPOINT_CONFIG_YAML}" \
     --batch-size "${BATCH_SIZE}" \
-    --commit-batch-size "${COMMIT_BATCH_SIZE}" \
     --max-workers "${MAX_WORKERS}" \
     --optimize-at-end \
     --log-file "${LOG_DIR}/globus_index_sqlite_${TIMESTAMP}.log"

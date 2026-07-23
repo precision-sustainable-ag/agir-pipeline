@@ -3,13 +3,12 @@ Parse batch list files for manual SciNet job submission.
 
 Two supported line formats (one batch per line):
 
-  Format A — with time window (used by PostgreSQL / Globus windowed staging):
+  Format A — with an explicit time window:
 
     MD_2026-04-03 | 5:55:04 PM 7:33:16 PM
     TX_2026-03-15 | 8:00:00 AM 10:30:45 AM
 
-  Format B — bare batch_id, no time window (used by SQLite mode, e.g. output
-             of scripts/atlas/find_raw_to_jpg.py):
+  Format B — bare batch_id, no time window (used by the SQLite job commands):
 
     MD_2026-04-03
     TX_2026-03-15

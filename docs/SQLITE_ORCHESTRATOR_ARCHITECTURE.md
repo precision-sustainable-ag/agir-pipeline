@@ -138,9 +138,10 @@ It:
 The completed-input check is a database gate. The command does not call the
 staging command and does not poll Globus.
 
-Read-heavy discovery and input-gating queries can use a temporary local copy of
-the database. The copy directory is configured by `paths.db_temp_dir`, and the
-copy is removed when its connection closes.
+Read-heavy discovery and input-gating queries open the shared database directly
+in enforced read-only mode by default. Set `paths.db_read_mode: snapshot` to use
+a consistent temporary SQLite backup instead. Snapshot files use
+`paths.db_temp_dir` and are removed when their connections close.
 
 ### Submission and rendering
 
@@ -311,7 +312,8 @@ log, script, lock, model, and stage-specific configuration paths.
 Important database paths are:
 
 - `paths.db`: shared SQLite database;
-- `paths.db_temp_dir`: temporary directory for read-only login-node copies.
+- `paths.db_read_mode`: `direct` by default, or `snapshot` as a fallback;
+- `paths.db_temp_dir`: temporary directory used only in snapshot mode.
 
 ### `transfer`
 

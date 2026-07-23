@@ -5,7 +5,7 @@ orchestrator/sqlite_db.py
 Minimal SQLite orchestration helpers for the AgIR pipeline.
 
 These functions operate on the schema defined in schemas/sqlite/pipeline.sql
-and use *only* stdlib sqlite3 — no PostgreSQL AgirDB dependency.
+and use only the Python standard-library sqlite3 module.
 
 Public API
 ----------
@@ -36,7 +36,6 @@ Ingest semantics
 from __future__ import annotations
 
 import json
-import shutil
 import tempfile
 import logging
 import sqlite3
@@ -167,11 +166,12 @@ def open_db(
     db_path : str or Path
         Path to the SQLite file.
     readonly : bool
-        If True, open without write pragmas.  No data is written.
+        If True, enforce read-only access with SQLite URI mode and query_only.
     local_copy : bool
-        If True (and readonly=True), copy the DB to a temporary file before
-        opening. Use this when querying the original DB directly is too slow.
-        The temporary file is deleted when the connection is closed.
+        If True (and readonly=True), create a consistent SQLite snapshot in a
+        temporary file before opening. Use this when querying the original DB
+        directly is too slow. The temporary file is deleted when the connection
+        is closed.
     temp_dir : str or Path, optional
         Directory in which to create the temporary database copy. If omitted,
         use the system temporary directory. This is useful on HPC login nodes
@@ -199,24 +199,44 @@ def open_db(
             delete=False,
         ) as tmp_file:
             tmp = Path(tmp_file.name)
-        logger.debug("Copying DB to temporary storage: %s -> %s", db_path, tmp)
+        logger.debug(
+            "Creating SQLite snapshot in temporary storage: %s -> %s",
+            db_path,
+            tmp,
+        )
+        source = None
+        destination = None
         try:
-            shutil.copy2(db_path, tmp)
+            try:
+                source_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+                source = sqlite3.connect(source_uri, uri=True, timeout=60)
+                destination = sqlite3.connect(str(tmp), timeout=60)
+                source.backup(destination, pages=1000, sleep=0.1)
+            finally:
+                if destination is not None:
+                    destination.close()
+                if source is not None:
+                    source.close()
         except Exception:
             tmp.unlink(missing_ok=True)
             raise
         inner = sqlite3.connect(str(tmp), timeout=60)
+        inner.execute("PRAGMA query_only=ON;")
+        inner.execute("PRAGMA busy_timeout=60000;")
         inner.row_factory = sqlite3.Row
         return _TempConnection(inner, tmp)
 
     if readonly:
         if not db_path.exists():
             raise FileNotFoundError(f"SQLite DB not found: {db_path}")
-        conn = sqlite3.connect(str(db_path), timeout=60)
+        source_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        conn = sqlite3.connect(source_uri, uri=True, timeout=60)
+        conn.execute("PRAGMA query_only=ON;")
+        conn.execute("PRAGMA busy_timeout=60000;")
     else:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(db_path), timeout=120)
-        conn.execute("PRAGMA journal_mode=DELETE;")
+        conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA temp_store=MEMORY;")
         conn.execute("PRAGMA busy_timeout=120000;")

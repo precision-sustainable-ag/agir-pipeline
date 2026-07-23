@@ -43,6 +43,39 @@ PRAGMA busy_timeout  = 120000;
 BEGIN;
 
 -- =============================================================================
+-- STATIC REFERENCE TABLES
+-- Populated by scripts/admin/load_date_ranges.py from configs/date_ranges.yaml
+-- =============================================================================
+
+-- One row per (site, season) date window defined in configs/date_ranges.yaml.
+-- Lets callers resolve "what season/application was batch_date X in for site Y"
+-- and look up the bbot_version/crs/pipeline_season used for that window.
+CREATE TABLE IF NOT EXISTS season_date_ranges (
+    site               TEXT NOT NULL,   -- 'MD' | 'NC' | 'TX'
+    season_name        TEXT NOT NULL,   -- e.g. 'weeds 2022', 'cover crops 2022/2023'
+    start_date         TEXT NOT NULL,   -- ISO-8601 date
+    end_date           TEXT NOT NULL,   -- ISO-8601 date
+    bbot_version       TEXT NOT NULL,   -- e.g. '2.0', '3.0', '3.1'
+    crs                TEXT NOT NULL,   -- 'LOCAL' or an EPSG code, e.g. '4326', '32618'
+    pipeline_season    TEXT,            -- canonical season slug used in pipeline configs, if any
+    gh_reviewer        TEXT,            -- default PR reviewer GitHub username for this season, if any
+    note               TEXT,            -- free-text note, if any
+    updated_at_ts_iso  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+
+    PRIMARY KEY (site, season_name)
+);
+
+-- Alternate spellings/slugs that resolve to a canonical pipeline_season.
+-- From the season_mappings block in configs/date_ranges.yaml.
+CREATE TABLE IF NOT EXISTS season_aliases (
+    pipeline_season TEXT NOT NULL,
+    alias           TEXT NOT NULL,
+
+    PRIMARY KEY (pipeline_season, alias)
+);
+
+
+-- =============================================================================
 -- INVENTORY TABLES
 -- Populated by scripts/admin/globus_index.py
 -- =============================================================================
@@ -283,6 +316,20 @@ CREATE TABLE IF NOT EXISTS staged_inputs (
 -- INDEXES
 -- =============================================================================
 
+-- season_date_ranges / season_aliases  ────────────────────────────────────────
+
+-- batch_date -> season lookups (BETWEEN start_date AND end_date scans).
+CREATE INDEX IF NOT EXISTS idx_sdr_site_dates
+    ON season_date_ranges (site, start_date, end_date);
+
+-- Resolve a season_date_ranges row by its canonical pipeline_season.
+CREATE INDEX IF NOT EXISTS idx_sdr_pipeline_season
+    ON season_date_ranges (pipeline_season);
+
+-- Resolve an alias string back to its canonical pipeline_season.
+CREATE INDEX IF NOT EXISTS idx_sa_alias
+    ON season_aliases (alias);
+
 -- globus_file_index  ──────────────────────────────────────────────────────────
 
 -- Primary gap-report index: drives both orchestration views.
@@ -442,6 +489,7 @@ jpg_batches AS (
       AND is_current = 1
       AND file_ext   IN ('jpg', 'jpeg')
       AND parent_dir = 'images'
+      AND site in ('JUNO', 'CERES')
     GROUP BY batch_id
 ),
 det_batches AS (
@@ -482,5 +530,5 @@ ORDER BY j.batch_date ASC, j.batch_id ASC;
 
 
 -- =============================================================================
-PRAGMA user_version = 4;
+PRAGMA user_version = 6;
 COMMIT;
