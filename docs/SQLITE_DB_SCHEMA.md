@@ -13,7 +13,7 @@ The canonical schema is defined in:
 schemas/sqlite/pipeline.sql
 ```
 
-The current schema version is `4`.
+The current schema version is `7`.
 
 For the complete runtime flow, see
 [`SQLITE_ORCHESTRATOR_ARCHITECTURE.md`](SQLITE_ORCHESTRATOR_ARCHITECTURE.md).
@@ -28,7 +28,7 @@ The database contains three groups of objects:
 | Inventory | `inventory_runs`, `globus_file_index` | Track storage scans and current file state |
 | Reporting | `batch_inventory_summary`, `storage_gap_summary` | Store per-scan aggregate counts |
 | Orchestration | `stage_runs`, `stage_leases`, `staged_inputs` | Track execution, concurrency, and prerequisite transfers |
-| Readiness | `v_batches_needing_raw_to_jpg`, `v_batches_needing_jpg_to_det` | Calculate batches eligible for pipeline stages |
+| Readiness | `v_batches_needing_raw_to_jpg`, `v_batches_needing_jpg_to_det`, `v_batches_needing_det_to_seg` | Calculate batches eligible for pipeline stages |
 
 ## Logical Relationships
 
@@ -497,7 +497,7 @@ They do not use the reporting summary tables and are not restricted to one
 inventory run. This allows current inventory from multiple endpoints and scan
 times to participate in one readiness decision.
 
-Both views exclude a batch when:
+Readiness views exclude a batch when:
 
 - the expected output files already exist;
 - an unexpired lease exists for the batch and stage; or
@@ -539,6 +539,28 @@ Output columns:
 Detection output is identified through the `detections`,
 `plant-detections`, and `metadata` parent directories. The view excludes active
 `jpg_to_det` leases and successful `jpg_to_det` runs.
+
+### `v_batches_needing_det_to_seg`
+
+Returns batches with a complete logical pair of current developed JPG inputs
+and per-image detection TXT inputs. The inputs may be independently available
+on JUNO or ATLAS. Replicated files are counted once by case-insensitive
+filename.
+
+Output columns:
+
+| Column | Meaning |
+| --- | --- |
+| `batch_id` | Ready batch |
+| `batch_date` | Earliest batch date found in inventory |
+| `jpg_count` | Distinct current JPG/JPEG filenames under `images` |
+| `det_count` | Distinct current TXT filenames under `detections` |
+| `mask_count` | Existing segmentation masks; expected to be zero |
+
+The view requires equal, nonzero JPG and detection counts. Exact filename-stem
+validation remains an input-materialization responsibility. Existing masks,
+active `det_to_seg` leases, and successful `det_to_seg` runs suppress
+readiness.
 
 ## Indexes
 
@@ -783,7 +805,7 @@ can bypass.
 The schema uses:
 
 ```sql
-PRAGMA user_version = 4;
+PRAGMA user_version = 7;
 ```
 
 When changing the schema:

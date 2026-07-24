@@ -13,6 +13,7 @@
 -- -----
 --   v_batches_needing_raw_to_jpg   What to run next for stage 1
 --   v_batches_needing_jpg_to_det   What to run next for stage 2
+--   v_batches_needing_det_to_seg   What to run next for stage 3
 --
 -- Views query globus_file_index WHERE is_current = 1 across ALL indexed
 -- endpoints simultaneously, so cross-site inventory gaps resolve correctly
@@ -401,8 +402,8 @@ CREATE INDEX IF NOT EXISTS idx_sgs_batch
 -- (is_current=1) from different scan runs are both visible in one query.
 -- No per-run scoping.  storage_gap_summary is for reporting only.
 --
--- Both views exclude batches that:
---   - already have output files (jpg_file_count > 0 / det_count > 0)
+-- Readiness views exclude batches that:
+--   - already have the expected output files
 --   - have an active, unexpired lease in stage_leases
 --   - have ever had a successful stage_run (NOT EXISTS on stage_runs)
 --
@@ -529,6 +530,88 @@ WHERE COALESCE(d.det_count, 0) = 0   -- no detections exist yet
 ORDER BY j.batch_date ASC, j.batch_id ASC;
 
 
+-- -----------------------------------------------------------------------------
+-- v_batches_needing_det_to_seg
+-- Batches with a complete logical pair of developed JPG files and per-image
+-- detection TXT files, regardless of whether each input currently lives on
+-- JUNO or 90daydata. Replicated files are counted once by filename.
+-- -----------------------------------------------------------------------------
+DROP VIEW IF EXISTS v_batches_needing_det_to_seg;
+CREATE VIEW v_batches_needing_det_to_seg AS
+WITH
+jpg_batches AS (
+    SELECT
+        batch_id,
+        MIN(batch_date)                  AS batch_date,
+        COUNT(DISTINCT LOWER(file_name)) AS jpg_count
+    FROM globus_file_index
+    WHERE data_state = 'semifield-developed-images'
+      AND entry_type = 'file'
+      AND batch_id   IS NOT NULL
+      AND is_current = 1
+      AND LOWER(file_ext) IN ('jpg', 'jpeg')
+      AND parent_dir = 'images'
+      AND site IN ('JUNO', 'ATLAS')
+    GROUP BY batch_id
+),
+det_batches AS (
+    SELECT
+        batch_id,
+        COUNT(DISTINCT LOWER(file_name)) AS det_count
+    FROM globus_file_index
+    WHERE data_state = 'semifield-developed-images'
+      AND entry_type = 'file'
+      AND batch_id   IS NOT NULL
+      AND is_current = 1
+      AND LOWER(file_ext) = 'txt'
+      AND parent_dir = 'detections'
+      AND site IN ('JUNO', 'ATLAS')
+    GROUP BY batch_id
+),
+mask_batches AS (
+    SELECT
+        batch_id,
+        COUNT(DISTINCT LOWER(file_name)) AS mask_count
+    FROM globus_file_index
+    WHERE data_state = 'semifield-developed-images'
+      AND entry_type = 'file'
+      AND batch_id   IS NOT NULL
+      AND is_current = 1
+      AND LOWER(file_ext) = 'png'
+      AND parent_dir IN ('segmentations', 'masks')
+      AND site IN ('JUNO', 'ATLAS')
+    GROUP BY batch_id
+),
+active_leases AS (
+    SELECT batch_id
+    FROM stage_leases
+    WHERE stage      = 'det_to_seg'
+      AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+)
+SELECT
+    j.batch_id,
+    j.batch_date,
+    j.jpg_count,
+    d.det_count,
+    COALESCE(m.mask_count, 0) AS mask_count
+FROM jpg_batches j
+JOIN det_batches d ON j.batch_id = d.batch_id
+LEFT JOIN mask_batches m ON j.batch_id = m.batch_id
+LEFT JOIN active_leases al ON j.batch_id = al.batch_id
+WHERE j.jpg_count > 0
+  AND j.jpg_count = d.det_count
+  AND COALESCE(m.mask_count, 0) = 0
+  AND al.batch_id IS NULL
+  AND NOT EXISTS (
+      SELECT 1
+      FROM stage_runs sr
+      WHERE sr.batch_id = j.batch_id
+        AND sr.stage    = 'det_to_seg'
+        AND sr.status   = 'success'
+  )
+ORDER BY j.batch_date ASC, j.batch_id ASC;
+
+
 -- =============================================================================
-PRAGMA user_version = 6;
+PRAGMA user_version = 7;
 COMMIT;
