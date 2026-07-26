@@ -50,22 +50,14 @@ from __future__ import annotations
 
 import argparse
 import copy
-import hashlib
 import json
 import shutil
 from pathlib import Path
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(65536), b""):
-            h.update(chunk)
-    return "sha256:" + h.hexdigest()
+from orchestrator.artifact_validation import (
+    ArtifactValidationError,
+    validate_run_bundle,
+)
 
 
 def _rewrite_run_report(report: dict, dest: Path, meta_dest: Path) -> dict:
@@ -113,79 +105,18 @@ def _rewrite_manifest(manifest: dict, dest: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 def promote(run_dir: Path, dest: Path) -> int:
-    run_report_path = run_dir / "run_report.json"
-    manifest_path   = run_dir / "manifest.json"
-
-    # ── Validate run_report ───────────────────────────────────────────────────
-    if not run_report_path.exists():
-        print(f"PROMOTE FAIL: run_report.json not found in {run_dir}")
+    try:
+        validated = validate_run_bundle(run_dir)
+    except ArtifactValidationError as exc:
+        print(f"PROMOTE {exc.outcome.upper()}: {exc}")
         return 1
 
-    run_report = json.loads(run_report_path.read_text())
-    exit_code  = run_report.get("exit_code")
-    if exit_code != 0:
-        print(f"PROMOTE SKIP: run_report exit_code={exit_code} (need 0)")
-        return 1
-
+    run_report = validated.run_report
+    manifest = validated.manifest
+    items = validated.items
+    artifacts_root = validated.artifacts_root
     stage    = run_report.get("stage", "unknown_stage")
     batch_id = run_report.get("batch_id", "")
-
-    # ── Validate manifest ─────────────────────────────────────────────────────
-    if not manifest_path.exists():
-        print(f"PROMOTE FAIL: manifest.json not found in {run_dir}")
-        return 1
-
-    manifest = json.loads(manifest_path.read_text())
-    items    = manifest.get("items", [])
-    if not items:
-        print("PROMOTE FAIL: manifest has no items")
-        return 1
-
-    failed_items = [i for i in items if i.get("status") != "ok"]
-    if failed_items:
-        print(
-            f"PROMOTE SKIP: {len(failed_items)}/{len(items)} items failed "
-            f"— 100% success required"
-        )
-        for item in failed_items:
-            print(f"  FAILED: {item.get('image_id')} — {item.get('error', {}).get('message', '')}")
-        return 1
-
-    artifacts_root = Path(manifest.get("artifacts_root", run_dir / "artifacts"))
-
-    # ── Verify every artifact exists and checksum matches ─────────────────────
-    # All artifact keys per item are checked so multi-artifact stages
-    # (e.g. mask PNG + JSON sidecar per image) are fully verified before
-    # anything is copied.
-    for item in items:
-        image_id  = item.get("image_id", "<unknown>")
-        artifacts = item.get("artifacts") or {}
-        checksums = item.get("checksum") or {}
-
-        if not artifacts:
-            print(f"PROMOTE FAIL: item {image_id} has no artifacts in manifest")
-            return 1
-
-        for artifact_key, artifact_rel in artifacts.items():
-            if not artifact_rel:
-                print(f"PROMOTE FAIL: item {image_id} key '{artifact_key}' has no path")
-                return 1
-
-            artifact_path = artifacts_root / artifact_rel
-            if not artifact_path.exists():
-                print(f"PROMOTE FAIL: artifact missing on disk: {artifact_path}")
-                return 1
-
-            expected_checksum = checksums.get(artifact_key)
-            if expected_checksum:
-                actual = _sha256(artifact_path)
-                if actual != expected_checksum:
-                    print(
-                        f"PROMOTE FAIL: checksum mismatch for {image_id} [{artifact_key}]\n"
-                        f"  expected: {expected_checksum}\n"
-                        f"  actual:   {actual}"
-                    )
-                    return 1
 
     # ── All checks passed — copy artifacts to destination ─────────────────────
     dest.mkdir(parents=True, exist_ok=True)
