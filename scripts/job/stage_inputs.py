@@ -23,7 +23,9 @@ if str(REPO_ROOT) not in sys.path:
 
 from orchestrator.config import load_stage_config
 from orchestrator.globus_transfer import (
+    TransferRequest,
     TransferSubmitResult,
+    build_input_staging_label,
     submit_transfer,
 )
 from orchestrator.input_staging_planner import (
@@ -153,7 +155,14 @@ def process_requests(
             req.stage,
             staging_id,
         )
-        submit_result = submit_func(req)
+        transfer_request = TransferRequest(
+            src_endpoint=req.src_endpoint,
+            dst_endpoint=req.dst_endpoint,
+            src_path=req.src_path,
+            dst_path=req.dst_path,
+            label=build_input_staging_label(req.stage, req.batch_id),
+        )
+        submit_result = submit_func(transfer_request)
         if submit_result.status == "submitted":
             updated = mark_input_staging_status(
                 conn,
