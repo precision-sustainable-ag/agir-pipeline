@@ -7,7 +7,8 @@
 -- ------
 --   Inventory:      inventory_runs, globus_file_index,
 --                   batch_inventory_summary, storage_gap_summary
---   Orchestration:  stage_runs, stage_leases, staged_inputs
+--   Orchestration:  stage_runs, stage_leases, staged_inputs,
+--                   result_syncs, result_sync_items
 --
 -- Views
 -- -----
@@ -311,6 +312,95 @@ CREATE TABLE IF NOT EXISTS staged_inputs (
     UNIQUE (batch_id, stage, src_path, dst_path)
 );
 
+-- Atlas-to-Ceres result synchronization. One row represents the complete
+-- transfer, verification, and canonical-ingestion lifecycle for one stage run.
+-- This table is authoritative on Ceres; Atlas receives a read-only copy in the
+-- nightly database snapshot.
+CREATE TABLE IF NOT EXISTS result_syncs (
+    run_id                TEXT PRIMARY KEY,
+    batch_id              TEXT NOT NULL,
+    stage                 TEXT NOT NULL,
+    run_status            TEXT NOT NULL
+                               CHECK (run_status IN (
+                                   'success',
+                                   'partial_success',
+                                   'failed',
+                                   'canceled',
+                                   'skipped'
+                               )),
+    promotion_succeeded   INTEGER NOT NULL DEFAULT 0
+                               CHECK (promotion_succeeded IN (0, 1)),
+
+    source_site           TEXT NOT NULL DEFAULT 'ATLAS',
+    destination_site      TEXT NOT NULL DEFAULT 'CERES',
+    request_path          TEXT NOT NULL,
+    request_json          TEXT NOT NULL,
+
+    status                TEXT NOT NULL DEFAULT 'requested'
+                               CHECK (status IN (
+                                   'requested',
+                                   'transferring',
+                                   'transferred',
+                                   'verified',
+                                   'ingested',
+                                   'failed',
+                                   'canceled'
+                               )),
+    attempt_count         INTEGER NOT NULL DEFAULT 0
+                               CHECK (attempt_count >= 0),
+    error_summary         TEXT,
+
+    request_created_at    TEXT NOT NULL,
+    registered_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    transfer_started_at   TEXT,
+    transferred_at       TEXT,
+    verified_at           TEXT,
+    ingested_at           TEXT,
+    updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+-- One row per run bundle, promoted metadata directory, or promoted output
+-- directory transferred as part of a result synchronization.
+CREATE TABLE IF NOT EXISTS result_sync_items (
+    sync_item_id          TEXT PRIMARY KEY,
+    run_id                TEXT NOT NULL,
+    item_type             TEXT NOT NULL
+                               CHECK (item_type IN (
+                                   'run_bundle',
+                                   'stage_metadata',
+                                   'promoted_outputs'
+                               )),
+
+    src_endpoint          TEXT NOT NULL,
+    dst_endpoint          TEXT NOT NULL,
+    src_path              TEXT NOT NULL,
+    dst_path              TEXT NOT NULL,
+    recursive             INTEGER NOT NULL DEFAULT 1
+                               CHECK (recursive IN (0, 1)),
+
+    status                TEXT NOT NULL DEFAULT 'requested'
+                               CHECK (status IN (
+                                   'requested',
+                                   'submitted',
+                                   'active',
+                                   'completed',
+                                   'failed',
+                                   'canceled'
+                               )),
+    globus_task_id        TEXT,
+    attempt_count         INTEGER NOT NULL DEFAULT 0
+                               CHECK (attempt_count >= 0),
+    error_summary         TEXT,
+
+    requested_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    submitted_at          TEXT,
+    completed_at          TEXT,
+    updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+
+    UNIQUE (run_id, item_type, src_path, dst_path),
+    FOREIGN KEY (run_id) REFERENCES result_syncs (run_id) ON DELETE CASCADE
+);
+
 
 -- =============================================================================
 -- INDEXES
@@ -381,6 +471,23 @@ CREATE INDEX IF NOT EXISTS idx_si_batch_stage_status
 
 CREATE INDEX IF NOT EXISTS idx_si_stage_status_priority
     ON staged_inputs (stage, status, priority, requested_at);
+
+-- result_syncs / result_sync_items  ───────────────────────────────────────────
+
+CREATE INDEX IF NOT EXISTS idx_rs_status_updated
+    ON result_syncs (status, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_rs_batch_stage_status
+    ON result_syncs (batch_id, stage, status);
+
+CREATE INDEX IF NOT EXISTS idx_rsi_run_status
+    ON result_sync_items (run_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_rsi_status_requested
+    ON result_sync_items (status, requested_at);
+
+CREATE INDEX IF NOT EXISTS idx_rsi_globus_task
+    ON result_sync_items (globus_task_id);
 
 -- Summary tables  ─────────────────────────────────────────────────────────────
 
@@ -530,5 +637,5 @@ ORDER BY j.batch_date ASC, j.batch_id ASC;
 
 
 -- =============================================================================
-PRAGMA user_version = 6;
+PRAGMA user_version = 7;
 COMMIT;
