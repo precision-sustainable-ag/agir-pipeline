@@ -111,12 +111,14 @@ OPTIONAL_CONFIG_TAGS: tuple[ExifTagSpec, ...] = (
 )
 
 
-def epoch_to_exif_datetime_eastern(epoch: int) -> ExifDateTime:
+def epoch_to_exif_datetime_eastern(epoch: float) -> ExifDateTime:
     """
     Convert a UTC epoch timestamp to US/Eastern EXIF datetime components.
 
     Args:
-        epoch: Unix epoch timestamp parsed from the image filename.
+        epoch: Unix epoch timestamp parsed from the image filename. May be
+            fractional (e.g. SVCam-style "1784946469.9480019" filenames),
+            in which case the fraction contributes to the subsecond field.
 
     Returns:
         EXIF-compatible local datetime, subsecond string, and UTC offset.
@@ -133,17 +135,18 @@ def epoch_to_exif_datetime_eastern(epoch: int) -> ExifDateTime:
     return ExifDateTime(base=base, subsec=subsec, offset=offset)
 
 
-def parse_epoch_from_filename(file_path: Path) -> int:
+def parse_epoch_from_filename(file_path: Path) -> float:
     """
     Parse epoch timestamp from filenames like:
 
         MD_1745589627_some_suffix.jpg
+        SVCam_1784946469.9480019_raw.jpg
 
     Args:
         file_path: JPG path.
 
     Returns:
-        Parsed epoch integer.
+        Parsed epoch, as a float when the filename encodes fractional seconds.
 
     Raises:
         ValueError: If the filename does not contain a valid epoch in position 1.
@@ -153,7 +156,10 @@ def parse_epoch_from_filename(file_path: Path) -> int:
     if len(parts) < 2:
         raise ValueError(f"Expected filename with epoch as second underscore field: {file_path.name}")
 
-    return int(parts[1])
+    try:
+        return float(parts[1])
+    except ValueError:
+        raise ValueError(f"Invalid epoch field {parts[1]!r} in filename: {file_path.name}") from None
 
 
 def format_exiftool_value(value: Any) -> str:
