@@ -7,8 +7,7 @@
 -- ------
 --   Inventory:      inventory_runs, globus_file_index,
 --                   batch_inventory_summary, storage_gap_summary
---   Orchestration:  stage_runs, stage_leases, staged_inputs,
---                   result_syncs, result_sync_items
+--   Orchestration:  stage_runs, stage_leases, staged_inputs, result_syncs
 --
 -- Views
 -- -----
@@ -333,6 +332,16 @@ CREATE TABLE IF NOT EXISTS result_syncs (
 
     source_site           TEXT NOT NULL DEFAULT 'ATLAS',
     destination_site      TEXT NOT NULL DEFAULT 'CERES',
+
+    -- Each synchronization transfers exactly one immutable run bundle.
+    src_endpoint          TEXT NOT NULL,
+    dst_endpoint          TEXT NOT NULL,
+    src_path              TEXT NOT NULL,
+    dst_path              TEXT NOT NULL,
+    recursive             INTEGER NOT NULL DEFAULT 1
+                               CHECK (recursive IN (0, 1)),
+    globus_task_id        TEXT,
+
     request_path          TEXT NOT NULL,
     request_json          TEXT NOT NULL,
 
@@ -357,48 +366,6 @@ CREATE TABLE IF NOT EXISTS result_syncs (
     verified_at           TEXT,
     ingested_at           TEXT,
     updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
-
--- One row per run bundle, promoted metadata directory, or promoted output
--- directory transferred as part of a result synchronization.
-CREATE TABLE IF NOT EXISTS result_sync_items (
-    sync_item_id          TEXT PRIMARY KEY,
-    run_id                TEXT NOT NULL,
-    item_type             TEXT NOT NULL
-                               CHECK (item_type IN (
-                                   'run_bundle',
-                                   'stage_metadata',
-                                   'promoted_outputs'
-                               )),
-
-    src_endpoint          TEXT NOT NULL,
-    dst_endpoint          TEXT NOT NULL,
-    src_path              TEXT NOT NULL,
-    dst_path              TEXT NOT NULL,
-    recursive             INTEGER NOT NULL DEFAULT 1
-                               CHECK (recursive IN (0, 1)),
-
-    status                TEXT NOT NULL DEFAULT 'requested'
-                               CHECK (status IN (
-                                   'requested',
-                                   'submitted',
-                                   'active',
-                                   'completed',
-                                   'failed',
-                                   'canceled'
-                               )),
-    globus_task_id        TEXT,
-    attempt_count         INTEGER NOT NULL DEFAULT 0
-                               CHECK (attempt_count >= 0),
-    error_summary         TEXT,
-
-    requested_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    submitted_at          TEXT,
-    completed_at          TEXT,
-    updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-
-    UNIQUE (run_id, item_type, src_path, dst_path),
-    FOREIGN KEY (run_id) REFERENCES result_syncs (run_id) ON DELETE CASCADE
 );
 
 
@@ -472,7 +439,7 @@ CREATE INDEX IF NOT EXISTS idx_si_batch_stage_status
 CREATE INDEX IF NOT EXISTS idx_si_stage_status_priority
     ON staged_inputs (stage, status, priority, requested_at);
 
--- result_syncs / result_sync_items  ───────────────────────────────────────────
+-- result_syncs  ───────────────────────────────────────────────────────────────
 
 CREATE INDEX IF NOT EXISTS idx_rs_status_updated
     ON result_syncs (status, updated_at);
@@ -480,14 +447,8 @@ CREATE INDEX IF NOT EXISTS idx_rs_status_updated
 CREATE INDEX IF NOT EXISTS idx_rs_batch_stage_status
     ON result_syncs (batch_id, stage, status);
 
-CREATE INDEX IF NOT EXISTS idx_rsi_run_status
-    ON result_sync_items (run_id, status);
-
-CREATE INDEX IF NOT EXISTS idx_rsi_status_requested
-    ON result_sync_items (status, requested_at);
-
-CREATE INDEX IF NOT EXISTS idx_rsi_globus_task
-    ON result_sync_items (globus_task_id);
+CREATE INDEX IF NOT EXISTS idx_rs_globus_task
+    ON result_syncs (globus_task_id);
 
 -- Summary tables  ─────────────────────────────────────────────────────────────
 
