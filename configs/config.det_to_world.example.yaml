@@ -67,9 +67,15 @@ paths:
   #   <input_staging_root>/<batch_id>/detections/<batch_id>.csv
   input_staging_root: /90daydata/dash_agir/semifield-developed-images
 
-  # Directory of per-image NPZ pixel-to-world grids produced by ASFM, one
-  # subdirectory per batch_id. Read directly from here at job time (see
-  # stage.cli_args --g above) rather than staged into $TMPDIR.
+  # Root of per-image NPZ pixel-to-world grids produced by ASFM, one
+  # subdirectory per batch_id. Within a batch, ASFM nests grids further under
+  # per-time-range sub-batch directories, e.g.:
+  #   <grid_root>/<batch_id>/<HHMMSS_HHMMSS>/pixel_world_grids/<image_id>.npz
+  # stage.cli_args --g above passes the whole <batch_id> directory (not a
+  # specific pixel_world_grids folder) — GridCache indexes it with a
+  # recursive glob (stages/det_to_world/remapper.py), so every time-range's
+  # grids are picked up and processed together in one run. Read directly
+  # from here at job time rather than staged into $TMPDIR.
   grid_root: /90daydata/dash_agir/semifield-asfm
 
   # Per-run artifacts (run_report.json, manifest.json, georeferenced CSV)
