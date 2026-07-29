@@ -64,11 +64,21 @@ precomputed pixel-to-world grid files.
 | `raw_to_jpg` | Yes | Yes | Yes | Yes | Yes |
 | `jpg_to_det` | Yes | Yes | Yes | Yes | Yes |
 | `det_to_seg` | Yes | Yes | No | No | No |
-| `det_to_world` | Yes | Yes | No | No | No |
+| `det_to_world` | Yes | Yes | Yes | Yes | Yes |
 
-The first two stages form the currently orchestrated path. The downstream
-stage modules can be invoked directly, but they do not yet participate in the
-SQLite readiness, prerequisite-staging, lease, or generated Slurm-job flow.
+The first three stages form the currently orchestrated path. `det_to_seg`
+can be invoked directly, but does not yet participate in the SQLite
+readiness, prerequisite-staging, lease, or generated Slurm-job flow.
+
+`det_to_world` differs from `raw_to_jpg`/`jpg_to_det` in how its inputs are
+staged: it needs two independent pieces of data (images and detections)
+rather than one, and each is resolved against the nearest site that already
+has it (destination cluster, then CERES, then JUNO LTS) instead of a single
+fixed JUNO route. Submission readiness is checked against live inventory
+state (both pieces present at the destination site) rather than a single
+`staged_inputs` "completed" flag. See
+`orchestrator/input_staging_planner.py`'s `_plan_multi_site_requests()` and
+`scripts/job/submit.py`'s `filter_locally_ready_det_to_world()`.
 
 This distinction matters operationally: the presence of a stage package does
 not by itself mean `scripts/job/submit.py` can schedule that stage.

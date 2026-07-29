@@ -48,13 +48,20 @@ from orchestrator.sqlite_db import (
     open_db,
     get_batches_needing_raw_to_jpg,
     get_batches_needing_jpg_to_det,
+    get_batches_needing_det_to_world,
     get_completed_input_staging_batch_ids,
+    get_det_to_world_locally_ready_batch_ids,
 )
 from orchestrator.submit_jobs import submit_jobs, JobResult
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_STAGES = ("raw_to_jpg", "jpg_to_det")
+SUPPORTED_STAGES = ("raw_to_jpg", "jpg_to_det", "det_to_world")
+
+# det_to_world needs two independent inputs (images + detections) that are
+# gated by live inventory state rather than staged_inputs bookkeeping — see
+# filter_locally_ready_det_to_world().
+_LOCALLY_GATED_STAGES = ("det_to_world",)
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +98,8 @@ def find_batches(cfg: dict, stage: str, *, site: str, limit: int) -> List[str]:
             rows = get_batches_needing_raw_to_jpg(conn, site=site, limit=limit * 2)
         elif stage == "jpg_to_det":
             rows = get_batches_needing_jpg_to_det(conn, site=site, limit=limit * 2)
+        elif stage == "det_to_world":
+            rows = get_batches_needing_det_to_world(conn, site=site, limit=limit * 2)
         else:
             raise ValueError(f"Unsupported stage: {stage!r}")
     finally:
@@ -155,6 +164,47 @@ def filter_completed_staged_inputs(cfg: dict, stage: str, batch_ids: List[str]) 
         len(staged),
         len(batch_ids),
         stage,
+    )
+    return staged
+
+
+def filter_locally_ready_det_to_world(cfg: dict, batch_ids: List[str]) -> List[str]:
+    """
+    Keep only batches with both images and detections currently indexed on
+    the compute cluster (default site: ATLAS).
+
+    det_to_world needs two independent inputs, so — unlike
+    filter_completed_staged_inputs — this checks live inventory state rather
+    than a single "any staged_inputs row completed" flag, which can't tell
+    "both present" apart from "only one of two fetched".
+    """
+    if not batch_ids:
+        return []
+
+    site = cfg.get("transfer", {}).get("routes", {}).get("det_to_world", {}).get(
+        "destination_site", "ATLAS"
+    )
+
+    conn = open_submission_read_db(cfg)
+    try:
+        ready = get_det_to_world_locally_ready_batch_ids(conn, site=site, batch_ids=batch_ids)
+    finally:
+        conn.close()
+
+    staged = [batch_id for batch_id in batch_ids if batch_id in ready]
+    skipped = [batch_id for batch_id in batch_ids if batch_id not in ready]
+    if skipped:
+        logger.info(
+            "Skipping %d batch(es) missing images/detections at site=%s for det_to_world: %s",
+            len(skipped),
+            site,
+            ", ".join(skipped[:10]) + (" ..." if len(skipped) > 10 else ""),
+        )
+    logger.info(
+        "Local-readiness gate kept %d/%d batch(es) for det_to_world (site=%s)",
+        len(staged),
+        len(batch_ids),
+        site,
     )
     return staged
 
@@ -243,7 +293,10 @@ def main() -> int:
     else:
         batch_ids = find_batches(cfg, args.stage, site=args.site, limit=args.limit)
 
-    batch_ids = filter_completed_staged_inputs(cfg, args.stage, batch_ids)
+    if args.stage in _LOCALLY_GATED_STAGES:
+        batch_ids = filter_locally_ready_det_to_world(cfg, batch_ids)
+    else:
+        batch_ids = filter_completed_staged_inputs(cfg, args.stage, batch_ids)
 
     if not batch_ids:
         logger.info("No batches to process.")

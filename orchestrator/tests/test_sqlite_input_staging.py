@@ -9,6 +9,8 @@ from orchestrator.input_staging_planner import (
     requests_as_dicts,
 )
 from orchestrator.sqlite_db import (
+    get_batches_needing_det_to_world,
+    get_det_to_world_locally_ready_batch_ids,
     get_input_staging_requests,
     mark_input_staging_status,
     request_input_staging,
@@ -109,6 +111,9 @@ def test_stage_input_specs_define_current_stages() -> None:
     assert STAGE_INPUT_SPECS["jpg_to_det"].source_subdir == "images"
     assert STAGE_INPUT_SPECS["jpg_to_det"].destination_subdir == "images"
 
+    assert STAGE_INPUT_SPECS["det_to_world"].readiness_view == "v_batches_needing_det_to_world"
+    assert STAGE_INPUT_SPECS["det_to_world"].subdirs == ("images", "detections")
+
 
 def test_plan_input_staging_for_jpg_to_det_with_input_subdir(tmp_path: Path) -> None:
     conn = make_conn(tmp_path)
@@ -146,6 +151,149 @@ def test_plan_input_staging_for_jpg_to_det_with_input_subdir(tmp_path: Path) -> 
             "priority": 50,
         }
     ]
+
+
+def _det_to_world_cfg() -> dict:
+    return {
+        "paths": {"input_staging_root": "/90daydata/dash_agir/semifield-developed-images"},
+        "transfer": {
+            "juno_endpoint": "juno-uuid",
+            "atlas_endpoint": "atlas-uuid",
+            "ceres_endpoint": "ceres-uuid",
+            "routes": {
+                "det_to_world": {
+                    "destination_site": "ATLAS",
+                    "source_root_ceres": "/90daydata/dash_agir/semifield-developed-images",
+                    "source_root_juno": "/LTS/project/dash_agir/semifield-developed-images",
+                }
+            },
+        },
+    }
+
+
+def test_readiness_view_requires_images_detections_and_grids(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    insert_indexed_file(
+        conn, batch_id="NC_2025-06-01", data_state="semifield-developed-images",
+        file_ext="jpg", parent_dir="images",
+    )
+    insert_indexed_file(
+        conn, batch_id="NC_2025-06-01", data_state="semifield-developed-images",
+        file_ext="txt", parent_dir="detections",
+    )
+
+    # No grids yet: batch should not appear.
+    assert get_batches_needing_det_to_world(conn, batch_ids=["NC_2025-06-01"]) == []
+
+    insert_indexed_file(
+        conn, batch_id="NC_2025-06-01", data_state="semifield-asfm",
+        file_ext="npz", parent_dir="pixel_world_grids",
+    )
+    rows = get_batches_needing_det_to_world(conn, batch_ids=["NC_2025-06-01"])
+    assert len(rows) == 1
+    assert rows[0]["grid_count"] == 1
+    assert rows[0]["georef_count"] == 0
+
+    # Once georeferenced output exists, the batch drops out of readiness.
+    insert_indexed_file(
+        conn, batch_id="NC_2025-06-01", data_state="semifield-developed-images",
+        file_ext="csv", parent_dir="georeferenced",
+    )
+    assert get_batches_needing_det_to_world(conn, batch_ids=["NC_2025-06-01"]) == []
+
+
+def test_det_to_world_locally_ready_gate_requires_both_subdirs(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    insert_indexed_file(
+        conn, batch_id="NC_2025-06-02", data_state="semifield-developed-images",
+        file_ext="jpg", parent_dir="images", site="ATLAS",
+        storage_root="/90daydata/dash_agir",
+    )
+
+    assert get_det_to_world_locally_ready_batch_ids(
+        conn, site="ATLAS", batch_ids=["NC_2025-06-02"]
+    ) == set()
+
+    insert_indexed_file(
+        conn, batch_id="NC_2025-06-02", data_state="semifield-developed-images",
+        file_ext="txt", parent_dir="detections", site="ATLAS",
+        storage_root="/90daydata/dash_agir",
+    )
+    assert get_det_to_world_locally_ready_batch_ids(
+        conn, site="ATLAS", batch_ids=["NC_2025-06-02"]
+    ) == {"NC_2025-06-02"}
+
+
+def test_plan_input_staging_for_det_to_world_falls_back_to_juno(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    insert_indexed_file(
+        conn, batch_id="NC_2025-06-03", data_state="semifield-developed-images",
+        file_ext="jpg", parent_dir="images", site="JUNO",
+    )
+    insert_indexed_file(
+        conn, batch_id="NC_2025-06-03", data_state="semifield-developed-images",
+        file_ext="txt", parent_dir="detections", site="JUNO",
+    )
+    insert_indexed_file(
+        conn, batch_id="NC_2025-06-03", data_state="semifield-asfm",
+        file_ext="npz", parent_dir="pixel_world_grids", site="JUNO",
+    )
+
+    requests = requests_as_dicts(
+        plan_input_staging(conn, _det_to_world_cfg(), stage="det_to_world", site=None)
+    )
+
+    assert {r["dst_path"] for r in requests} == {
+        "/90daydata/dash_agir/semifield-developed-images/NC_2025-06-03/images",
+        "/90daydata/dash_agir/semifield-developed-images/NC_2025-06-03/detections",
+    }
+    assert all(r["src_endpoint"] == "juno-uuid" for r in requests)
+
+
+def test_plan_input_staging_for_det_to_world_prefers_ceres_per_subdir(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    insert_indexed_file(
+        conn, batch_id="NC_2025-06-04", data_state="semifield-developed-images",
+        file_ext="jpg", parent_dir="images", site="JUNO",
+    )
+    insert_indexed_file(
+        conn, batch_id="NC_2025-06-04", data_state="semifield-developed-images",
+        file_ext="txt", parent_dir="detections", site="CERES",
+        storage_root="/90daydata/dash_agir",
+    )
+    insert_indexed_file(
+        conn, batch_id="NC_2025-06-04", data_state="semifield-asfm",
+        file_ext="npz", parent_dir="pixel_world_grids", site="JUNO",
+    )
+
+    requests = requests_as_dicts(
+        plan_input_staging(conn, _det_to_world_cfg(), stage="det_to_world", site=None)
+    )
+    by_subdir = {r["dst_path"].rsplit("/", 1)[-1]: r for r in requests}
+
+    assert by_subdir["images"]["src_endpoint"] == "juno-uuid"
+    assert by_subdir["detections"]["src_endpoint"] == "ceres-uuid"
+
+
+def test_plan_input_staging_for_det_to_world_skips_when_already_local(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    insert_indexed_file(
+        conn, batch_id="NC_2025-06-05", data_state="semifield-developed-images",
+        file_ext="jpg", parent_dir="images", site="ATLAS",
+        storage_root="/90daydata/dash_agir",
+    )
+    insert_indexed_file(
+        conn, batch_id="NC_2025-06-05", data_state="semifield-developed-images",
+        file_ext="txt", parent_dir="detections", site="ATLAS",
+        storage_root="/90daydata/dash_agir",
+    )
+    insert_indexed_file(
+        conn, batch_id="NC_2025-06-05", data_state="semifield-asfm",
+        file_ext="npz", parent_dir="pixel_world_grids", site="JUNO",
+    )
+
+    requests = plan_input_staging(conn, _det_to_world_cfg(), stage="det_to_world", site=None)
+    assert requests == []
 
 
 def test_request_input_staging_is_idempotent_and_reopenable(tmp_path: Path) -> None:

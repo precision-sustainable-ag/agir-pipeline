@@ -101,6 +101,116 @@ def get_batches_needing_jpg_to_det(
         ).fetchall()
     return [dict(r) for r in rows]
 
+
+def get_batches_needing_det_to_world(
+    conn: sqlite3.Connection,
+    *,
+    site: Optional[str] = None,
+    limit: int = 200,
+    batch_ids: Optional[Sequence[str]] = None,
+) -> List[Dict]:
+    """
+    Return rows from ``v_batches_needing_det_to_world``.
+
+    The view already requires that a batch has current detection files,
+    developed-image files, and pixel-to-world NPZ grids (at any site) and no
+    current georeferenced output. Passing ``site`` additionally restricts to
+    batches whose detection files are currently indexed at that site (mirrors
+    ``get_batches_needing_jpg_to_det``'s use of ``site`` for its images join).
+    """
+    batch_filter_sql = ""
+    filter_params: List = []
+    if batch_ids:
+        placeholders = ",".join("?" for _ in batch_ids)
+        batch_filter_sql = f"AND v.batch_id IN ({placeholders})"
+        filter_params = list(batch_ids)
+
+    if site:
+        rows = conn.execute(
+            f"""
+            SELECT
+                v.batch_id, v.batch_date, v.img_count, v.det_count,
+                v.grid_count, v.georef_count,
+                g.site, g.storage_domain, g.storage_root
+            FROM v_batches_needing_det_to_world v
+            JOIN globus_file_index g
+              ON  g.batch_id   = v.batch_id
+             AND  g.data_state = 'semifield-developed-images'
+             AND  g.entry_type = 'file'
+             AND  g.is_current = 1
+             AND  g.parent_dir IN ('detections', 'plant-detections', 'metadata')
+             AND  g.site       = ?
+            WHERE 1=1 {batch_filter_sql}
+            GROUP BY v.batch_id
+            ORDER BY v.batch_date ASC, v.batch_id ASC
+            LIMIT ?
+            """,
+            (site, *filter_params, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"""
+            SELECT v.batch_id, v.batch_date, v.img_count, v.det_count,
+                   v.grid_count, v.georef_count
+            FROM   v_batches_needing_det_to_world v
+            WHERE  1=1 {batch_filter_sql}
+            ORDER  BY v.batch_date ASC, v.batch_id ASC
+            LIMIT  ?
+            """,
+            (*filter_params, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_det_to_world_locally_ready_batch_ids(
+    conn: sqlite3.Connection,
+    *,
+    site: str = "ATLAS",
+    batch_ids: Sequence[str],
+) -> set[str]:
+    """
+    Return the subset of ``batch_ids`` that currently have BOTH developed
+    images and detection files indexed at ``site`` (default: the compute
+    cluster, ATLAS).
+
+    Unlike ``get_completed_input_staging_batch_ids``, this checks live
+    inventory state directly rather than ``staged_inputs`` bookkeeping.
+    det_to_world needs two independent pieces of data (images + detections)
+    that may already be locally present (nothing to stage) or may need
+    fetching from CERES/JUNO one at a time — a single staged_inputs "any row
+    completed" check can't distinguish "both present" from "only one of two
+    fetched", so submission readiness is verified here against the index
+    itself instead.
+    """
+    unique_batch_ids = list(dict.fromkeys(batch_ids))
+    if not unique_batch_ids:
+        return set()
+
+    placeholders = ",".join("?" for _ in unique_batch_ids)
+
+    def _present(parent_dir_sql: str) -> set[str]:
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT batch_id
+            FROM globus_file_index
+            WHERE data_state  = 'semifield-developed-images'
+              AND entry_type  = 'file'
+              AND is_current  = 1
+              AND site        = ?
+              AND {parent_dir_sql}
+              AND batch_id IN ({placeholders})
+            """,
+            (site, *unique_batch_ids),
+        ).fetchall()
+        return {row["batch_id"] for row in rows}
+
+    images_present = _present("parent_dir = 'images'")
+    detections_present = _present(
+        "parent_dir IN ('detections', 'plant-detections', 'metadata')"
+    )
+    return images_present & detections_present
+
+
 class _TempConnection:
     """
     Wraps a sqlite3.Connection opened against a temp file copy of the DB.

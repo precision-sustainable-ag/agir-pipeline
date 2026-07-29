@@ -1,0 +1,121 @@
+# configs/config.det_to_world.example.yaml
+# ============================================================
+# Stage configuration for det_to_world (georeferencing jpg_to_det
+# detections using ASFM pixel-to-world NPZ grids).
+# Copy to configs/config.det_to_world.yaml and fill in values.
+#
+# det_to_world is now wired into scripts/job/submit.py (SUPPORTED_STAGES)
+# and orchestrator/input_staging_planner.py (STAGE_INPUT_SPECS), with its
+# own v_batches_needing_det_to_world SQLite readiness view. It differs from
+# raw_to_jpg/jpg_to_det in two ways:
+#
+#   1. It needs two independent inputs (images + detections) instead of
+#      one. Each is resolved independently: if the destination cluster
+#      (destination_site below) already has it indexed, nothing is
+#      transferred; otherwise CERES is preferred over JUNO LTS as the
+#      source. See orchestrator/input_staging_planner.py's
+#      _plan_multi_site_requests().
+#   2. Submission readiness is gated on live inventory state (both images
+#      and detections currently indexed at destination_site), not on a
+#      single "staged_inputs row completed" flag — see
+#      filter_locally_ready_det_to_world() in scripts/job/submit.py.
+#
+# NPZ pixel-to-world grids (paths.grid_root) are a separate, already-local
+# dataset — there is no Globus route for them yet, so they are read
+# directly off the shared filesystem at job time instead of being staged
+# into $TMPDIR (see stage.cli_args below).
+# ============================================================
+
+# ── Stage identity ────────────────────────────────────────────────────────────
+stage:
+  name: det_to_world
+  cli_module: stages.det_to_world.cli
+  cli_args: >-
+    --i $TMPDIR/input/detections/$BATCH_ID.csv
+    --g /90daydata/dash_agir/semifield-asfm/$BATCH_ID
+    --o $TMPDIR/output
+    --batch-id $BATCH_ID
+  output_subdir: det_to_world
+  final_dest_suffix: georeferenced
+
+# ── Visualization sample ─────────────────────────────────────────────────────
+# No visualizer exists yet for georeferenced CSV output (unlike jpg_to_det's
+# visualize_detections.py). Leave disabled until one is written.
+visualization:
+  enabled: false
+
+# ── Render template ───────────────────────────────────────────────────────────
+render:
+  template: slurm_job.sh.j2
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+paths:
+  agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
+
+  uv_env: /project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/activate
+
+  # Not read by stages/det_to_world/cli.py (it has no --c flag) — present
+  # only because orchestrator/submit_jobs.py always reads paths.stage_config
+  # to populate $CONFIG_PATH in the generated job script. Points at this
+  # file for traceability.
+  stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/configs/config.det_to_world.yaml
+
+  # Both images/ and detections/ subdirs for a batch are staged here (see
+  # transfer.routes.det_to_world below), then rsynced together into
+  # $TMPDIR/input by the generated job script:
+  #   <input_staging_root>/<batch_id>/images/
+  #   <input_staging_root>/<batch_id>/detections/<batch_id>.csv
+  input_staging_root: /90daydata/dash_agir/semifield-developed-images
+
+  # Directory of per-image NPZ pixel-to-world grids produced by ASFM, one
+  # subdirectory per batch_id. Read directly from here at job time (see
+  # stage.cli_args --g above) rather than staged into $TMPDIR.
+  grid_root: /90daydata/dash_agir/semifield-asfm
+
+  # Per-run artifacts (run_report.json, manifest.json, georeferenced CSV)
+  # saved here after the run completes.
+  output_stage_runs: /90daydata/dash_agir/tmp/stage_runs/det_to_world
+
+  # Root under which final promoted georeferenced CSVs are written as:
+  #   <final_dest_root>/<batch_id>/georeferenced/<batch_id>_georeferenced.csv
+  final_dest_root: /90daydata/dash_agir/semifield-developed-images
+
+  # SLURM job stdout/stderr logs.
+  log_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs
+
+  # ── SQLite DB ──────────────────────────────────────────────────────────────
+  db: /project/dash_agir/globus_index/globus_file_index.sqlite3
+  db_read_mode: direct  # direct | snapshot
+  db_temp_dir: /90daydata/dash_agir/tmp/db
+  locks_root: /project/dash_agir/locks
+
+# ── Globus input-staging settings ──────────────────────────────────────────
+# Used by scripts/job/stage_inputs.py to fetch images/detections for a batch
+# that aren't already indexed at destination_site. Each of the two subdirs
+# is resolved independently (see orchestrator/input_staging_planner.py):
+#   destination_site already has it  -> nothing staged
+#   else CERES has it                -> transfer CERES -> destination_site
+#   else                              -> fall back to JUNO LTS
+transfer:
+  juno_endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
+  atlas_endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+  ceres_endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+
+  dry_run: false
+  poll_interval_seconds: 30
+  poll_timeout_seconds: 7200
+
+  routes:
+    det_to_world:
+      destination_site: ATLAS
+      source_root_ceres: /90daydata/dash_agir/semifield-developed-images
+      source_root_juno: /LTS/project/dash_agir/semifield-developed-images
+
+# ── SLURM job parameters ──────────────────────────────────────────────────────
+# CPU-only stage (scipy RegularGridInterpolator) — no GPU needed.
+slurm:
+  account: dash_agir
+  partition: compute
+  cpus_per_task: 4
+  mem: 16G
+  time: "1:00:00"

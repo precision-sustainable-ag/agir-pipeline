@@ -13,6 +13,7 @@
 -- -----
 --   v_batches_needing_raw_to_jpg   What to run next for stage 1
 --   v_batches_needing_jpg_to_det   What to run next for stage 2
+--   v_batches_needing_det_to_world What to run next for stage 3 (det_to_world)
 --
 -- Views query globus_file_index WHERE is_current = 1 across ALL indexed
 -- endpoints simultaneously, so cross-site inventory gaps resolve correctly
@@ -332,7 +333,9 @@ CREATE INDEX IF NOT EXISTS idx_sa_alias
 
 -- globus_file_index  ──────────────────────────────────────────────────────────
 
--- Primary gap-report index: drives both orchestration views.
+-- Point lookups by batch_id (e.g. joining a known batch back to its site).
+-- NOT used by the v_batches_needing_* CTEs below, which have no batch_id
+-- equality predicate (they GROUP BY batch_id) — see idx_gfi_state_type_ext.
 CREATE INDEX IF NOT EXISTS idx_gfi_batch_state_current
     ON globus_file_index (batch_id, data_state, site, is_current);
 
@@ -343,6 +346,15 @@ CREATE INDEX IF NOT EXISTS idx_gfi_storage_current
 -- Extension + parent_dir lookups (file-type counts in summaries and views).
 CREATE INDEX IF NOT EXISTS idx_gfi_ext_parent
     ON globus_file_index (data_state, file_ext, parent_dir);
+
+-- Covering index for the raw_batches/jpg_batches CTEs in both
+-- v_batches_needing_raw_to_jpg and v_batches_needing_jpg_to_det: those CTEs
+-- filter on (data_state, entry_type, is_current, file_ext[, parent_dir]) and
+-- GROUP BY batch_id, MIN(batch_date). Leading columns match the filters so
+-- SQLite can seek instead of scan, and trailing batch_id/batch_date let the
+-- GROUP BY run as an index-only scan without touching the table.
+CREATE INDEX IF NOT EXISTS idx_gfi_state_type_ext
+    ON globus_file_index (data_state, entry_type, is_current, file_ext, parent_dir, batch_id, batch_date);
 
 -- Stale-marking: find rows not touched by the current run.
 CREATE INDEX IF NOT EXISTS idx_gfi_run_current
@@ -529,6 +541,107 @@ WHERE COALESCE(d.det_count, 0) = 0   -- no detections exist yet
 ORDER BY j.batch_date ASC, j.batch_id ASC;
 
 
+-- -----------------------------------------------------------------------------
+-- v_batches_needing_det_to_world
+-- Batches with current detection files, current developed-image files, AND
+-- current pixel-to-world NPZ grids (anywhere, any site) that have no current
+-- georeferenced output files yet.
+--
+-- Unlike the raw_to_jpg/jpg_to_det views, this does NOT gate on locality —
+-- it answers "does this batch's data exist somewhere so det_to_world could
+-- run", not "is it staged on the compute cluster". Local (Atlas) readiness
+-- for submission is checked separately by
+-- get_det_to_world_locally_ready_batch_ids(), after input staging has had a
+-- chance to pull missing images/detections in from CERES/JUNO. Grids are not
+-- part of that staging flow (see orchestrator/input_staging_planner.py) —
+-- they're read directly off shared storage at job time, so this view's
+-- grid_batches CTE only confirms ASFM has produced them somewhere, not that
+-- they're on the compute cluster.
+-- -----------------------------------------------------------------------------
+DROP VIEW IF EXISTS v_batches_needing_det_to_world;
+CREATE VIEW v_batches_needing_det_to_world AS
+WITH
+img_batches AS (
+    SELECT
+        batch_id,
+        MIN(batch_date) AS batch_date,
+        COUNT(*)        AS img_count
+    FROM globus_file_index
+    WHERE data_state = 'semifield-developed-images'
+      AND entry_type = 'file'
+      AND batch_id   IS NOT NULL
+      AND is_current = 1
+      AND file_ext   IN ('jpg', 'jpeg')
+      AND parent_dir = 'images'
+    GROUP BY batch_id
+),
+det_batches AS (
+    SELECT
+        batch_id,
+        COUNT(*) AS det_count
+    FROM globus_file_index
+    WHERE data_state = 'semifield-developed-images'
+      AND entry_type = 'file'
+      AND batch_id   IS NOT NULL
+      AND is_current = 1
+      AND parent_dir IN ('detections', 'plant-detections', 'metadata')
+    GROUP BY batch_id
+),
+grid_batches AS (
+    SELECT
+        batch_id,
+        COUNT(*) AS grid_count
+    FROM globus_file_index
+    WHERE data_state = 'semifield-asfm'
+      AND entry_type = 'file'
+      AND batch_id   IS NOT NULL
+      AND is_current = 1
+      AND file_ext   = 'npz'
+      AND parent_dir = 'pixel_world_grids'
+    GROUP BY batch_id
+),
+georef_batches AS (
+    SELECT
+        batch_id,
+        COUNT(*) AS georef_count
+    FROM globus_file_index
+    WHERE data_state = 'semifield-developed-images'
+      AND entry_type = 'file'
+      AND batch_id   IS NOT NULL
+      AND is_current = 1
+      AND parent_dir = 'georeferenced'
+    GROUP BY batch_id
+),
+active_leases AS (
+    SELECT batch_id
+    FROM   stage_leases
+    WHERE  stage      = 'det_to_world'
+      AND  expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+)
+SELECT
+    i.batch_id,
+    i.batch_date,
+    i.img_count,
+    d.det_count,
+    g.grid_count,
+    COALESCE(w.georef_count, 0) AS georef_count
+FROM  img_batches   i
+JOIN  det_batches   d  ON i.batch_id = d.batch_id   -- need images and detections
+JOIN  grid_batches  g  ON i.batch_id = g.batch_id   -- and pixel-to-world grids
+LEFT JOIN georef_batches w  ON i.batch_id = w.batch_id
+LEFT JOIN active_leases   al ON i.batch_id = al.batch_id
+WHERE COALESCE(w.georef_count, 0) = 0   -- no georeferenced output exists yet
+  AND al.batch_id IS NULL               -- no active lease
+  AND NOT EXISTS (                      -- never succeeded
+      SELECT 1 FROM stage_runs sr
+      WHERE sr.batch_id = i.batch_id
+        AND sr.stage    = 'det_to_world'
+        AND sr.status   = 'success'
+  )
+ORDER BY i.batch_date ASC, i.batch_id ASC;
+
+
 -- =============================================================================
-PRAGMA user_version = 6;
+-- v8: add v_batches_needing_det_to_world for stage 3 (det_to_world) readiness.
+PRAGMA user_version = 8;
 COMMIT;
