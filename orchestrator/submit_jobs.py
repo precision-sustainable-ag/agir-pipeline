@@ -68,6 +68,7 @@ from pathlib import Path
 from typing import List, NamedTuple, Optional
 
 from orchestrator.config import load_stage_config
+from orchestrator.input_staging_planner import DEFAULT_IMAGE_SAMPLE_SIZE
 from orchestrator.sqlite_db import (
     open_db,
     claim_stage_lease,
@@ -164,6 +165,7 @@ def _render_slurm_script(
     cpus: int,
     mem: str,
     time_limit: str,
+    image_sample_size: int,
     template_name: str = DEFAULT_JOB_TEMPLATE,
 ) -> str:
     context = {
@@ -191,6 +193,7 @@ def _render_slurm_script(
         "cpus": cpus,
         "mem": mem,
         "time_limit": time_limit,
+        "image_sample_size": image_sample_size,
     }
     return _render_template(template_name, context)
 
@@ -255,6 +258,13 @@ def submit_jobs(
     # e.g. jpg_to_det reads from .../semifield-developed-images/<batch_id>/images/
     #      raw_to_jpg reads from .../semifield-upload/<batch_id>/  (no subdir)
     input_subdir   = route.get("input_subdir", "")
+    # Only meaningful for stages like det_to_world whose input_staging_dir is
+    # a batch root containing a nested images/ subdir that may hold every
+    # image in the batch (e.g. already resident at destination from an
+    # earlier stage) rather than just the sample staged_inputs normally
+    # fetches — see slurm_job.sh.j2 Step 2, which caps what's copied to
+    # TMPDIR at this count either way.
+    image_sample_size = int(route.get("image_sample_size", DEFAULT_IMAGE_SAMPLE_SIZE))
 
     # ── Slurm block ───────────────────────────────────────────────────────────
     slurm          = cfg["slurm"]
@@ -334,6 +344,7 @@ def submit_jobs(
                 cpus=cpus,
                 mem=mem,
                 time_limit=time_limit,
+                image_sample_size=image_sample_size,
                 template_name=template_name,
             )
 

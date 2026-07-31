@@ -9,21 +9,22 @@
 # own v_batches_needing_det_to_world SQLite readiness view. It differs from
 # raw_to_jpg/jpg_to_det in two ways:
 #
-#   1. It needs two independent inputs (images + detections) instead of
-#      one. Each is resolved independently: if the destination cluster
-#      (destination_site below) already has it indexed, nothing is
-#      transferred; otherwise CERES is preferred over JUNO LTS as the
-#      source. See orchestrator/input_staging_planner.py's
-#      _plan_multi_site_requests().
-#   2. Submission readiness is gated on live inventory state (both images
-#      and detections currently indexed at destination_site), not on a
-#      single "staged_inputs row completed" flag — see
+#   1. It needs three independent inputs — images, detections, and ASFM
+#      pixel-to-world NPZ grids — instead of one. Each is resolved
+#      independently: if the destination cluster (destination_site below)
+#      already has it indexed, nothing is transferred; otherwise CERES is
+#      preferred over JUNO LTS as the source. Images/detections share one
+#      root (input_staging_root) since they're both promoted under
+#      semifield-developed-images — see
+#      orchestrator/input_staging_planner.py's _plan_multi_site_requests().
+#      Grids live under a separate root/data_state (semifield-asfm) and are
+#      planned separately by that module's _plan_grid_request(), since
+#      GridCache reads them directly off local disk rather than through
+#      $TMPDIR (see stage.cli_args --g below, and grid_root's comment).
+#   2. Submission readiness is gated on live inventory state (images,
+#      detections, AND grids all currently indexed at destination_site),
+#      not on a single "staged_inputs row completed" flag — see
 #      filter_locally_ready_det_to_world() in scripts/job/submit.py.
-#
-# NPZ pixel-to-world grids (paths.grid_root) are a separate, already-local
-# dataset — there is no Globus route for them yet, so they are read
-# directly off the shared filesystem at job time instead of being staged
-# into $TMPDIR (see stage.cli_args below).
 # ============================================================
 
 # ── Stage identity ────────────────────────────────────────────────────────────
@@ -39,10 +40,26 @@ stage:
   final_dest_suffix: georeferenced
 
 # ── Visualization sample ─────────────────────────────────────────────────────
-# No visualizer exists yet for georeferenced CSV output (unlike jpg_to_det's
-# visualize_detections.py). Leave disabled until one is written.
+# Draws the georeferenced boxes (pixel-space corners, labeled with their
+# world centroid) back onto the sampled images staged in $TMPINPUT/images
+# (see transfer.routes.det_to_world.image_sample_size above) — see
+# scripts/job/visualize.py's det_to_world mode. Unlike jpg_to_det's
+# per-image .txt files, det_to_world writes one CSV for the whole batch, so
+# `detections` here points at that file, not a directory.
+#
+# No `sample_size` here: $TMPINPUT/images already IS the sample (capped at
+# image_sample_size above), so visualize.py's det_to_world mode renders
+# everything found there rather than re-sampling a second time — a separate
+# sample_size here would just be an independent cap that could silently
+# drift out of sync with image_sample_size.
 visualization:
-  enabled: false
+  enabled: true
+  mode: det_to_world
+  args:
+    images: '"$TMPINPUT/images"'
+    detections: '"$RUN_DIR/artifacts/${BATCH_ID}_georeferenced.csv"'
+    output: '"$VIZ_DIR"'
+    max_width: 1800
 
 # ── Render template ───────────────────────────────────────────────────────────
 render:
@@ -67,9 +84,11 @@ paths:
   #   <input_staging_root>/<batch_id>/detections/<batch_id>.csv
   input_staging_root: /90daydata/dash_agir/semifield-developed-images
 
-  # Root of per-image NPZ pixel-to-world grids produced by ASFM, one
-  # subdirectory per batch_id. Within a batch, ASFM nests grids further under
-  # per-time-range sub-batch directories, e.g.:
+  # Root of per-batch NPZ pixel-to-world grids produced by ASFM. Staged here
+  # by transfer.routes.det_to_world.source_root_grids_ceres/juno (see below)
+  # when destination_site doesn't already have a batch's grids. Within a
+  # batch, ASFM nests grids further under per-time-range sub-batch
+  # directories, e.g.:
   #   <grid_root>/<batch_id>/<HHMMSS_HHMMSS>/pixel_world_grids/<image_id>.npz
   # stage.cli_args --g above passes the whole <batch_id> directory (not a
   # specific pixel_world_grids folder) — GridCache indexes it with a
@@ -96,9 +115,9 @@ paths:
   locks_root: /project/dash_agir/locks
 
 # ── Globus input-staging settings ──────────────────────────────────────────
-# Used by scripts/job/stage_inputs.py to fetch images/detections for a batch
-# that aren't already indexed at destination_site. Each of the two subdirs
-# is resolved independently (see orchestrator/input_staging_planner.py):
+# Used by scripts/job/stage_inputs.py to fetch images/detections/grids for a
+# batch that aren't already indexed at destination_site. Each piece is
+# resolved independently (see orchestrator/input_staging_planner.py):
 #   destination_site already has it  -> nothing staged
 #   else CERES has it                -> transfer CERES -> destination_site
 #   else                              -> fall back to JUNO LTS
@@ -113,9 +132,41 @@ transfer:
 
   routes:
     det_to_world:
-      destination_site: ATLAS
+      # det_to_world is CPU-only (scipy interpolation, no GPU) and runs on
+      # CERES — unlike jpg_to_det, which needs GPU-A100 and runs on ATLAS.
+      # destination_site drives BOTH which cluster's presence skips staging
+      # AND which *_endpoint below is used as the Globus destination (see
+      # _endpoint_for_site() in orchestrator/input_staging_planner.py) —
+      # keep this in sync with slurm.account/partition below and with
+      # wherever scripts/job/submit.py is actually invoked from.
+      destination_site: CERES
+
+      # images/ + detections/ (semifield-developed-images). ATLAS is listed
+      # because jpg_to_det runs there — a batch's images/detections often
+      # need to hop ATLAS -> CERES before det_to_world can run on them.
+      # Checked in this order (see _INTERMEDIATE_FALLBACK_SITES in
+      # orchestrator/input_staging_planner.py): destination (CERES) first
+      # (implicit), then ATLAS, then CERES-as-source (redundant when CERES
+      # is already the destination, harmless), then JUNO LTS.
+      source_root_atlas: /90daydata/dash_agir/semifield-developed-images
       source_root_ceres: /90daydata/dash_agir/semifield-developed-images
       source_root_juno: /LTS/project/dash_agir/semifield-developed-images
+
+      # The stage CLI never reads image pixels (only detections CSV + NPZ
+      # grids — see stage.cli_args above), so only a random sample of images
+      # is fetched, as individual Globus batch-transfer items, instead of the
+      # whole (often large) images/ directory. Sample is deterministic per
+      # batch_id+site (see _sample_image_file_names in
+      # orchestrator/input_staging_planner.py), so replanning doesn't churn
+      # which files were picked. Ignored for the detections/ subdir, which
+      # stays a small whole-directory transfer.
+      image_sample_size: 50
+
+      # ASFM pixel-to-world NPZ grids (semifield-asfm) — separate root,
+      # transferred as a whole <batch_id> directory since grids are nested
+      # under per-time-range sub-batch folders (see paths.grid_root below).
+      source_root_grids_ceres: /90daydata/dash_agir/semifield-asfm
+      source_root_grids_juno: /LTS/project/dash_agir/semifield-asfm
 
 # ── SLURM job parameters ──────────────────────────────────────────────────────
 # CPU-only stage (scipy RegularGridInterpolator) — no GPU needed.

@@ -162,53 +162,47 @@ def get_batches_needing_det_to_world(
     return [dict(r) for r in rows]
 
 
-def get_det_to_world_locally_ready_batch_ids(
+def get_det_to_world_staged_batch_ids(
     conn: sqlite3.Connection,
     *,
-    site: str = "ATLAS",
-    batch_ids: Sequence[str],
+    expected_dst_paths: Dict[str, Sequence[str]],
 ) -> set[str]:
     """
-    Return the subset of ``batch_ids`` that currently have BOTH developed
-    images and detection files indexed at ``site`` (default: the compute
-    cluster, ATLAS).
+    Return the subset of batch_ids (keys of ``expected_dst_paths``) for which
+    every expected ``staged_inputs`` dst_path has ``status='completed'``.
 
-    Unlike ``get_completed_input_staging_batch_ids``, this checks live
-    inventory state directly rather than ``staged_inputs`` bookkeeping.
-    det_to_world needs two independent pieces of data (images + detections)
-    that may already be locally present (nothing to stage) or may need
-    fetching from CERES/JUNO one at a time — a single staged_inputs "any row
-    completed" check can't distinguish "both present" from "only one of two
-    fetched", so submission readiness is verified here against the index
-    itself instead.
+    det_to_world needs independent pieces of data (images + detections +
+    grids), each with its own dst_path (see
+    ``orchestrator.input_staging_planner.det_to_world_expected_dst_paths``).
+    Unlike ``get_completed_input_staging_batch_ids`` (which only checks "any
+    row completed" — correct for raw_to_jpg/jpg_to_det's single fixed
+    route), this requires ALL of a batch's expected pieces to show
+    completed. Pieces already resident at the destination when planned are
+    recorded as immediately-completed rows too (see
+    ``StagingRequest.already_satisfied``), so this reflects readiness the
+    moment ``poll_stage_inputs.py``/``stage_inputs.py`` mark them —
+    no fresh ``globus_file_index`` inventory scan required.
     """
-    unique_batch_ids = list(dict.fromkeys(batch_ids))
-    if not unique_batch_ids:
-        return set()
-
-    placeholders = ",".join("?" for _ in unique_batch_ids)
-
-    def _present(parent_dir_sql: str) -> set[str]:
-        rows = conn.execute(
+    ready: set[str] = set()
+    for batch_id, dst_paths in expected_dst_paths.items():
+        dst_paths = list(dst_paths)
+        if not dst_paths:
+            continue
+        placeholders = ",".join("?" for _ in dst_paths)
+        row = conn.execute(
             f"""
-            SELECT DISTINCT batch_id
-            FROM globus_file_index
-            WHERE data_state  = 'semifield-developed-images'
-              AND entry_type  = 'file'
-              AND is_current  = 1
-              AND site        = ?
-              AND {parent_dir_sql}
-              AND batch_id IN ({placeholders})
+            SELECT COUNT(DISTINCT dst_path) AS n
+            FROM staged_inputs
+            WHERE stage = 'det_to_world'
+              AND status = 'completed'
+              AND batch_id = ?
+              AND dst_path IN ({placeholders})
             """,
-            (site, *unique_batch_ids),
-        ).fetchall()
-        return {row["batch_id"] for row in rows}
-
-    images_present = _present("parent_dir = 'images'")
-    detections_present = _present(
-        "parent_dir IN ('detections', 'plant-detections', 'metadata')"
-    )
-    return images_present & detections_present
+            (batch_id, *dst_paths),
+        ).fetchone()
+        if row and row["n"] == len(dst_paths):
+            ready.add(batch_id)
+    return ready
 
 
 class _TempConnection:
@@ -346,7 +340,15 @@ def open_db(
     else:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(db_path), timeout=120)
-        conn.execute("PRAGMA journal_mode=WAL;")
+        # Not WAL: this DB lives on an NFS-mounted shared filesystem
+        # (/project, accessed from ATLAS/CERES/JUNO), and WAL's shared-memory
+        # (-shm) locking is unreliable there — SQLite's own docs call out
+        # network filesystems as unsupported for WAL. Confirmed in practice:
+        # a CERES compute node hit "OperationalError: locking protocol" here
+        # once the DB got switched into WAL mode. DELETE (the traditional
+        # rollback journal) only needs plain POSIX advisory locks, which this
+        # mount's NFS lock manager handles correctly.
+        conn.execute("PRAGMA journal_mode=DELETE;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA temp_store=MEMORY;")
         conn.execute("PRAGMA busy_timeout=120000;")

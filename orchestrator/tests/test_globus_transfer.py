@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 
 from orchestrator.globus_transfer import (
+    build_batch_stdin,
     build_input_staging_label,
     build_task_show_command,
     build_transfer_command,
@@ -44,6 +45,59 @@ def test_build_transfer_command() -> None:
         "--label",
         "label-1",
     ]
+
+
+def make_batch_request() -> StagingRequest:
+    return StagingRequest(
+        batch_id="MD_2026-03-19",
+        stage="det_to_world",
+        src_endpoint="atlas-uuid",
+        dst_endpoint="ceres-uuid",
+        src_path="/90daydata/dash_agir/semifield-developed-images/MD_2026-03-19/images",
+        dst_path="/90daydata/dash_agir/semifield-developed-images/MD_2026-03-19/images",
+        file_names=("img_001.jpg", "img_002.jpg"),
+    )
+
+
+def test_build_transfer_command_uses_batch_mode_for_sampled_files() -> None:
+    request = make_batch_request()
+
+    assert build_transfer_command(request, label="label-1") == [
+        "globus",
+        "transfer",
+        "atlas-uuid",
+        "ceres-uuid",
+        "--batch",
+        "-",
+        "--sync-level",
+        "mtime",
+        "--label",
+        "label-1",
+    ]
+
+
+def test_build_batch_stdin_pairs_each_sampled_file() -> None:
+    request = make_batch_request()
+
+    assert build_batch_stdin(request) == (
+        "/90daydata/dash_agir/semifield-developed-images/MD_2026-03-19/images/img_001.jpg"
+        " /90daydata/dash_agir/semifield-developed-images/MD_2026-03-19/images/img_001.jpg\n"
+        "/90daydata/dash_agir/semifield-developed-images/MD_2026-03-19/images/img_002.jpg"
+        " /90daydata/dash_agir/semifield-developed-images/MD_2026-03-19/images/img_002.jpg\n"
+    )
+
+
+def test_submit_transfer_pipes_batch_stdin_for_sampled_files() -> None:
+    calls = []
+
+    def fake_runner(*args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args[0], 0, stdout='{"task_id": "task-456"}', stderr="")
+
+    result = submit_transfer(make_batch_request(), runner=fake_runner)
+
+    assert result.status == "submitted"
+    assert calls[0][1]["input"] == build_batch_stdin(make_batch_request())
 
 
 def test_parse_globus_task_id_and_state() -> None:

@@ -70,15 +70,34 @@ The first three stages form the currently orchestrated path. `det_to_seg`
 can be invoked directly, but does not yet participate in the SQLite
 readiness, prerequisite-staging, lease, or generated Slurm-job flow.
 
-`det_to_world` differs from `raw_to_jpg`/`jpg_to_det` in how its inputs are
-staged: it needs two independent pieces of data (images and detections)
-rather than one, and each is resolved against the nearest site that already
-has it (destination cluster, then CERES, then JUNO LTS) instead of a single
-fixed JUNO route. Submission readiness is checked against live inventory
-state (both pieces present at the destination site) rather than a single
-`staged_inputs` "completed" flag. See
-`orchestrator/input_staging_planner.py`'s `_plan_multi_site_requests()` and
-`scripts/job/submit.py`'s `filter_locally_ready_det_to_world()`.
+`det_to_world` differs from `raw_to_jpg`/`jpg_to_det` in several ways:
+
+- It needs three independent pieces of data — images, detections, and ASFM
+  pixel-to-world NPZ grids — rather than one. Images and detections are
+  resolved against the nearest site that already has them (destination
+  cluster, then ATLAS/CERES, then JUNO LTS) instead of a single fixed JUNO
+  route; grids are resolved the same way but from a separate root/data
+  state. See `orchestrator/input_staging_planner.py`'s
+  `_plan_multi_site_requests()` and `_plan_grid_request()`.
+- Only a small random sample of images is staged (`transfer.routes
+  .det_to_world.image_sample_size`, default 8) rather than the whole
+  directory — the stage CLI never reads image pixels; the sample exists
+  solely to support an optional visualization step (see below).
+- Submission readiness is gated on `staged_inputs` — all three pieces must
+  show `status='completed'` — the same mechanism `raw_to_jpg`/`jpg_to_det`
+  use, so it never depends on a fresh `globus_file_index` rescan after a
+  transfer finishes. Pieces already resident at the destination when planned
+  are recorded as immediately-completed `staged_inputs` rows too (see
+  `StagingRequest.already_satisfied`). See `scripts/job/submit.py`'s
+  `filter_det_to_world_staged_ready()`.
+- It's CPU-only (scipy interpolation, no GPU) and runs on CERES by default,
+  unlike GPU-bound `jpg_to_det` on ATLAS — `transfer.routes.det_to_world
+  .destination_site` drives both which cluster's presence skips staging and
+  which Globus endpoint is used as the destination.
+- It can optionally render a QC visualization: georeferenced boxes drawn
+  back onto the sampled images, each labeled with its world-space area in
+  cm² (computed via the shoelace formula over the box's four remapped world
+  corners). See `scripts/job/visualize.py`'s `det_to_world` mode.
 
 This distinction matters operationally: the presence of a stage package does
 not by itself mean `scripts/job/submit.py` can schedule that stage.

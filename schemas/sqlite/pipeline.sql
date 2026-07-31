@@ -35,8 +35,18 @@
 -- -----------------------------------------------------------------------------
 -- Connection PRAGMAs  (set per-connection; survive outside any transaction)
 -- -----------------------------------------------------------------------------
+-- journal_mode is DELETE, not WAL: this DB lives on an NFS-mounted shared
+-- filesystem (/project, accessed from ATLAS/CERES/JUNO), and WAL's
+-- shared-memory (-shm) locking is unreliable there — SQLite's own docs call
+-- out network filesystems as unsupported for WAL. Confirmed in practice: a
+-- CERES compute node hit "OperationalError: locking protocol" once this DB
+-- got switched into WAL mode by an earlier apply of this file. DELETE (the
+-- traditional rollback journal) only needs plain POSIX advisory locks, which
+-- this mount's NFS lock manager handles correctly. Keep in sync with
+-- orchestrator/sqlite_db.py's open_db() and the comment in
+-- scripts/admin/globus_index.py's init_db().
 PRAGMA foreign_keys  = ON;
-PRAGMA journal_mode  = WAL;
+PRAGMA journal_mode  = DELETE;
 PRAGMA synchronous   = NORMAL;
 PRAGMA temp_store    = MEMORY;
 PRAGMA busy_timeout  = 120000;
@@ -549,14 +559,20 @@ ORDER BY j.batch_date ASC, j.batch_id ASC;
 --
 -- Unlike the raw_to_jpg/jpg_to_det views, this does NOT gate on locality —
 -- it answers "does this batch's data exist somewhere so det_to_world could
--- run", not "is it staged on the compute cluster". Local (Atlas) readiness
--- for submission is checked separately by
--- get_det_to_world_locally_ready_batch_ids(), after input staging has had a
--- chance to pull missing images/detections in from CERES/JUNO. Grids are not
--- part of that staging flow (see orchestrator/input_staging_planner.py) —
--- they're read directly off shared storage at job time, so this view's
--- grid_batches CTE only confirms ASFM has produced them somewhere, not that
--- they're on the compute cluster.
+-- run", not "is it staged on the compute cluster". Submission readiness for
+-- the actual compute cluster (CERES by default — det_to_world is CPU-only,
+-- unlike GPU-bound jpg_to_det on ATLAS) is checked separately by
+-- scripts/job/submit.py's filter_det_to_world_staged_ready(), which requires
+-- all three pieces — images, detections, AND grids — to show
+-- status='completed' in staged_inputs. All three are planned and staged by
+-- orchestrator/input_staging_planner.py (images/detections via
+-- _plan_multi_site_requests(), grids via _plan_grid_request()); pieces
+-- already resident at the destination are recorded as immediately-completed
+-- staged_inputs rows too, so readiness never depends on a fresh
+-- globus_file_index rescan after a transfer completes. Images are staged as
+-- only a small random sample (transfer.routes.det_to_world.image_sample_size)
+-- for an optional visualization step, not the whole directory — the stage
+-- CLI itself never reads image pixels.
 -- -----------------------------------------------------------------------------
 DROP VIEW IF EXISTS v_batches_needing_det_to_world;
 CREATE VIEW v_batches_needing_det_to_world AS

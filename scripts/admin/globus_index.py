@@ -324,9 +324,10 @@ def init_db(db_path: str, logger: logging.Logger) -> sqlite3.Connection:
 
     # Per-connection tuning not already covered by pipeline.sql's PRAGMAs.
     # journal_mode/foreign_keys/synchronous/temp_store/busy_timeout are set
-    # by pipeline.sql itself — do not override them here, or the two
-    # sources of truth will disagree (this previously forced DELETE mode
-    # over the schema file's WAL setting).
+    # by pipeline.sql itself (DELETE, not WAL — this DB lives on an
+    # NFS-mounted shared filesystem where WAL's shared-memory locking is
+    # unreliable) — do not override them here, or the two sources of truth
+    # will disagree.
     conn.execute("PRAGMA cache_size=-200000;")  # about 200 MB, scanner-specific
 
     schema_sql = load_schema_sql()

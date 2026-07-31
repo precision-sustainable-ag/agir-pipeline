@@ -69,7 +69,10 @@ log_section "[1/6] Validate staged inputs"
 log "Input staging dir: $INPUT_STAGING_DIR"
 
 set +e
-FILE_COUNT=$(find "$INPUT_STAGING_DIR" -maxdepth 1 -type f 2>/dev/null | wc -l)
+# Not -maxdepth 1: some stages' input_staging_dir is a batch root containing
+# multiple subdirs (e.g. det_to_world's images/ + detections/) rather than a
+# single leaf directory of files, so this must look at the whole tree.
+FILE_COUNT=$(find "$INPUT_STAGING_DIR" -type f 2>/dev/null | wc -l)
 set -e
 
 if [[ "$FILE_COUNT" -eq 0 ]]; then
@@ -89,8 +92,35 @@ TMPINPUT="$TMPDIR/input"
 TMPOUTPUT="$TMPDIR/output"
 mkdir -p "$TMPINPUT" "$TMPOUTPUT"
 
+{% if stage_name == "det_to_world" %}
+# det_to_world only: images/ can hold every image in the batch rather than
+# just the sampled subset staged_inputs normally fetches for visualization —
+# e.g. when it was already resident at the destination when staged
+# (already_satisfied, see orchestrator/input_staging_planner.py) from an
+# earlier stage that promoted the full set. Cap what actually lands in
+# TMPDIR at IMAGE_SAMPLE_SIZE either way, so a job never copies a whole
+# batch of images it has no use for. Gated on stage_name (not a generic
+# "does images/ exist" check) since no other stage's input_staging_dir
+# layout has a nested images/ subdir to sample from.
+IMAGE_SAMPLE_SIZE={{ image_sample_size }}
+mkdir -p "$TMPINPUT/images"
+IMAGE_COUNT=$(find "$INPUT_STAGING_DIR/images" -type f 2>/dev/null | wc -l)
+if [[ "$IMAGE_COUNT" -gt "$IMAGE_SAMPLE_SIZE" ]]; then
+    log "images/ has $IMAGE_COUNT file(s) staged, above sample size $IMAGE_SAMPLE_SIZE — copying a random sample"
+    find "$INPUT_STAGING_DIR/images" -type f -print0 \
+        | shuf -z -n "$IMAGE_SAMPLE_SIZE" \
+        | xargs -0 -I{} cp {} "$TMPINPUT/images/"
+else
+    log "images/ has $IMAGE_COUNT file(s) staged, at or under sample size $IMAGE_SAMPLE_SIZE — copying all"
+    rsync -a "$INPUT_STAGING_DIR/images/." "$TMPINPUT/images/"
+fi
+rsync -av --exclude images "$INPUT_STAGING_DIR"/. "$TMPINPUT"/
+{% else %}
 rsync -av "$INPUT_STAGING_DIR"/. "$TMPINPUT"/
-log "Copied $FILE_COUNT file(s) to $TMPINPUT"
+{% endif %}
+
+COPIED_COUNT=$(find "$TMPINPUT" -type f 2>/dev/null | wc -l)
+log "Copied $COPIED_COUNT file(s) to $TMPINPUT"
 
 # ── Step 3: Run stage CLI ─────────────────────────────────────────────────────
 log_section "[3/6] Running {{ stage_name }}"

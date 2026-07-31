@@ -14,3 +14,4 @@ scripts/*.txt
 logs/
 uv.lock
 run.sh
+logs_v2
