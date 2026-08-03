@@ -46,7 +46,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 BATCH_PATTERN = re.compile(r"^([A-Z]{2})_(\d{4}-\d{2}-\d{2})$")
 VALID_SITES = {"JUNO", "NCSU", "CERES", "ATLAS"}
 VALID_STORAGE_DOMAINS = {"screberg", "dash_agir", "national_plant_image_repository"}
-VALID_DATA_STATES = {"semifield-upload", "semifield-developed-images", "semifield-cutouts", "semifield-utils", "semifield-tools", "semifield-asfm"}
+VALID_DATA_STATES = {"semifield-upload", "semifield-developed-images", "semifield-cutouts", "semifield-utils", "semifield-tools", "semifield-asfm", "result_sync"}
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schemas" / "sqlite" / "pipeline.sql"
 # Original globus_file_index columns from the PostgreSQL overview.
 BASE_GFI_COLUMNS = [
