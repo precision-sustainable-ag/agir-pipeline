@@ -57,9 +57,10 @@ def build_command_log_paths(
     *,
     base_log_dir: Path | str | None = None,
     command_name: str,
+    category: str = "input_staging",
     now: Optional[datetime] = None,
 ) -> CommandLogPaths:
-    """Build the per-stage/per-command log paths for one command run."""
+    """Build categorized per-command log paths for one command run."""
     current = now or _utc_now()
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
@@ -68,7 +69,7 @@ def build_command_log_paths(
     timestamp = current.strftime("%Y%m%dT%H%M%SZ")
     date = current.strftime("%Y-%m-%d")
     root_log_dir = Path(base_log_dir) if base_log_dir is not None else Path.cwd() / "logs"
-    directory = root_log_dir / "input_staging" / command_name / date
+    directory = root_log_dir / category / command_name / date
     stem = f"{command_name}.{timestamp}"
 
     return CommandLogPaths(
@@ -163,6 +164,7 @@ def command_logging(
     *,
     base_log_dir: Path | str | None = None,
     command_name: str,
+    category: str = "input_staging",
     now: Optional[datetime] = None,
     log_level: int | str = logging.INFO,
 ) -> CommandLoggingSession:
@@ -170,6 +172,7 @@ def command_logging(
     paths = build_command_log_paths(
         base_log_dir=base_log_dir,
         command_name=command_name,
+        category=category,
         now=now,
     )
     return CommandLoggingSession(paths=paths, log_level=log_level)

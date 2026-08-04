@@ -1,0 +1,25 @@
+# Ceres operator configuration for Atlas-to-Ceres result synchronization.
+# Copy this file to an untracked local config and replace site-specific paths.
+
+site: CERES
+
+paths:
+  db: /project/dash_agir/globus_index/globus_file_index.sqlite3
+  log_dir: /project/dash_agir/logs/result_sync
+
+result_sync:
+  # First Globus transfer: Atlas request outbox -> Ceres request inbox.
+  atlas_endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+  atlas_outbox: /90daydata/dash_agir/result_sync/outbox
+  ceres_endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+  ceres_inbox: /90daydata/dash_agir/result_sync/inbox
+
+  # Incoming request paths must be direct children of these roots. The second
+  # Globus transfer is added in the next commit; these roots establish the
+  # trust boundary now so arbitrary request paths are never registered.
+  atlas_run_root: /90daydata/dash_agir/tmp/stage_runs
+  ceres_run_root: /90daydata/dash_agir/tmp/stage_runs
+
+  polling:
+    interval_seconds: 30
+    timeout_seconds: 3600
