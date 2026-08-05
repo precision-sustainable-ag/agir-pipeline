@@ -1,0 +1,212 @@
+import geopandas as gpd
+import pandas as pd
+import pytest
+from shapely.geometry import box
+
+from stages.det_to_world.species import assign_monoculture, assign_spatial
+
+ZONE_CRS = "EPSG:32617"
+
+
+@pytest.fixture
+def shapefile(tmp_path):
+    """Two non-overlapping rectangular zone polygons with distinct species codes."""
+    zones = gpd.GeoDataFrame(
+        {"species": ["ABUTH", "BETVU"]},
+        geometry=[box(0, 0, 10, 10), box(20, 20, 30, 30)],
+        crs=ZONE_CRS,
+    )
+    path = tmp_path / "zones.shp"
+    zones.to_file(path)
+    return path
+
+
+@pytest.fixture
+def common_name_shapefile(tmp_path):
+    """Two zone polygons with a common-name attribute (e.g. cover_crops_2025_2026)."""
+    zones = gpd.GeoDataFrame(
+        {
+            "species": ["ABUTH", "BETVU"],
+            "comm_name": ["Velvetleaf", "Sugarbeet"],
+        },
+        geometry=[box(0, 0, 10, 10), box(20, 20, 30, 30)],
+        crs=ZONE_CRS,
+    )
+    path = tmp_path / "common_name_zones.shp"
+    zones.to_file(path)
+    return path
+
+
+@pytest.fixture
+def class_id_shapefile(tmp_path):
+    """Zone polygons that also carry a class_id attribute, alongside comm_name."""
+    zones = gpd.GeoDataFrame(
+        {
+            "species": ["ABUTH", "BETVU"],
+            "comm_name": ["Velvetleaf", "Sugarbeet"],
+            "class_id": ["75", "76"],
+        },
+        geometry=[box(0, 0, 10, 10), box(20, 20, 30, 30)],
+        crs=ZONE_CRS,
+    )
+    path = tmp_path / "class_id_zones.shp"
+    zones.to_file(path)
+    return path
+
+
+@pytest.fixture
+def cultivar_shapefile(tmp_path):
+    """Two zone polygons, same species, distinct cultivars (e.g. peanuts_2026)."""
+    zones = gpd.GeoDataFrame(
+        {
+            "species": ["ARHY", "ARHY"],
+            "cultc_id": ["107", "102"],
+            "disp_name": ["Peanut - EXP-OLEIC-001", "Peanut - TifNV-HG"],
+        },
+        geometry=[box(0, 0, 10, 10), box(20, 20, 30, 30)],
+        crs=ZONE_CRS,
+    )
+    path = tmp_path / "cultivar_zones.shp"
+    zones.to_file(path)
+    return path
+
+
+@pytest.fixture
+def geo_df():
+    """Three detections: two inside zones, one outside all zones (for nearest fallback)."""
+    return pd.DataFrame(
+        {
+            "image_id": ["IMG_0001", "IMG_0001", "IMG_0001"],
+            "bounding_box_id": [0, 1, 2],
+            "classname": ["weed", "weed", "weed"],
+            "conf": [0.95, 0.90, 0.85],
+            "xmin": [0.1, 0.4, 0.7],
+            "ymin": [0.1, 0.4, 0.7],
+            "xmax": [0.2, 0.5, 0.8],
+            "ymax": [0.2, 0.5, 0.8],
+            # inside zone 1, inside zone 2, outside both
+            "world_centroid_x": [5.0, 25.0, 15.0],
+            "world_centroid_y": [5.0, 25.0, 15.0],
+            "world_tl_x": [4.0, 24.0, 14.0],
+            "world_tl_y": [4.0, 24.0, 14.0],
+            "world_tr_x": [6.0, 26.0, 16.0],
+            "world_tr_y": [4.0, 24.0, 14.0],
+            "world_bl_x": [4.0, 24.0, 14.0],
+            "world_bl_y": [6.0, 26.0, 16.0],
+            "world_br_x": [6.0, 26.0, 16.0],
+            "world_br_y": [6.0, 26.0, 16.0],
+            "crs": [ZONE_CRS, ZONE_CRS, ZONE_CRS],
+        }
+    )
+
+
+@pytest.fixture
+def det_df():
+    """Basic detection rows as produced by jpg_to_det — no world coordinate columns."""
+    return pd.DataFrame(
+        {
+            "image_id": ["IMG_0001", "IMG_0001"],
+            "bounding_box_id": [0, 1],
+            "classname": ["weed", "weed"],
+            "conf": [0.95, 0.90],
+            "xmin": [0.1, 0.4],
+            "ymin": [0.1, 0.4],
+            "xmax": [0.2, 0.5],
+            "ymax": [0.2, 0.5],
+        }
+    )
+
+
+def test_assign_spatial_within(geo_df, shapefile):
+    """Centroids inside a zone polygon get that zone's species and spatial_join method."""
+    result = assign_spatial(geo_df, str(shapefile))
+
+    # test bbox 0 and 1
+    inside = result[result["bounding_box_id"].isin([0, 1])]
+
+    # validate species ids
+    assert set(inside["species_id"]) == {"ABUTH", "BETVU"}
+
+    # validate spaital join
+    assert (inside["assignment_method"] == "spatial_join").all()
+
+
+def test_assign_spatial_nearest_fallback(geo_df, shapefile):
+    """Centroid outside all zone polygons falls back to the nearest polygon."""
+    result = assign_spatial(geo_df, str(shapefile))
+
+    # test bbox 2
+    outside = result[result["bounding_box_id"] == 2]
+    assert outside["species_id"].notna().all()
+    assert (outside["assignment_method"] == "nearest_polygon").all()
+
+
+def test_assign_spatial_no_cultivar_columns_when_shapefile_lacks_them(geo_df, shapefile):
+    """Shapefiles without cultc_id (most seasons) produce no cultivar columns at all."""
+    result = assign_spatial(geo_df, str(shapefile))
+
+    cultivar_cols = [c for c in result.columns if c.startswith("cultivar_")]
+    assert cultivar_cols == [], f"unexpected cultivar columns: {cultivar_cols}"
+
+
+def test_assign_spatial_within_assigns_species_name(geo_df, common_name_shapefile):
+    """Zones with a comm_name attribute get species_name alongside species_id."""
+    result = assign_spatial(geo_df, str(common_name_shapefile))
+
+    inside = result[result["bounding_box_id"].isin([0, 1])]
+    assert set(inside["species_name"]) == {"Velvetleaf", "Sugarbeet"}
+    # comm_name shapefiles never have cultivar columns
+    assert "cultivar_id" not in result.columns
+    assert "cultivar_name" not in result.columns
+
+
+def test_assign_spatial_carries_class_id_when_present(geo_df, class_id_shapefile):
+    """class_id is joined through independently of species_name/cultivar."""
+    result = assign_spatial(geo_df, str(class_id_shapefile))
+
+    inside = result[result["bounding_box_id"].isin([0, 1])]
+    assert set(inside["class_id"]) == {"75", "76"}
+
+
+def test_assign_spatial_no_class_id_column_when_shapefile_lacks_it(geo_df, shapefile):
+    result = assign_spatial(geo_df, str(shapefile))
+    assert "class_id" not in result.columns
+
+
+def test_assign_spatial_within_assigns_cultivar(geo_df, cultivar_shapefile):
+    """Zones with a cultc_id attribute get cultivar_id/cultivar_name alongside species_id."""
+    result = assign_spatial(geo_df, str(cultivar_shapefile))
+
+    inside = result[result["bounding_box_id"].isin([0, 1])]
+    assert set(inside["species_id"]) == {"ARHY"}
+    assert set(inside["cultivar_id"]) == {"107", "102"}
+    assert set(inside["cultivar_name"]) == {"Peanut - EXP-OLEIC-001", "Peanut - TifNV-HG"}
+    # cultivar shapefiles never have a comm_name column
+    assert "species_name" not in result.columns
+
+
+def test_assign_spatial_nearest_fallback_assigns_cultivar(geo_df, cultivar_shapefile):
+    """Nearest-polygon fallback carries cultivar columns too, not just species."""
+    result = assign_spatial(geo_df, str(cultivar_shapefile))
+
+    outside = result[result["bounding_box_id"] == 2]
+    assert (outside["assignment_method"] == "nearest_polygon").all()
+    assert outside["cultivar_id"].notna().all()
+    assert outside["cultivar_name"].notna().all()
+
+
+def test_assign_monoculture_sets_species_and_method(det_df):
+    """Monoculture -> detections receive given species code and monoculture_config method."""
+    result = assign_monoculture(det_df, "BETVU")
+
+    assert (result["species_id"] == "BETVU").all()
+    assert (result["assignment_method"] == "monoculture_config").all()
+
+
+def test_assign_monoculture_no_world_columns(det_df):
+    """Monoculture output contains no world coordinate columns."""
+    result = assign_monoculture(det_df, "BETVU")
+
+    # no "world_" columns
+    world_cols = [c for c in result.columns if c.startswith("world_")]
+    assert world_cols == [], f"unexpected world columns: {world_cols}"

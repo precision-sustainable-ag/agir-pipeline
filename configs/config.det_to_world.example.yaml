@@ -28,6 +28,22 @@
 # ============================================================
 
 # ── Stage identity ────────────────────────────────────────────────────────────
+# This example config is for spatial-join seasons — det_to_world's --shp
+# arg requires a species-zone shapefile, which $SHAPEFILE_PATH resolves to
+# (from configs/date_ranges.yaml's pipeline_season, looked up in
+# globus_file_index — see orchestrator/submit_jobs.py's
+# resolve_season_for_batch/resolve_file_path_with_priority). Referencing
+# $SHAPEFILE_PATH/$BBOT_VERSION here is what makes submit_jobs.py resolve
+# and require them; a config with neither (see cli_args comment below)
+# skips that lookup entirely.
+#
+# Monoculture seasons (no shapefile) need a *separate* config using
+# `--skip-remap --species <code>` instead of `--shp $SHAPEFILE_PATH` —
+# cli_args is one static string applied to every batch submitted with this
+# file, so one config can't serve both modes at once. Which config to use
+# for a given batch is still a manual/operator choice (see
+# stages/det_to_world docs) — it is not derived automatically from whether
+# the season has a shapefile.
 stage:
   name: det_to_world
   cli_module: stages.det_to_world.cli
@@ -36,6 +52,8 @@ stage:
     --g /90daydata/dash_agir/semifield-asfm/$BATCH_ID
     --o $TMPDIR/output
     --batch-id $BATCH_ID
+    --shp $SHAPEFILE_PATH
+    --bbot-version $BBOT_VERSION
   output_subdir: det_to_world
   final_dest_suffix: georeferenced
 
@@ -52,6 +70,15 @@ stage:
 # everything found there rather than re-sampling a second time — a separate
 # sample_size here would just be an independent cap that could silently
 # drift out of sync with image_sample_size.
+#
+# bbox_shp_output: also writes a shapefile covering EVERY box in the batch
+# (not just the sampled images above) with whatever species/cultivar/
+# class_id attributes the resolved $SHAPEFILE_PATH provided. Points at the
+# same $VIZ_DIR the JPG sample writes to (not a separate directory) so the
+# existing zip step below picks the shapefile's files up automatically
+# alongside the sample images — one det_to_world_sample_<batch_id>.zip
+# ships both. See scripts/job/visualize.py's write_bbox_shapefile(). Omit
+# this arg for stages/configs that don't want it — it's fully optional.
 visualization:
   enabled: true
   mode: det_to_world
@@ -60,6 +87,7 @@ visualization:
     detections: '"$RUN_DIR/artifacts/${BATCH_ID}_georeferenced.csv"'
     output: '"$VIZ_DIR"'
     max_width: 1800
+    bbox_shp_output: '"$VIZ_DIR"'
 
 # ── Render template ───────────────────────────────────────────────────────────
 render:
@@ -130,6 +158,21 @@ transfer:
   poll_interval_seconds: 30
   poll_timeout_seconds: 7200
 
+  # Priority order for resolving a batch-independent reference file (e.g.
+  # the species-zone shapefile behind $SHAPEFILE_PATH) to an absolute path
+  # — see orchestrator/sqlite_db.py's resolve_file_path_with_priority().
+  # Each [site, namespace] pair is checked in order via globus_file_index;
+  # the first current match wins. Both tiers below are direct filesystem
+  # reads on CERES (no Globus transfer needed, unlike JUNO LTS) — there's
+  # no third/JUNO tier today, so a shapefile not indexed at either of these
+  # fails that batch's submission (config_error) rather than falling back
+  # further. Optional — omitting this key falls back to
+  # orchestrator/sqlite_db.py's DEFAULT_FILE_SOURCE_PRIORITY (same values
+  # as below).
+  file_source_priority:
+    - [CERES, 90daydata]
+    - [CERES, project]
+
   routes:
     det_to_world:
       # det_to_world is CPU-only (scipy interpolation, no GPU) and runs on
@@ -160,7 +203,7 @@ transfer:
       # orchestrator/input_staging_planner.py), so replanning doesn't churn
       # which files were picked. Ignored for the detections/ subdir, which
       # stays a small whole-directory transfer.
-      image_sample_size: 50
+      image_sample_size: 100
 
       # ASFM pixel-to-world NPZ grids (semifield-asfm) — separate root,
       # transferred as a whole <batch_id> directory since grids are nested

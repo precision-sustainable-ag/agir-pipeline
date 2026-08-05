@@ -18,6 +18,8 @@ mark_input_staging_status(conn, staging_id, status, ...)  → dict
 get_completed_input_staging_batch_ids(conn, stage, batch_ids)  → set[str]
 ingest_run_report(conn, run_report_path)  → dict
 get_batches_needing_raw_to_jpg(conn, *, site=None, limit=200)  → list[dict]
+resolve_season_for_batch(conn, *, site, batch_date)  → dict | None
+resolve_file_path_with_priority(conn, rel_path, *, priority=...)  → str | None
 
 Lease semantics
 ---------------
@@ -894,6 +896,89 @@ def ingest_run_report(conn: sqlite3.Connection, run_report_path: str | Path) -> 
         "stage":    report["stage"],
         "status":   status,
     }
+
+
+# ---------------------------------------------------------------------------
+# Season / reference-data resolution
+# ---------------------------------------------------------------------------
+
+# Priority order for resolving a batch-independent reference file (e.g. a
+# species-zone shapefile) to an absolute path: both tiers are direct
+# filesystem reads on CERES (no Globus transfer needed, unlike JUNO LTS), so
+# this is a pure globus_file_index lookup — see resolve_file_path_with_priority.
+DEFAULT_FILE_SOURCE_PRIORITY: tuple[tuple[str, str], ...] = (
+    ("CERES", "90daydata"),
+    ("CERES", "project"),
+)
+
+
+def resolve_season_for_batch(
+    conn: sqlite3.Connection,
+    *,
+    site: str,
+    batch_date: str,
+) -> Optional[Dict]:
+    """
+    Resolve the ``season_date_ranges`` row covering ``batch_date`` for ``site``.
+
+    ``batch_date`` and the table's start_date/end_date are ISO-8601
+    'YYYY-MM-DD' strings, which compare correctly as TEXT. If a site's
+    configured windows overlap (shouldn't normally happen, but
+    configs/date_ranges.yaml is hand-maintained), the window with the latest
+    start_date wins.
+
+    Returns
+    -------
+    dict with season_name/start_date/end_date/bbot_version/crs/
+    pipeline_season/gh_reviewer, or None if no configured window in
+    configs/date_ranges.yaml covers this (site, batch_date) — the caller
+    should treat that as a config gap, not silently default anything.
+    """
+    row = conn.execute(
+        """
+        SELECT season_name, start_date, end_date, bbot_version, crs,
+               pipeline_season, gh_reviewer
+        FROM season_date_ranges
+        WHERE site = ?
+          AND ? BETWEEN start_date AND end_date
+        ORDER BY start_date DESC
+        LIMIT 1
+        """,
+        (site, batch_date),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def resolve_file_path_with_priority(
+    conn: sqlite3.Connection,
+    rel_path: str,
+    *,
+    priority: Sequence[tuple[str, str]] = DEFAULT_FILE_SOURCE_PRIORITY,
+) -> Optional[str]:
+    """
+    Resolve ``rel_path`` to an absolute path by checking ``globus_file_index``
+    for a current file row at each ``(site, namespace)`` in ``priority`` order.
+
+    Returns the ``full_path`` of the first match, or None if ``rel_path``
+    isn't currently indexed at any of the given locations.
+    """
+    for site, namespace in priority:
+        row = conn.execute(
+            """
+            SELECT full_path
+            FROM globus_file_index
+            WHERE rel_path   = ?
+              AND site       = ?
+              AND namespace  = ?
+              AND entry_type = 'file'
+              AND is_current = 1
+            LIMIT 1
+            """,
+            (rel_path, site, namespace),
+        ).fetchone()
+        if row:
+            return row["full_path"]
+    return None
 
 
 # ---------------------------------------------------------------------------

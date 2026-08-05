@@ -12,6 +12,7 @@ from stages.det_to_world.remapper import (
     remap_rows,
     write_georeferenced_csv,
     GridCache,
+    _normalize_crs,
 )
 
 
@@ -95,6 +96,37 @@ def nudge_grid_dir(tmp_path):
         crs=np.array(["EPSG:32617"]),
     )
     return grid_dir
+
+
+def test_normalize_crs_extracts_epsg_from_asfm_repr():
+    # ASFM writes crs as the str() of its own CRS object, not a plain
+    # identifier — pyproj can't parse that directly, which broke species
+    # assignment in production (batch NC_2026-07-17) once assign_spatial
+    # actually tried to parse it as a real CRS.
+    raw = "<CoordinateSystem 'WGS 84 / UTM zone 18N (EPSG::32618)'>"
+    assert _normalize_crs(raw) == "EPSG:32618"
+
+
+def test_normalize_crs_passes_through_clean_epsg_strings():
+    assert _normalize_crs("EPSG:32617") == "EPSG:32617"
+    assert _normalize_crs("EPSG::32617") == "EPSG:32617"
+
+
+def test_grid_cache_normalizes_asfm_style_crs(tmp_path):
+    grid_dir = tmp_path / "asfm_grids"
+    grid_dir.mkdir()
+    np.savez(
+        grid_dir / "IMG_0009.npz",
+        u_pixels=np.array([0.0, 100.0]),
+        v_pixels=np.array([0.0, 100.0]),
+        world_x=np.array([[0.0, 100.0], [0.0, 100.0]]),
+        world_y=np.array([[0.0, 0.0], [100.0, 100.0]]),
+        sensor_width=np.array([100]),
+        sensor_height=np.array([100]),
+        crs=np.array(["<CoordinateSystem 'WGS 84 / UTM zone 18N (EPSG::32618)'>"]),
+    )
+    grid = GridCache(grid_dir).get("IMG_0009")
+    assert grid.crs == "EPSG:32618"
 
 
 def test_load_detection_rows_validates_required_columns(tmp_path):

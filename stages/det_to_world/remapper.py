@@ -4,6 +4,7 @@ Core bbox remapping logic for det_to_world.
 
 import csv
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,20 @@ from . import ERROR_GRID_NOT_FOUND, ERROR_REMAP_FAILED
 logger = logging.getLogger(__name__)
 
 WARNING_SURFACE_MISS = "W_SURFACE_MISS"
+
+# ASFM writes each NPZ's crs field as the str() of its own CRS object rather
+# than a plain identifier, e.g. "<CoordinateSystem 'WGS 84 / UTM zone 18N
+# (EPSG::32618)'>" — pyproj can't parse that directly (surfaces as "Invalid
+# projection" when species.assign_spatial builds a GeoDataFrame from it), so
+# pull out just the EPSG code it's built around.
+_EPSG_CODE_PATTERN = re.compile(r"EPSG:{1,2}(\d+)", re.IGNORECASE)
+
+
+def _normalize_crs(raw_crs: str) -> str:
+    match = _EPSG_CODE_PATTERN.search(raw_crs)
+    if match:
+        return f"EPSG:{match.group(1)}"
+    return raw_crs
 NUDGE_PX = [0, 1, 2, 3, 5, 10]
 
 REQUIRED_INPUT_COLUMNS = [
@@ -172,7 +187,7 @@ class GridCache:
         )
 
         crs_raw = np.asarray(data["crs"]).reshape(-1)
-        crs = str(crs_raw[0]) if crs_raw.size else None
+        crs = _normalize_crs(str(crs_raw[0])) if crs_raw.size else None
 
         return GridData(
             image_id=image_id,
