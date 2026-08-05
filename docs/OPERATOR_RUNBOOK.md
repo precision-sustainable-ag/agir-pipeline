@@ -28,6 +28,7 @@ Run commands from the repository root unless a command says otherwise.
 7. Render or submit compute jobs
 8. Monitor Slurm and pipeline logs
 9. Verify run records and outputs
+10. Synchronize Atlas result requests and run bundles to Ceres
 ```
 
 Do not submit compute jobs until input polling shows that the required
@@ -41,6 +42,7 @@ Examples use the following placeholders:
 | --- | --- |
 | `<stage>` | `raw_to_jpg` or `jpg_to_det` |
 | `<stage-config.yaml>` | Cluster-specific stage configuration |
+| `<result-sync-config.yaml>` | Ceres result-sync configuration |
 | `<endpoint-config.yaml>` | Inventory scanner endpoint configuration |
 | `<database.sqlite3>` | Shared SQLite database path |
 | `<count>` | Maximum number of batches or rows to process |
@@ -127,7 +129,7 @@ Verify the installed schema version:
 sqlite3 <database.sqlite3> 'PRAGMA user_version;'
 ```
 
-The current schema declares version `4`.
+The current schema declares version `7`.
 
 Schema application changes database objects. Coordinate it with other
 operators and do not run it during active inventory, staging, polling, or
@@ -494,6 +496,151 @@ The next inventory refresh provides the final end-to-end confirmation. Once
 the promoted outputs are indexed as current, the corresponding readiness view
 should no longer return the successfully completed batch.
 
+## Step 10: Synchronize Atlas Results to Ceres
+
+Run this step on Ceres after Atlas GPU jobs have written result-sync request
+files to the Atlas outbox.
+
+The command performs two Globus transfers:
+
+1. Atlas result-sync outbox to the Ceres inbox.
+2. Each registered Atlas run bundle to its Ceres run-bundle directory.
+
+It validates each request, records it in `result_syncs`, submits the run-bundle
+transfer, and polls the Globus task until it reaches a terminal state or the
+configured timeout expires.
+
+### Prepare the Ceres configuration
+
+Create a local configuration from the example:
+
+```bash
+cp configs/config.result_sync.ceres.example.yaml \
+  configs/config.result_sync.ceres.local.yaml
+```
+
+Review these values before running:
+
+- `paths.db`: canonical Ceres SQLite database
+- `paths.log_dir`: Ceres result-sync log directory
+- `result_sync.atlas_endpoint` and `result_sync.ceres_endpoint`
+- `result_sync.atlas_outbox` and `result_sync.ceres_inbox`
+- `result_sync.atlas_run_root` and `result_sync.ceres_run_root`
+- polling interval and timeout
+
+Confirm that schema version `7` and the `result_syncs` table are installed,
+and that Globus authentication is available:
+
+```bash
+sqlite3 <database.sqlite3> 'PRAGMA user_version;'
+sqlite3 <database.sqlite3> 'PRAGMA table_info(result_syncs);'
+globus whoami
+```
+
+If the schema is missing, follow the coordinated procedure in
+[One-Time Database Setup](#one-time-database-setup) before continuing.
+
+### Preview the synchronization
+
+```bash
+python scripts/admin/sync_atlas_results.py \
+  --config configs/config.result_sync.ceres.local.yaml \
+  --dry-run \
+  --bundle-limit 1
+```
+
+Dry-run mode does not start Globus transfers or write to the database. It
+validates requests already present in the Ceres inbox and plans bundle
+transfers for previously registered rows in `requested` state. Because it does
+not register new rows, a newly discovered request will not also appear as a
+planned bundle transfer during the same dry run.
+
+### Run the synchronization
+
+```bash
+python scripts/admin/sync_atlas_results.py \
+  --config configs/config.result_sync.ceres.local.yaml \
+  --bundle-limit 10
+```
+
+`--bundle-limit` limits the number of requested run bundles submitted during
+one invocation. The normal state progression is:
+
+```text
+requested -> transferring -> transferred
+```
+
+Failed or canceled Globus tasks are recorded as `failed` or `canceled`.
+
+### Verify synchronization state
+
+```bash
+sqlite3 -header -column <database.sqlite3> "
+SELECT
+    run_id,
+    batch_id,
+    stage,
+    run_status,
+    status,
+    attempt_count,
+    globus_task_id,
+    error_summary,
+    registered_at,
+    transfer_started_at,
+    transferred_at
+FROM result_syncs
+ORDER BY registered_at DESC;
+"
+```
+
+Summarize outstanding work:
+
+```bash
+sqlite3 -header -column <database.sqlite3> "
+SELECT status, COUNT(*) AS runs
+FROM result_syncs
+GROUP BY status
+ORDER BY status;
+"
+```
+
+Inspect a specific Globus task when needed:
+
+```bash
+globus task show <globus-task-id> --format json
+```
+
+Logs are written below:
+
+```text
+<paths.log_dir>/result_sync/sync_atlas_results/YYYY-MM-DD/
+```
+
+### Timeout and retry behavior
+
+If the command exits with status `124`, the local polling timeout expired but
+the transfer remains recorded as `transferring`. Run the same synchronization
+command again. It resumes polling the recorded Globus task instead of
+submitting a duplicate transfer.
+
+If a task reaches `failed` or `canceled`, resolve the underlying Globus or path
+problem before reopening it. Do not update `result_syncs.status` manually;
+there is not yet an operator-facing command for reopening terminal rows.
+
+### Current completion boundary
+
+A `transferred` result currently means that Globus successfully copied the run
+bundle to Ceres. It does not yet mean that Ceres has:
+
+- verified the bundle contents against the manifest and checksums;
+- promoted the outputs;
+- ingested `run_report.json` into canonical `stage_runs`; or
+- refreshed the canonical file inventory.
+
+Those actions belong to later result-sync changes. Do not treat `transferred`
+as final canonical ingestion or as approval to publish a fresh database
+snapshot to Atlas.
+
 ## Common Recovery Procedures
 
 ### No input-staging requests were found
@@ -611,6 +758,8 @@ python scripts/job/submit.py \
 - [ ] Promoted outputs exist at the expected destination.
 - [ ] Run artifacts include `run_report.json`.
 - [ ] The run was ingested with `success` status and its lease released.
+- [ ] Atlas result-sync requests were received by Ceres.
+- [ ] Expected run bundles reached `transferred` in `result_syncs`.
 - [ ] Output inventory was refreshed after completion.
 - [ ] Successfully completed batches disappeared from the readiness view.
 
