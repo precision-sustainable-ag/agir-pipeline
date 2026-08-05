@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Receive and register Atlas result-sync requests on Ceres.
+"""Receive Atlas result-sync requests and transfer their run bundles to Ceres.
 
-This first result-sync phase performs one Globus transfer from the Atlas
-request outbox to the Ceres inbox, waits for that transfer to finish, validates
-each received ``*.result-sync.json`` file, and records it idempotently in the
-canonical Ceres ``result_syncs`` table.
+The command first performs one Globus transfer from the Atlas request outbox to
+the Ceres inbox, waits for that transfer to finish, validates each received
+``*.result-sync.json`` file, and records it idempotently in the canonical Ceres
+``result_syncs`` table.
 
-Run-bundle transfer, artifact verification, promotion, and canonical stage-run
-ingestion are intentionally handled by later phases.
+It then submits or resumes each registered immutable run-bundle transfer and
+records its lifecycle through ``transferred``. Artifact verification,
+promotion, and canonical stage-run ingestion are handled by later phases.
 """
 
 from __future__ import annotations
@@ -40,7 +41,12 @@ from orchestrator.result_sync_request import (
     ResultSyncRequestError,
     load_result_sync_request,
 )
-from orchestrator.sqlite_db import open_db, register_result_sync
+from orchestrator.sqlite_db import (
+    get_result_syncs,
+    mark_result_sync_status,
+    open_db,
+    register_result_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +58,8 @@ REQUIRED_RESULT_SYNC_COLUMNS = frozenset(
         "run_id",
         "request_json",
         "status",
+        "attempt_count",
+        "globus_task_id",
         "src_endpoint",
         "dst_endpoint",
         "src_path",
@@ -98,6 +106,17 @@ class InboxRequestResult:
     request_path: Path
     run_id: str | None
     status: str
+    message: str
+
+
+@dataclass(frozen=True)
+class BundleTransferResult:
+    """Outcome of submitting or polling one immutable run-bundle transfer."""
+
+    run_id: str
+    previous_status: str
+    status: str
+    globus_task_id: str | None
     message: str
 
 
@@ -417,6 +436,273 @@ def process_inbox_requests(
     return results
 
 
+def _validate_sync_row_route(
+    sync: Mapping[str, Any],
+    config: CeresResultSyncConfig,
+) -> None:
+    """Revalidate a persisted transfer route immediately before submission."""
+    run_id = str(sync["run_id"])
+    if sync["source_site"] != "ATLAS" or sync["destination_site"] != "CERES":
+        raise ResultSyncRequestError("result-sync row must route from ATLAS to CERES")
+    if sync["src_endpoint"] != config.atlas_endpoint:
+        raise ResultSyncRequestError("result-sync source endpoint is not configured Atlas")
+    if sync["dst_endpoint"] != config.ceres_endpoint:
+        raise ResultSyncRequestError("result-sync destination endpoint is not configured Ceres")
+    if int(sync["recursive"]) != 1:
+        raise ResultSyncRequestError("result-sync run-bundle transfer must be recursive")
+
+    _require_bundle_below_root(sync["src_path"], config.atlas_run_root, "src_path")
+    _require_bundle_below_root(sync["dst_path"], config.ceres_run_root, "dst_path")
+    if PurePosixPath(sync["src_path"]).name != run_id:
+        raise ResultSyncRequestError("result-sync src_path must end with run_id")
+    if PurePosixPath(sync["dst_path"]).name != run_id:
+        raise ResultSyncRequestError("result-sync dst_path must end with run_id")
+
+
+def _bundle_transfer_label(sync: Mapping[str, Any]) -> str:
+    return f"agir:{sync['stage']}:{sync['batch_id']}:{sync['run_id']}:result_sync"
+
+
+def _error_summary(message: str, *, limit: int = 4000) -> str:
+    text = str(message).strip()
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def submit_requested_bundle_transfers(
+    conn,
+    config: CeresResultSyncConfig,
+    *,
+    limit: int,
+    dry_run: bool = False,
+    submit_func: SubmitFunc = submit_transfer,
+) -> list[BundleTransferResult]:
+    """Submit one checksum transfer for each requested result-sync row."""
+    results: list[BundleTransferResult] = []
+    syncs = get_result_syncs(conn, statuses=["requested"], limit=limit)
+    for sync in syncs:
+        run_id = str(sync["run_id"])
+        previous_status = str(sync["status"])
+        try:
+            _validate_sync_row_route(sync, config)
+            request = TransferRequest(
+                src_endpoint=sync["src_endpoint"],
+                dst_endpoint=sync["dst_endpoint"],
+                src_path=sync["src_path"],
+                dst_path=sync["dst_path"],
+                label=_bundle_transfer_label(sync),
+            )
+            submitted = submit_func(
+                request,
+                dry_run=dry_run,
+                recursive=bool(sync["recursive"]),
+                sync_level="checksum",
+            )
+            if dry_run:
+                result = BundleTransferResult(
+                    run_id=run_id,
+                    previous_status=previous_status,
+                    status="would_submit",
+                    globus_task_id=submitted.globus_task_id,
+                    message=submitted.details,
+                )
+            elif submitted.status == "submitted" and submitted.globus_task_id:
+                updated = mark_result_sync_status(
+                    conn,
+                    run_id=run_id,
+                    status="transferring",
+                    globus_task_id=submitted.globus_task_id,
+                )
+                result = BundleTransferResult(
+                    run_id=run_id,
+                    previous_status=previous_status,
+                    status=updated["status"],
+                    globus_task_id=updated["globus_task_id"],
+                    message=submitted.details,
+                )
+            else:
+                message = _error_summary(submitted.details)
+                updated = mark_result_sync_status(
+                    conn,
+                    run_id=run_id,
+                    status="failed",
+                    error_summary=message,
+                )
+                result = BundleTransferResult(
+                    run_id=run_id,
+                    previous_status=previous_status,
+                    status=updated["status"],
+                    globus_task_id=None,
+                    message=message,
+                )
+        except (OSError, ResultSyncRequestError) as exc:
+            message = _error_summary(str(exc))
+            if not dry_run:
+                updated = mark_result_sync_status(
+                    conn,
+                    run_id=run_id,
+                    status="failed",
+                    error_summary=message,
+                )
+                status = updated["status"]
+            else:
+                status = "invalid"
+            result = BundleTransferResult(
+                run_id=run_id,
+                previous_status=previous_status,
+                status=status,
+                globus_task_id=None,
+                message=message,
+            )
+
+        log_func = logger.error if result.status in {"failed", "invalid"} else logger.info
+        log_func(
+            "Result-sync bundle submission run_id=%s status=%s->%s task_id=%s message=%s",
+            result.run_id,
+            result.previous_status,
+            result.status,
+            result.globus_task_id,
+            result.message,
+        )
+        results.append(result)
+    return results
+
+
+def poll_transferring_bundle_transfers(
+    conn,
+    *,
+    poll_func: PollFunc = poll_task,
+) -> list[BundleTransferResult]:
+    """Poll all active bundle tasks once and persist terminal outcomes."""
+    results: list[BundleTransferResult] = []
+    syncs = get_result_syncs(conn, statuses=["transferring"], limit=10000)
+    for sync in syncs:
+        run_id = str(sync["run_id"])
+        previous_status = str(sync["status"])
+        task_id = sync.get("globus_task_id")
+        if not task_id:
+            message = "transferring result-sync row has no Globus task id"
+            updated = mark_result_sync_status(
+                conn,
+                run_id=run_id,
+                status="failed",
+                error_summary=message,
+            )
+            result = BundleTransferResult(
+                run_id=run_id,
+                previous_status=previous_status,
+                status=updated["status"],
+                globus_task_id=None,
+                message=message,
+            )
+        else:
+            try:
+                polled = poll_func(task_id)
+            except OSError as exc:
+                polled = TransferPollResult(
+                    status="failed",
+                    globus_status=None,
+                    details=str(exc),
+                    command=[],
+                )
+
+            if polled.status == "completed":
+                updated = mark_result_sync_status(
+                    conn,
+                    run_id=run_id,
+                    status="transferred",
+                )
+                status = updated["status"]
+                message = polled.details
+            elif polled.status == "canceled":
+                message = _error_summary(polled.details)
+                updated = mark_result_sync_status(
+                    conn,
+                    run_id=run_id,
+                    status="canceled",
+                    error_summary=message,
+                )
+                status = updated["status"]
+            elif polled.status == "failed" and polled.globus_status is not None:
+                message = _error_summary(polled.details)
+                updated = mark_result_sync_status(
+                    conn,
+                    run_id=run_id,
+                    status="failed",
+                    error_summary=message,
+                )
+                status = updated["status"]
+            elif polled.status == "failed":
+                # A local CLI/auth/query failure does not prove that the remote
+                # Globus task failed. Leave it resumable in `transferring`.
+                status = "poll_error"
+                message = _error_summary(polled.details)
+            else:
+                status = "active"
+                message = polled.details
+
+            result = BundleTransferResult(
+                run_id=run_id,
+                previous_status=previous_status,
+                status=status,
+                globus_task_id=task_id,
+                message=message,
+            )
+
+        log_func = (
+            logger.error
+            if result.status in {"failed", "canceled", "poll_error"}
+            else logger.info
+        )
+        log_func(
+            "Result-sync bundle poll run_id=%s status=%s->%s task_id=%s message=%s",
+            result.run_id,
+            result.previous_status,
+            result.status,
+            result.globus_task_id,
+            result.message,
+        )
+        results.append(result)
+    return results
+
+
+def synchronize_run_bundles(
+    conn,
+    config: CeresResultSyncConfig,
+    *,
+    limit: int,
+    dry_run: bool = False,
+    submit_func: SubmitFunc = submit_transfer,
+    poll_func: PollFunc = poll_task,
+    sleep_func: Callable[[float], None] = time.sleep,
+    monotonic_func: Callable[[], float] = time.monotonic,
+) -> tuple[list[BundleTransferResult], bool]:
+    """Submit requested bundles and wait for all tracked bundle tasks to settle."""
+    submitted = submit_requested_bundle_transfers(
+        conn,
+        config,
+        limit=limit,
+        dry_run=dry_run,
+        submit_func=submit_func,
+    )
+    if dry_run:
+        return submitted, False
+
+    latest = {result.run_id: result for result in submitted}
+    started_at = monotonic_func()
+    while True:
+        for result in poll_transferring_bundle_transfers(conn, poll_func=poll_func):
+            latest[result.run_id] = result
+
+        remaining = get_result_syncs(conn, statuses=["transferring"], limit=1)
+        if not remaining:
+            return list(latest.values()), False
+
+        elapsed = monotonic_func() - started_at
+        if elapsed >= config.poll_timeout_seconds:
+            return list(latest.values()), True
+        sleep_func(min(config.poll_interval_seconds, config.poll_timeout_seconds - elapsed))
+
+
 def print_results(results: Sequence[InboxRequestResult]) -> bool:
     """Print a compact operator summary and return whether any request failed."""
     print("\n-- Atlas result-sync requests ----------------------------------")
@@ -434,15 +720,45 @@ def print_results(results: Sequence[InboxRequestResult]) -> bool:
     return any_error
 
 
+def print_bundle_results(results: Sequence[BundleTransferResult]) -> bool:
+    """Print bundle-transfer outcomes and return whether any require attention."""
+    print("\n-- Atlas run-bundle transfers ---------------------------------")
+    error_statuses = {"failed", "canceled", "invalid", "poll_error"}
+    any_error = False
+    for result in results:
+        marker = "+"
+        if result.status in error_statuses:
+            marker = "!"
+            any_error = True
+        task = f" task={result.globus_task_id}" if result.globus_task_id else ""
+        print(
+            f"  {marker} {result.run_id:<36} "
+            f"{result.previous_status}->{result.status}{task}"
+        )
+    if not results:
+        print("  No requested or transferring run bundles found.")
+    print()
+    return any_error
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Receive and register Atlas result-sync requests on Ceres."
+        description="Receive Atlas requests and transfer their run bundles to Ceres."
     )
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Do not contact Globus or write SQLite; validate requests already in the inbox.",
+        help=(
+            "Do not contact Globus or write SQLite; validate inbox requests and "
+            "plan transfers for rows already registered as requested."
+        ),
+    )
+    parser.add_argument(
+        "--bundle-limit",
+        type=int,
+        default=50,
+        help="Maximum requested run-bundle transfers to submit (default: 50).",
     )
     parser.add_argument(
         "--log-dir",
@@ -459,7 +775,10 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    args = _parser().parse_args()
+    parser = _parser()
+    args = parser.parse_args()
+    if args.bundle_limit <= 0:
+        parser.error("--bundle-limit must be greater than zero")
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
@@ -499,23 +818,39 @@ def main() -> int:
             return 1
 
         conn = None
+        bundle_results: list[BundleTransferResult] = []
+        bundle_timed_out = False
         try:
-            if not args.dry_run:
-                conn = open_db(config.db_path)
-                require_result_sync_schema(conn)
+            conn = open_db(config.db_path, readonly=args.dry_run)
+            require_result_sync_schema(conn)
             results = process_inbox_requests(conn, config, dry_run=args.dry_run)
+            bundle_results, bundle_timed_out = synchronize_run_bundles(
+                conn,
+                config,
+                limit=args.bundle_limit,
+                dry_run=args.dry_run,
+            )
         except (OSError, sqlite3.Error, ValueError) as exc:
-            logger.error("Unable to process Ceres result-sync inbox: %s", exc)
+            logger.error("Unable to process Ceres result synchronization: %s", exc)
             return 1
         finally:
             if conn is not None:
                 conn.close()
 
         any_error = print_results(results)
-        exit_code = 1 if any_error else 0
+        any_error = print_bundle_results(bundle_results) or any_error
+        if bundle_timed_out:
+            logger.error(
+                "Timed out with run-bundle transfers still active; rerun the command "
+                "to resume polling their recorded Globus task ids"
+            )
+            exit_code = 124
+        else:
+            exit_code = 1 if any_error else 0
         logger.info(
-            "Finished Atlas request synchronization requests=%d exit_code=%d",
+            "Finished Atlas result synchronization requests=%d bundles=%d exit_code=%d",
             len(results),
+            len(bundle_results),
             exit_code,
         )
         return exit_code

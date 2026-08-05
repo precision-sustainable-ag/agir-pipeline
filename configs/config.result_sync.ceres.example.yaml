@@ -14,9 +14,8 @@ result_sync:
   ceres_endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
   ceres_inbox: /90daydata/dash_agir/result_sync/inbox
 
-  # Incoming request paths must be direct children of these roots. The second
-  # Globus transfer is added in the next commit; these roots establish the
-  # trust boundary now so arbitrary request paths are never registered.
+  # Incoming request paths must be direct children of these roots. Ceres uses
+  # them as the trust boundary for the second, immutable run-bundle transfer.
   atlas_run_root: /90daydata/dash_agir/tmp/stage_runs
   ceres_run_root: /90daydata/dash_agir/tmp/stage_runs
 
