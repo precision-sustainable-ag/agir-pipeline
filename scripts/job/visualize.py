@@ -69,8 +69,11 @@ import logging
 import random
 from pathlib import Path
 import shutil
+from tqdm import tqdm
 
 import cv2
+import geopandas as gpd
+from shapely.geometry import Polygon
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +224,95 @@ def _bbox_area_cm2(row: dict[str, str]) -> float | None:
     return area_m2 * 10_000.0  # m^2 -> cm^2
 
 
+# CSV column -> shapefile DBF field name. Shapefile DBF fields are capped at
+# 10 characters, so these deliberately reuse the *zone* shapefile's own
+# short names (species/comm_name/cultc_id/disp_name/class_id — see
+# stages.det_to_world.species._OPTIONAL_ZONE_ATTRS) rather than
+# det_to_world's more readable CSV headers (species_id, cultivar_name, ...)
+# — both to fit the limit and so this output overlays cleanly in GIS
+# software against the zone shapefile each box was assigned from.
+_BBOX_SHP_FIELDS = {
+    "image_id": "image_id",
+    "bounding_box_id": "bbox_id",
+    "species_id": "species",
+    "species_name": "comm_name",
+    "cultivar_id": "cultc_id",
+    "cultivar_name": "disp_name",
+    "class_id": "class_id",
+}
+
+
+def write_bbox_shapefile(rows: list[dict[str, str]], batch_id: str, output_dir: Path) -> Path | None:
+    """
+    Write one shapefile covering every detection in a det_to_world batch, as
+    real-world box polygons (four remapped corners, not just a centroid
+    point) with whatever species/cultivar/class attributes the batch's zone
+    shapefile provided — see _BBOX_SHP_FIELDS for the CSV -> DBF field
+    mapping. Meant to be opened in GIS software alongside the zone shapefile
+    the batch was assigned against.
+
+    Rows with no usable world corners (monoculture batches, which skip
+    remapping entirely) are silently excluded — there's no real-world
+    geometry for them. Returns the written .shp path, or None if no row had
+    usable geometry at all.
+    """
+    if not rows:
+        logger.warning("No rows to write for bbox shapefile (batch %s)", batch_id)
+        return None
+
+    available_columns = rows[0].keys()
+    selected_fields = [
+        (csv_col, dbf_field) for csv_col, dbf_field in _BBOX_SHP_FIELDS.items()
+        if csv_col in available_columns
+    ]
+
+    geometries = []
+    attributes: list[dict[str, str]] = []
+    crs = None
+    for row in rows:
+        try:
+            # Same corner order as _bbox_area_cm2's shoelace calc: tl, tr,
+            # br, bl — traces the box's perimeter without crossing itself.
+            corners = [
+                (float(row["world_tl_x"]), float(row["world_tl_y"])),
+                (float(row["world_tr_x"]), float(row["world_tr_y"])),
+                (float(row["world_br_x"]), float(row["world_br_y"])),
+                (float(row["world_bl_x"]), float(row["world_bl_y"])),
+            ]
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        geometries.append(Polygon(corners))
+        attributes.append({dbf_field: row.get(csv_col, "") for csv_col, dbf_field in selected_fields})
+        if crs is None:
+            crs = row.get("crs") or None
+
+    if not geometries:
+        logger.warning(
+            "No rows had usable world corners — skipping bbox shapefile for %s", batch_id
+        )
+        return None
+
+    gdf = gpd.GeoDataFrame(attributes, geometry=geometries, crs=crs)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / f"{batch_id}_bboxes.shp"
+    gdf.to_file(out_path)
+    logger.info("Wrote %d box(es) to %s", len(gdf), out_path)
+    return out_path
+
+
+def _detection_name_label(row: dict[str, str]) -> str | None:
+    """
+    Human-readable species/cultivar name for this detection, if the batch's
+    shapefile had one — cultivar_name (cultivar seasons, e.g. "Peanut - NC
+    20") and species_name (comm_name, e.g. "Ragweed") are mutually exclusive
+    per shapefile (see species.assign_spatial), so at most one is ever
+    present. Monoculture batches and shapefiles with neither attribute have
+    neither column — row.get() returns None rather than raising.
+    """
+    return row.get("cultivar_name") or row.get("species_name") or None
+
+
 def _render_det_to_world(
     image_path: Path,
     rows: list[dict[str, str]],
@@ -234,9 +326,11 @@ def _render_det_to_world(
     jpg_to_det produced (world_* columns are derived from them, not a
     separate pixel location), so overlaying them directly confirms boxes
     still line up with the image. Each box is labeled at its top-left corner
-    with its world-space area (cm^2, via the four remapped corners) — no
-    label at all if the area can't be computed (missing corners or a
-    geographic CRS), so a georeferencing failure is visible at a glance.
+    with its world-space area (cm^2, via the four remapped corners) and,
+    when the shapefile provided one, its species/cultivar name (see
+    _detection_name_label) — no label at all if neither is available
+    (missing corners, a geographic CRS, or no name attribute in the
+    shapefile), so a georeferencing failure is visible at a glance.
 
     Boxes/labels are drawn *after* downscaling to max_width, not before —
     source images here are huge (e.g. 13368x9520), so text/box strokes sized
@@ -267,10 +361,14 @@ def _render_det_to_world(
         cv2.rectangle(im, (x1, y1), (x2, y2), _BOX_COLOR, _BOX_THICKNESS)
 
         area_cm2 = _bbox_area_cm2(row)
+        name_label = _detection_name_label(row)
+        label_parts = [name_label] if name_label else []
         if area_cm2 is not None:
+            label_parts.append(f"{area_cm2:.1f} cm^2")
+        if label_parts:
             y_area = max(_DET_TO_WORLD_LABEL_Y_MIN, y1 - 10)
             cv2.putText(
-                im, f"{area_cm2:.1f} cm^2", (x1, y_area),
+                im, " | ".join(label_parts), (x1, y_area),
                 _FONT, _DET_TO_WORLD_FONT_SCALE, _FONT_COLOR, _DET_TO_WORLD_FONT_THICKNESS, cv2.LINE_AA,
             )
 
@@ -323,6 +421,14 @@ def main() -> int:
     parser.add_argument(
         "--seed", type=int, default=42,
         help="Random seed for reproducible sampling (default: 42).",
+    )
+    parser.add_argument(
+        "--bbox-shp-output", type=Path, default=None,
+        help=(
+            "det_to_world mode only: also write a shapefile of every box in "
+            "the batch (not just the sampled images) to this directory, "
+            "with species/cultivar/class attributes. Omit to skip."
+        ),
     )
     parser.add_argument(
         "--log-level", default="INFO",
@@ -381,7 +487,7 @@ def main() -> int:
     # generate random list of indices of full-sized images to include in the sample (max 5)
     fullsized_rdm_idx = random.sample(range(len(sample)), min(5, len(sample)))
 
-    for idx, image_path in enumerate(sample):
+    for idx, image_path in enumerate(tqdm(sample)):
         out_path = args.output / image_path.name
 
         if args.mode == "raw_to_jpg":
@@ -404,6 +510,16 @@ def main() -> int:
             failed += 1
 
     logger.info("Done — written=%d  failed=%d", written, failed)
+
+    if args.mode == "det_to_world" and args.bbox_shp_output is not None:
+        # Every box in the batch, not just the sampled images' — the
+        # georeferenced CSV already has all of them, independent of which
+        # images happened to get staged for the JPG overlay sample above.
+        all_rows = [row for image_rows in rows_by_image.values() for row in image_rows]
+        # "NC_2026-07-17_georeferenced.csv" -> "NC_2026-07-17"
+        batch_id = args.detections.stem.removesuffix("_georeferenced")
+        write_bbox_shapefile(all_rows, batch_id, args.bbox_shp_output)
+
     return 0
 
 

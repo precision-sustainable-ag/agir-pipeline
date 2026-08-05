@@ -4,6 +4,7 @@ import csv
 import importlib.util
 from pathlib import Path
 
+import geopandas as gpd
 import numpy as np
 import cv2
 
@@ -144,6 +145,91 @@ def test_render_det_to_world_labels_area_only(tmp_path: Path) -> None:
 
     assert ok is True
     assert out_path.exists()
+
+
+def test_detection_name_label_prefers_cultivar_over_species_name() -> None:
+    # Mutually exclusive in practice (see species.assign_spatial), but if
+    # both were somehow present, cultivar should win.
+    row = {"cultivar_name": "Peanut - NC 20", "species_name": "Ragweed"}
+    assert visualize._detection_name_label(row) == "Peanut - NC 20"
+
+
+def test_detection_name_label_falls_back_to_species_name() -> None:
+    row = {"species_name": "Ragweed"}
+    assert visualize._detection_name_label(row) == "Ragweed"
+
+
+def test_detection_name_label_none_when_absent() -> None:
+    assert visualize._detection_name_label({}) is None
+    assert visualize._detection_name_label({"cultivar_name": "", "species_name": ""}) is None
+
+
+def _bbox_row(**overrides) -> dict[str, str]:
+    row = {
+        "image_id": "img_001", "bounding_box_id": "0",
+        "crs": "EPSG:32617",
+        "world_tl_x": "0.0", "world_tl_y": "0.0",
+        "world_tr_x": "1.0", "world_tr_y": "0.0",
+        "world_br_x": "1.0", "world_br_y": "1.0",
+        "world_bl_x": "0.0", "world_bl_y": "1.0",
+        "species_id": "ARHY",
+        "assignment_method": "spatial_join",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_write_bbox_shapefile_writes_geometry_and_renamed_fields(tmp_path: Path) -> None:
+    rows = [_bbox_row(cultivar_id="107", cultivar_name="Peanut - EXP-OLEIC-001")]
+
+    out_path = visualize.write_bbox_shapefile(rows, "NC_2026-07-17", tmp_path)
+
+    assert out_path == tmp_path / "NC_2026-07-17_bboxes.shp"
+    assert out_path.exists()
+    gdf = gpd.read_file(out_path)
+    assert len(gdf) == 1
+    # DBF field names match the zone shapefile's own short names, not
+    # det_to_world's CSV headers.
+    assert gdf.iloc[0]["species"] == "ARHY"
+    assert gdf.iloc[0]["cultc_id"] == "107"
+    assert gdf.iloc[0]["disp_name"] == "Peanut - EXP-OLEIC-001"
+    assert "cultivar_id" not in gdf.columns
+    assert gdf.iloc[0].geometry.area == 1.0
+
+
+def test_write_bbox_shapefile_skips_rows_without_world_corners(tmp_path: Path) -> None:
+    # e.g. a monoculture batch's rows, which never had remapping applied.
+    rows = [{"image_id": "img_001", "bounding_box_id": "0", "species_id": "ARHY"}]
+
+    out_path = visualize.write_bbox_shapefile(rows, "TX_2025-07-01", tmp_path)
+
+    assert out_path is None
+
+
+def test_write_bbox_shapefile_returns_none_for_no_rows(tmp_path: Path) -> None:
+    assert visualize.write_bbox_shapefile([], "NC_2026-07-17", tmp_path) is None
+
+
+def test_render_det_to_world_labels_name_and_area(tmp_path: Path) -> None:
+    image_path = tmp_path / "img_006.jpg"
+    _write_image(image_path, width=200, height=200)
+    out_path = tmp_path / "out" / "img_006.jpg"
+
+    rows = [{
+        "xmin": "0.1", "ymin": "0.1", "xmax": "0.5", "ymax": "0.5",
+        "crs": "32618",
+        "world_tl_x": "0.0", "world_tl_y": "0.0",
+        "world_tr_x": "0.5", "world_tr_y": "0.0",
+        "world_br_x": "0.5", "world_br_y": "0.25",
+        "world_bl_x": "0.0", "world_bl_y": "0.25",
+        "cultivar_name": "Peanut - NC 20",
+    }]
+
+    ok = visualize._render_det_to_world(image_path, rows, out_path, max_width=1800)
+
+    assert ok is True
+    im = cv2.imread(str(out_path))
+    assert (im[:, :, 1] == 255).any()
 
 
 def test_render_det_to_world_draws_box_without_label_when_area_unavailable(
