@@ -32,9 +32,15 @@ Promotion rules:
   - run_report.json must show exit_code == 0 (100% success required),
     except for det_to_world, which also accepts exit_code == 1
     (EXIT_PARTIAL): its artifact is one batch-level CSV shared by every
-    item, so a failed item (e.g. a straggler frame with no ASFM grid) just
-    means that image's row is absent from the CSV, not a corrupted
-    artifact — only the successful items are verified/copied.
+    item (georeferenced + species-assigned columns together — det_to_world
+    now folds in what used to be a separate assign_species stage), so a
+    failed item (e.g. a straggler frame with no ASFM grid) just means that
+    image's row is absent from the CSV, not a corrupted artifact — only
+    the successful items are verified/copied. A species-assignment failure
+    (bad shapefile, spatial join error) instead fails the whole run
+    (EXIT_FAILURE) rather than going through this partial path, since the
+    shared CSV isn't usable without species columns — see
+    stages/det_to_world/cli.py.
   - For every other stage, manifest.json must have zero failed items
   - Every artifact file must exist on disk and its SHA-256 checksum must
     match the manifest (if a checksum is recorded)
