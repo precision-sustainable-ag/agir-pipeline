@@ -28,6 +28,13 @@ INPUT_STAGING_DIR="{{ input_staging_dir }}"
 OUTPUT_STAGE_RUNS="{{ output_stage_runs }}"
 FINAL_DEST="{{ final_dest }}"
 
+# Resolved per-batch from season_date_ranges/globus_file_index by
+# orchestrator/submit_jobs.py (see resolve_season_for_batch,
+# resolve_file_path_with_priority) when this stage's cli_args references
+# them — empty for stages/configs that don't, same as MODEL_PATH above.
+BBOT_VERSION="{{ bbot_version }}"
+SHAPEFILE_PATH="{{ shapefile_path }}"
+
 # ── Logging helpers ───────────────────────────────────────────────────────────
 JOB_LOG="{{ log_dir }}/{{ batch_id }}-${SLURM_JOB_ID}.log"
 
