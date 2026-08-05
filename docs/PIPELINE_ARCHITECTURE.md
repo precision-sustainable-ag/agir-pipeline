@@ -49,13 +49,19 @@ Camera RAW files
 |   det_to_seg   |          |  det_to_world  |
 +----------------+          +----------------+
        |                             |
-       | binary masks                | georeferenced detections
-       v                             v
-segmentation products          world-coordinate CSV
+       | binary masks                | georeferenced + species-assigned
+       v                             | detections
+segmentation products                v
+                                world-coordinate + species CSV
 ```
 
 `det_to_seg` also reads the developed JPG images. `det_to_world` also reads
-precomputed pixel-to-world grid files.
+precomputed pixel-to-world grid files and (for spatial-join batches) a
+species-zone shapefile — see [`DET_TO_WORLD.md`](DET_TO_WORLD.md). Species
+assignment was originally a separate `assign_species` stage; it was folded
+into `det_to_world` so the pipeline produces one final CSV and one
+run_report/manifest per batch instead of two stages handing a file off
+between them.
 
 ## Current Integration Status
 
@@ -355,12 +361,17 @@ Detailed reference: [`DET_TO_SEG.md`](DET_TO_SEG.md).
 Purpose:
 
 Map image-space detection bounding boxes into real-world coordinates using
-precomputed per-image pixel-to-world grids.
+precomputed per-image pixel-to-world grids, then assign a species to each
+detection — via a spatial join against a species-zone shapefile, or a
+single configured species code for monoculture batches.
 
 Inputs:
 
 - batch detection CSV from `jpg_to_det`;
-- directory of per-image NPZ coordinate grids; and
+- directory of per-image NPZ coordinate grids;
+- species-zone shapefile (spatial-join batches) or a species code
+  (monoculture batches, via `--skip-remap --species`);
+- BBot version string; and
 - batch ID, either explicit or inferred from the input path.
 
 Processing:
@@ -370,12 +381,13 @@ detection CSV + pixel-to-world grids
   -> map bounding-box corners
   -> calculate world centroid
   -> attach coordinate reference system
-  -> write georeferenced rows
+  -> spatial-join species by zone (or apply the configured monoculture code)
+  -> write georeferenced, species-assigned rows
 ```
 
 Outputs:
 
-- one batch-level georeferenced detection CSV;
+- one batch-level georeferenced + species-assigned detection CSV;
 - `manifest.json`; and
 - `run_report.json`.
 
