@@ -29,8 +29,13 @@ which is non-fatal if no CSV is found, so it is harmless for stages that
 don't produce one.
 
 Promotion rules:
-  - run_report.json must show exit_code == 0
-  - manifest.json must have zero failed items (100% success required)
+  - run_report.json must show exit_code == 0 (100% success required),
+    except for det_to_world, which also accepts exit_code == 1
+    (EXIT_PARTIAL): its artifact is one batch-level CSV shared by every
+    item, so a failed item (e.g. a straggler frame with no ASFM grid) just
+    means that image's row is absent from the CSV, not a corrupted
+    artifact — only the successful items are verified/copied.
+  - For every other stage, manifest.json must have zero failed items
   - Every artifact file must exist on disk and its SHA-256 checksum must
     match the manifest (if a checksum is recorded)
   - Only after all checks pass are files copied to --dest
@@ -123,12 +128,21 @@ def promote(run_dir: Path, dest: Path) -> int:
 
     run_report = json.loads(run_report_path.read_text())
     exit_code  = run_report.get("exit_code")
-    if exit_code != 0:
-        print(f"PROMOTE SKIP: run_report exit_code={exit_code} (need 0)")
-        return 1
+    stage      = run_report.get("stage", "unknown_stage")
+    batch_id   = run_report.get("batch_id", "")
 
-    stage    = run_report.get("stage", "unknown_stage")
-    batch_id = run_report.get("batch_id", "")
+    # det_to_world's artifact is one batch-level CSV shared by every item,
+    # not a per-item file — a failed item just means that image's row is
+    # absent from the CSV (e.g. a straggler frame with no ASFM grid), not a
+    # corrupted/missing artifact. So unlike per-item-file stages
+    # (raw_to_jpg, jpg_to_det, det_to_seg, ...), it's safe to promote on
+    # EXIT_PARTIAL as long as at least one item succeeded — see
+    # stages/__init__.py: EXIT_SUCCESS=0, EXIT_PARTIAL=1, EXIT_FAILURE=2.
+    allow_partial = stage == "det_to_world"
+    ok_exit_codes = {0, 1} if allow_partial else {0}
+    if exit_code not in ok_exit_codes:
+        print(f"PROMOTE SKIP: run_report exit_code={exit_code} (need {sorted(ok_exit_codes)})")
+        return 1
 
     # ── Validate manifest ─────────────────────────────────────────────────────
     if not manifest_path.exists():
@@ -142,7 +156,7 @@ def promote(run_dir: Path, dest: Path) -> int:
         return 1
 
     failed_items = [i for i in items if i.get("status") != "ok"]
-    if failed_items:
+    if failed_items and not allow_partial:
         print(
             f"PROMOTE SKIP: {len(failed_items)}/{len(items)} items failed "
             f"— 100% success required"
@@ -151,13 +165,27 @@ def promote(run_dir: Path, dest: Path) -> int:
             print(f"  FAILED: {item.get('image_id')} — {item.get('error', {}).get('message', '')}")
         return 1
 
+    ok_items = [i for i in items if i.get("status") == "ok"]
+    if not ok_items:
+        print("PROMOTE FAIL: no successful items to promote")
+        return 1
+
+    if failed_items:
+        print(
+            f"PROMOTE PARTIAL: {len(failed_items)}/{len(items)} items failed "
+            f"— promoting the {len(ok_items)} successful item(s)"
+        )
+        for item in failed_items:
+            print(f"  SKIPPED (failed): {item.get('image_id')} — {item.get('error', {}).get('message', '')}")
+
     artifacts_root = Path(manifest.get("artifacts_root", run_dir / "artifacts"))
 
     # ── Verify every artifact exists and checksum matches ─────────────────────
     # All artifact keys per item are checked so multi-artifact stages
     # (e.g. mask PNG + JSON sidecar per image) are fully verified before
-    # anything is copied.
-    for item in items:
+    # anything is copied. Only successful items are checked/copied — failed
+    # items (when allow_partial) never had artifacts written for them.
+    for item in ok_items:
         image_id  = item.get("image_id", "<unknown>")
         artifacts = item.get("artifacts") or {}
         checksums = item.get("checksum") or {}
@@ -190,7 +218,7 @@ def promote(run_dir: Path, dest: Path) -> int:
     # ── All checks passed — copy artifacts to destination ─────────────────────
     dest.mkdir(parents=True, exist_ok=True)
     promoted = 0
-    for item in items:
+    for item in ok_items:
         for artifact_rel in (item.get("artifacts") or {}).values():
             if not artifact_rel:
                 continue

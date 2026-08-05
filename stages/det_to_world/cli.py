@@ -17,7 +17,7 @@ from stages.common import (
     setup_logging,
 )
 
-from . import STAGE, STAGE_VERSION, ERROR_CSV_INVALID, ERROR_REMAP_FAILED
+from . import STAGE, STAGE_VERSION, ERROR_CSV_INVALID, ERROR_GRID_NOT_FOUND, ERROR_REMAP_FAILED
 from .remapper import (
     GEO_COLUMNS,
     load_detection_rows,
@@ -195,6 +195,7 @@ def main() -> int:
 
     num_succeeded = 0
     num_failed = 0
+    num_grid_not_found = 0
 
     csv_rel = str(output_csv_path.relative_to(artifacts_dir))
     csv_checksum = calculate_sha256(output_csv_path)
@@ -222,6 +223,8 @@ def main() -> int:
             continue
 
         num_failed += 1
+        if result.error_code == ERROR_GRID_NOT_FOUND:
+            num_grid_not_found += 1
         manifest.add_failed_item(
             image_id=result.image_id,
             error_type=result.error_type or "RuntimeError",
@@ -236,12 +239,20 @@ def main() -> int:
             retryable=False,
         )
 
-    if num_succeeded == len(image_results):
-        exit_code = EXIT_SUCCESS
-    elif num_succeeded > 0:
+    # Images with no ASFM grid coverage (e.g. straggler frames captured
+    # outside every reconstructed flight window) are an expected,
+    # unactionable gap, not a stage problem — they're still recorded as
+    # failed items above for traceability, but on their own they shouldn't
+    # mark the whole run "partial" and block promotion. Only count other
+    # failure types (actual remap errors) toward EXIT_PARTIAL/EXIT_FAILURE.
+    num_other_failed = num_failed - num_grid_not_found
+
+    if num_succeeded == 0:
+        exit_code = EXIT_FAILURE
+    elif num_other_failed > 0:
         exit_code = EXIT_PARTIAL
     else:
-        exit_code = EXIT_FAILURE
+        exit_code = EXIT_SUCCESS
 
     report.stop(exit_code)
     report.set_outputs(
