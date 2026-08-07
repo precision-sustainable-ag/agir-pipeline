@@ -1,9 +1,16 @@
+import json
+
 import geopandas as gpd
 import pandas as pd
 import pytest
 from shapely.geometry import box
 
-from stages.det_to_world.species import assign_monoculture, assign_spatial
+from stages.det_to_world.species import (
+    assign_monoculture,
+    assign_spatial,
+    enrich_with_catalog,
+    load_catalog,
+)
 
 ZONE_CRS = "EPSG:32617"
 
@@ -210,3 +217,93 @@ def test_assign_monoculture_no_world_columns(det_df):
     # no "world_" columns
     world_cols = [c for c in result.columns if c.startswith("world_")]
     assert world_cols == [], f"unexpected world columns: {world_cols}"
+
+
+@pytest.fixture
+def catalog():
+    """Minimal species_catalog.generated.json-shaped dict (see orchestrator/species_catalog.py)."""
+    return {
+        "species": {
+            "ARHY": {
+                "common_name": "peanut",
+                "family": "Fabaceae",
+                "genus": "Arachis",
+                "growth_habit": "forb/herb",
+                "category": "cash crop",
+                "hex": "#a5482f",
+                "r": 165,
+                "g": 72,
+                "b": 47,
+            },
+        },
+        "cultivars": {
+            "107": {
+                "display_name": "Peanut - EXP-OLEIC-001",
+                "line_name": "oleic",
+                "registered": 0,
+                "hex": "#f105f2",
+                "r": 241,
+                "g": 5,
+                "b": 242,
+            },
+        },
+    }
+
+
+def test_load_catalog_reads_json_file(tmp_path):
+    path = tmp_path / "species_catalog.generated.json"
+    path.write_text(json.dumps({"species": {}, "cultivars": {}}), encoding="utf-8")
+
+    assert load_catalog(path) == {"species": {}, "cultivars": {}}
+
+
+def test_enrich_with_catalog_adds_species_columns(catalog):
+    dets = pd.DataFrame({"species_id": ["ARHY"], "assignment_method": ["monoculture_config"]})
+
+    result = enrich_with_catalog(dets, catalog)
+
+    assert result.loc[0, "species_common_name"] == "peanut"
+    assert result.loc[0, "species_family"] == "Fabaceae"
+    assert (result.loc[0, "species_r"], result.loc[0, "species_g"], result.loc[0, "species_b"]) == (165, 72, 47)
+
+
+def test_enrich_with_catalog_blanks_unmatched_species(catalog, caplog):
+    dets = pd.DataFrame({"species_id": ["UNKNOWN_CODE"], "assignment_method": ["monoculture_config"]})
+
+    with caplog.at_level("WARNING"):
+        result = enrich_with_catalog(dets, catalog)
+
+    assert result.loc[0, "species_common_name"] is None
+    assert "UNKNOWN_CODE" in caplog.text
+
+
+def test_enrich_with_catalog_adds_cultivar_columns_only_when_present(catalog):
+    dets = pd.DataFrame({
+        "species_id": ["ARHY", "ARHY"],
+        "cultivar_id": ["107", None],
+    })
+
+    result = enrich_with_catalog(dets, catalog)
+
+    assert result.loc[0, "cultivar_display_name"] == "Peanut - EXP-OLEIC-001"
+    assert pd.isna(result.loc[1, "cultivar_display_name"])
+
+
+def test_enrich_with_catalog_no_cultivar_columns_when_shapefile_lacked_them(catalog):
+    dets = pd.DataFrame({"species_id": ["ARHY"]})
+
+    result = enrich_with_catalog(dets, catalog)
+
+    cultivar_cols = [c for c in result.columns if c.startswith("cultivar_")]
+    assert cultivar_cols == []
+
+
+def test_enrich_with_catalog_after_assign_spatial(geo_df, cultivar_shapefile, catalog):
+    """End-to-end: assign_spatial's cultivar_id feeds straight into enrichment."""
+    assigned = assign_spatial(geo_df, str(cultivar_shapefile))
+
+    result = enrich_with_catalog(assigned, catalog)
+
+    exp_oleic_rows = result[result["cultivar_id"] == "107"]
+    assert (exp_oleic_rows["cultivar_display_name"] == "Peanut - EXP-OLEIC-001").all()
+    assert (exp_oleic_rows["species_common_name"] == "peanut").all()

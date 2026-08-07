@@ -5,6 +5,9 @@
 --
 -- Tables
 -- ------
+--   Reference:      season_date_ranges, season_aliases,
+--                   species, species_aliases, species_multi_symbols,
+--                   cultivars, cultivar_aliases, color_palette
 --   Inventory:      inventory_runs, globus_file_index,
 --                   batch_inventory_summary, storage_gap_summary
 --   Orchestration:  stage_runs, stage_leases, staged_inputs
@@ -83,6 +86,120 @@ CREATE TABLE IF NOT EXISTS season_aliases (
     alias           TEXT NOT NULL,
 
     PRIMARY KEY (pipeline_season, alias)
+);
+
+-- =============================================================================
+-- SPECIES / CULTIVAR REFERENCE TABLES
+-- Canonical taxonomy + segmentation-mask color data. This DB is the source
+-- of truth: populated by scripts/admin/load_species_reference.py from
+-- /project/dash_agir/semifield-utils/species_information/{species_info.json,
+-- cultivars.json, colors.py, cultivar_colors.py}. That same script calls
+-- orchestrator/species_catalog.py's export_catalog() to regenerate a flat
+-- species_catalog.generated.json alongside the source files — that generated
+-- file, not this DB, is what stages/det_to_world reads, so stage code never
+-- opens a DB connection. Column names that collide with SQL keywords in the
+-- source JSON ("class", "group", "order", "species") are renamed
+-- (taxon_class, species_group, taxon_order, species_epithet) to avoid
+-- needing to quote them everywhere.
+-- =============================================================================
+
+-- One row per species/background/non-plant class. class_id doubles as the
+-- segmentation-mask class index; (r, g, b) is that class's mask color.
+CREATE TABLE IF NOT EXISTS species (
+    class_id            INTEGER PRIMARY KEY,
+    species_key         TEXT    NOT NULL UNIQUE,  -- species_info.json dict key, e.g. 'Brassica_complex_0'
+    USDA_symbol         TEXT    NOT NULL UNIQUE,  -- zone shapefile 'species' attribute join key
+    EPPO                TEXT,
+    species_group       TEXT,    -- JSON "group"
+    taxon_class         TEXT,    -- JSON "class"
+    subclass            TEXT,
+    taxon_order         TEXT,    -- JSON "order"
+    family              TEXT,
+    genus               TEXT,
+    species_epithet     TEXT,    -- JSON "species"
+    common_name         TEXT,
+    authority           TEXT,
+    growth_habit        TEXT,
+    duration            TEXT,
+    collection_location TEXT,
+    category            TEXT,
+    collection_timing   TEXT,
+    link                TEXT,
+    note                TEXT,
+    hex                 TEXT    NOT NULL,
+    r                   INTEGER NOT NULL,
+    g                   INTEGER NOT NULL,
+    b                   INTEGER NOT NULL,
+    updated_at_ts_iso   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Alternate common names/spellings for a species. From species_info.json's
+-- per-entry "alias" list.
+CREATE TABLE IF NOT EXISTS species_aliases (
+    class_id INTEGER NOT NULL REFERENCES species (class_id),
+    alias    TEXT    NOT NULL,
+
+    PRIMARY KEY (class_id, alias)
+);
+
+-- Component USDA symbols folded into a multi-species class (e.g. the
+-- Brassica complex). From species_info.json's "multi_species_USDA_symbol".
+CREATE TABLE IF NOT EXISTS species_multi_symbols (
+    class_id              INTEGER NOT NULL REFERENCES species (class_id),
+    component_usda_symbol TEXT    NOT NULL,
+
+    PRIMARY KEY (class_id, component_usda_symbol)
+);
+
+-- One row per registered cultivar / experimental line. cultivar_class_id
+-- doubles as the segmentation-mask class index for cultivar-season batches,
+-- same role class_id plays for species; (r, g, b) is that class's mask
+-- color, unique across species AND cultivars.
+CREATE TABLE IF NOT EXISTS cultivars (
+    cultivar_class_id  INTEGER PRIMARY KEY,
+    cultivar_key       TEXT    NOT NULL UNIQUE,  -- cultivars.json dict key, e.g. 'PEANUT_BAILEY_II'
+    parent_USDA_symbol TEXT    NOT NULL REFERENCES species (USDA_symbol),
+    entity_type        TEXT    NOT NULL CHECK (entity_type IN ('cultivar', 'experimental_line')),
+    display_name       TEXT    NOT NULL,
+    cultivar_name      TEXT,
+    line_name          TEXT,
+    registered         INTEGER NOT NULL CHECK (registered IN (0, 1)),
+    collection_location TEXT,
+    cultivar_category  TEXT,
+    link               TEXT,
+    note               TEXT,
+    hex                TEXT    NOT NULL,
+    r                  INTEGER NOT NULL,
+    g                  INTEGER NOT NULL,
+    b                  INTEGER NOT NULL,
+    updated_at_ts_iso  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Alternate names for a cultivar. From cultivars.json's per-entry "alias" list.
+CREATE TABLE IF NOT EXISTS cultivar_aliases (
+    cultivar_class_id INTEGER NOT NULL REFERENCES cultivars (cultivar_class_id),
+    alias             TEXT    NOT NULL,
+
+    PRIMARY KEY (cultivar_class_id, alias)
+);
+
+-- Full color pool the species/cultivar hex+rgb values are drawn from
+-- (colors.py / cultivar_colors.py), including colors not yet assigned to any
+-- class (assigned_* both NULL). Lets a future new species/cultivar pick an
+-- unused color while querying for collisions, instead of the manual
+-- set-intersection asserts colors.py/cultivar_colors.py used to run at
+-- import time.
+CREATE TABLE IF NOT EXISTS color_palette (
+    palette                    TEXT    NOT NULL CHECK (palette IN ('species', 'cultivar')),
+    seq_index                  INTEGER NOT NULL,  -- position in the source colors.py/cultivar_colors.py list
+    hex                        TEXT    NOT NULL,
+    r                          INTEGER NOT NULL,
+    g                          INTEGER NOT NULL,
+    b                          INTEGER NOT NULL,
+    assigned_class_id          INTEGER REFERENCES species (class_id),
+    assigned_cultivar_class_id INTEGER REFERENCES cultivars (cultivar_class_id),
+
+    PRIMARY KEY (palette, seq_index)
 );
 
 
@@ -341,6 +458,23 @@ CREATE INDEX IF NOT EXISTS idx_sdr_pipeline_season
 CREATE INDEX IF NOT EXISTS idx_sa_alias
     ON season_aliases (alias);
 
+-- species / cultivars  ────────────────────────────────────────────────────────
+
+-- Resolve an alias string back to its class_id / cultivar_class_id.
+CREATE INDEX IF NOT EXISTS idx_species_aliases_alias
+    ON species_aliases (alias);
+
+CREATE INDEX IF NOT EXISTS idx_cultivar_aliases_alias
+    ON cultivar_aliases (alias);
+
+-- Cultivar -> parent species joins (det_to_world enrichment).
+CREATE INDEX IF NOT EXISTS idx_cultivars_parent
+    ON cultivars (parent_USDA_symbol);
+
+-- Find an unassigned reserve color in a given palette.
+CREATE INDEX IF NOT EXISTS idx_color_palette_unassigned
+    ON color_palette (palette, assigned_class_id, assigned_cultivar_class_id);
+
 -- globus_file_index  ──────────────────────────────────────────────────────────
 
 -- Point lookups by batch_id (e.g. joining a known batch back to its site).
@@ -495,6 +629,14 @@ ORDER BY r.batch_date ASC, r.batch_id ASC;
 -- v_batches_needing_jpg_to_det
 -- Batches with current JPG files in semifield-developed-images/*/images/
 -- that have no current detection output files.
+--
+-- One row per (batch_id, site, storage_domain, namespace) location that
+-- currently holds this batch's JPGs — a batch whose images are indexed at
+-- more than one location (e.g. both JUNO and CERES) appears once per
+-- location, all sharing the same batch-level jpg_count/det_count. This is
+-- deliberate fan-out, not an accidental duplicate: callers that need one row
+-- per batch should DISTINCT/GROUP BY batch_id themselves (see
+-- get_batches_needing_jpg_to_det's site=None branch in orchestrator/sqlite_db.py).
 -- -----------------------------------------------------------------------------
 DROP VIEW IF EXISTS v_batches_needing_jpg_to_det;
 CREATE VIEW v_batches_needing_jpg_to_det AS
@@ -513,6 +655,21 @@ jpg_batches AS (
       AND parent_dir = 'images'
       AND site in ('JUNO', 'CERES')
     GROUP BY batch_id
+),
+jpg_locations AS (
+    SELECT DISTINCT
+        batch_id,
+        site,
+        storage_domain,
+        namespace
+    FROM globus_file_index
+    WHERE data_state = 'semifield-developed-images'
+      AND entry_type = 'file'
+      AND batch_id   IS NOT NULL
+      AND is_current = 1
+      AND file_ext   IN ('jpg', 'jpeg')
+      AND parent_dir = 'images'
+      AND site in ('JUNO', 'CERES')
 ),
 det_batches AS (
     SELECT
@@ -536,8 +693,12 @@ SELECT
     j.batch_id,
     j.batch_date,
     j.jpg_count,
-    COALESCE(d.det_count, 0) AS det_count
+    COALESCE(d.det_count, 0) AS det_count,
+    l.site,
+    l.storage_domain,
+    l.namespace
 FROM  jpg_batches   j
+JOIN  jpg_locations l  ON j.batch_id = l.batch_id
 LEFT JOIN det_batches   d  ON j.batch_id = d.batch_id
 LEFT JOIN active_leases al ON j.batch_id = al.batch_id
 WHERE COALESCE(d.det_count, 0) = 0   -- no detections exist yet
@@ -548,7 +709,7 @@ WHERE COALESCE(d.det_count, 0) = 0   -- no detections exist yet
         AND sr.stage    = 'jpg_to_det'
         AND sr.status   = 'success'
   )
-ORDER BY j.batch_date ASC, j.batch_id ASC;
+ORDER BY j.batch_date ASC, j.batch_id ASC, l.site ASC, l.storage_domain ASC, l.namespace ASC;
 
 
 -- -----------------------------------------------------------------------------
@@ -659,5 +820,7 @@ ORDER BY i.batch_date ASC, i.batch_id ASC;
 
 -- =============================================================================
 -- v8: add v_batches_needing_det_to_world for stage 3 (det_to_world) readiness.
-PRAGMA user_version = 8;
+-- v9: add species/species_aliases/species_multi_symbols/cultivars/
+--     cultivar_aliases/color_palette reference tables.
+PRAGMA user_version = 9;
 COMMIT;

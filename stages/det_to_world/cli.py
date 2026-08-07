@@ -36,11 +36,14 @@ from .remapper import (
     remap_rows,
     write_georeferenced_csv,
 )
-from .species import assign_monoculture, assign_spatial
+from .species import assign_monoculture, assign_spatial, enrich_with_catalog, load_catalog
 
 logger = logging.getLogger(__name__)
 
 BBOT_VERSION_MAX = Version("3.1")
+DEFAULT_SPECIES_CATALOG = Path(
+    "/project/dash_agir/semifield-utils/species_information/species_catalog.generated.json"
+)
 SPECIES_COLUMNS = ["species_id", "assignment_method"]
 # Shapefiles carry at most one of these optional human-readable attributes
 # (see species.assign_spatial): comm_name for ordinary species zones,
@@ -53,7 +56,22 @@ CULTIVAR_COLUMNS = ["cultivar_id", "cultivar_name"]
 # class_id has shown up in every zone shapefile checked so far but isn't
 # assumed universal — same "only when actually present" treatment.
 ZONE_CLASS_COLUMNS = ["class_id"]
-EXTRA_COLUMNS = SPECIES_COLUMNS + SPECIES_NAME_COLUMNS + CULTIVAR_COLUMNS + ZONE_CLASS_COLUMNS
+# species.enrich_with_catalog()'s output columns — present whenever a
+# species catalog was loaded (see --species-catalog); species_* columns are
+# always added, cultivar_* only when the shapefile itself had cultivar_id.
+SPECIES_CATALOG_COLUMNS = [
+    "species_common_name", "species_family", "species_genus",
+    "species_growth_habit", "species_category",
+    "species_hex", "species_r", "species_g", "species_b",
+]
+CULTIVAR_CATALOG_COLUMNS = [
+    "cultivar_display_name", "cultivar_line_name", "cultivar_registered",
+    "cultivar_hex", "cultivar_r", "cultivar_g", "cultivar_b",
+]
+EXTRA_COLUMNS = (
+    SPECIES_COLUMNS + SPECIES_NAME_COLUMNS + CULTIVAR_COLUMNS + ZONE_CLASS_COLUMNS
+    + SPECIES_CATALOG_COLUMNS + CULTIVAR_CATALOG_COLUMNS
+)
 
 
 def _build_output_fieldnames(input_fieldnames: list[str], present_columns) -> list[str]:
@@ -90,6 +108,11 @@ def main() -> int:
     parser.add_argument("--shp", type=Path, default=None, help="Species zone shapefile. Required unless --skip-remap.")
     parser.add_argument("--species", type=str, default=None, help="Species code for monoculture batches. Required with --skip-remap.")
     parser.add_argument("--bbot-version", type=str, required=True, help="BBot version string.")
+    parser.add_argument(
+        "--species-catalog", type=Path, default=DEFAULT_SPECIES_CATALOG,
+        help="Flat species/cultivar reference catalog (see orchestrator/species_catalog.py). "
+        "Enrichment columns are skipped with a warning if this file is missing or unreadable.",
+    )
 
     args = parser.parse_args()
 
@@ -140,6 +163,20 @@ def main() -> int:
     log_path = setup_logging(run_dir)
     logger.info("Run %s started for batch %s", run_id, batch_id)
 
+    # Species/cultivar reference enrichment is additive, not load-bearing —
+    # a missing/unreadable catalog degrades to the pre-enrichment output
+    # (just SPECIES_COLUMNS/CULTIVAR_COLUMNS) rather than failing the batch.
+    species_catalog = None
+    if args.species_catalog.exists():
+        try:
+            species_catalog = load_catalog(args.species_catalog)
+        except Exception as exc:
+            logger.warning("Could not load species catalog %s: %s", args.species_catalog, exc)
+    else:
+        logger.warning(
+            "Species catalog not found at %s; skipping species/cultivar enrichment.",
+            args.species_catalog,
+        )
 
     # start manifest builder
     manifest = ManifestBuilder(
@@ -228,6 +265,9 @@ def main() -> int:
             report.write(run_dir / "run_report.json")
             manifest.write(run_dir / "manifest.json")
             return EXIT_FAILURE
+
+        if species_catalog is not None:
+            species_df = enrich_with_catalog(species_df, species_catalog)
 
         output_fieldnames = _build_output_fieldnames(input_fieldnames, species_df.columns)
         output_rows = _to_output_rows(species_df, output_fieldnames)
@@ -323,6 +363,10 @@ def main() -> int:
             report.write(run_dir / "run_report.json")
             manifest.write(run_dir / "manifest.json")
             return EXIT_FAILURE
+
+        if species_catalog is not None:
+            species_df = enrich_with_catalog(species_df, species_catalog)
+
         output_fieldnames = _build_output_fieldnames(input_fieldnames, species_df.columns)
         output_rows = _to_output_rows(species_df, output_fieldnames)
     else:

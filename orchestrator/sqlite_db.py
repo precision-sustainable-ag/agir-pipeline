@@ -91,9 +91,13 @@ def get_batches_needing_jpg_to_det(
             (site, *filter_params, limit),
         ).fetchall()
     else:
+        # v_batches_needing_jpg_to_det now has one row per (batch_id, site,
+        # storage_domain, namespace) location holding the batch's JPGs;
+        # jpg_count/det_count are identical across those rows, so DISTINCT
+        # on this projection collapses back to one row per batch.
         rows = conn.execute(
             f"""
-            SELECT v.batch_id, v.batch_date, v.jpg_count, v.det_count
+            SELECT DISTINCT v.batch_id, v.batch_date, v.jpg_count, v.det_count
             FROM   v_batches_needing_jpg_to_det v
             WHERE  1=1 {batch_filter_sql}
             ORDER  BY v.batch_date ASC, v.batch_id ASC
