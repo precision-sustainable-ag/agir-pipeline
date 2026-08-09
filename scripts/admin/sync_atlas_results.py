@@ -6,14 +6,16 @@ the Ceres inbox, waits for that transfer to finish, validates each received
 ``*.result-sync.json`` file, and records it idempotently in the canonical Ceres
 ``result_syncs`` table.
 
-It then submits or resumes each registered immutable run-bundle transfer and
-records its lifecycle through ``transferred``. Artifact verification,
-promotion, and canonical stage-run ingestion are handled by later phases.
+It then submits or resumes each registered immutable run-bundle transfer,
+validates transferred metadata and artifacts on Ceres, and records its
+lifecycle through ``verified``. Promotion and canonical stage-run ingestion
+are handled by later phases.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sqlite3
 import sys
@@ -29,6 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from orchestrator.artifact_validation import validate_transferred_run_bundle
 from orchestrator.globus_transfer import (
     TransferPollResult,
     TransferRequest,
@@ -40,6 +43,7 @@ from orchestrator.logging_utils import command_logging
 from orchestrator.result_sync_request import (
     ResultSyncRequestError,
     load_result_sync_request,
+    validate_result_sync_request,
 )
 from orchestrator.sqlite_db import (
     get_result_syncs,
@@ -117,6 +121,16 @@ class BundleTransferResult:
     previous_status: str
     status: str
     globus_task_id: str | None
+    message: str
+
+
+@dataclass(frozen=True)
+class BundleVerificationResult:
+    """Outcome of validating one transferred run bundle on Ceres."""
+
+    run_id: str
+    previous_status: str
+    status: str
     message: str
 
 
@@ -703,6 +717,115 @@ def synchronize_run_bundles(
         sleep_func(min(config.poll_interval_seconds, config.poll_timeout_seconds - elapsed))
 
 
+def _validate_persisted_request_identity(
+    sync: Mapping[str, Any],
+    config: CeresResultSyncConfig,
+) -> dict[str, Any]:
+    """Confirm the immutable request JSON still agrees with its database row."""
+    try:
+        raw_request = json.loads(sync["request_json"])
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ResultSyncRequestError(
+            f"stored request_json is invalid for run {sync['run_id']}: {exc}"
+        ) from exc
+
+    request = validate_result_sync_request(
+        raw_request,
+        allowed_source_endpoints={config.atlas_endpoint},
+        allowed_destination_endpoints={config.ceres_endpoint},
+    )
+    validate_request_route(request, config)
+
+    request_status = request["run"]["status"]
+    if request_status == "partial":
+        request_status = "partial_success"
+    expected = {
+        "run_id": request["run"]["run_id"],
+        "batch_id": request["run"]["batch_id"],
+        "stage": request["run"]["stage"],
+        "run_status": request_status,
+        "promotion_succeeded": int(request["promotion"]["succeeded"]),
+        "src_endpoint": request["run_bundle"]["src_endpoint"],
+        "dst_endpoint": request["run_bundle"]["dst_endpoint"],
+        "src_path": request["run_bundle"]["src_path"],
+        "dst_path": request["run_bundle"]["dst_path"],
+        "recursive": int(request["run_bundle"]["recursive"]),
+    }
+    conflicts = [
+        field for field, value in expected.items() if sync[field] != value
+    ]
+    if conflicts:
+        raise ResultSyncRequestError(
+            f"stored request does not match result_syncs row: fields={conflicts}"
+        )
+    return request
+
+
+def verify_transferred_run_bundles(
+    conn,
+    config: CeresResultSyncConfig,
+    *,
+    dry_run: bool = False,
+) -> list[BundleVerificationResult]:
+    """Validate transferred Ceres bundles and advance them to ``verified``."""
+    results: list[BundleVerificationResult] = []
+    syncs = get_result_syncs(conn, statuses=["transferred"], limit=10000)
+    for sync in syncs:
+        run_id = str(sync["run_id"])
+        previous_status = str(sync["status"])
+        try:
+            _validate_sync_row_route(sync, config)
+            request = _validate_persisted_request_identity(sync, config)
+            validate_transferred_run_bundle(
+                Path(sync["dst_path"]),
+                run_id=run_id,
+                batch_id=str(sync["batch_id"]),
+                stage=str(sync["stage"]),
+                run_status=str(sync["run_status"]),
+                ended_at=str(request["run"]["ended_at"]),
+            )
+            if dry_run:
+                status = "would_verify"
+                message = "bundle identity, artifacts, sizes, and checksums validated"
+            else:
+                updated = mark_result_sync_status(
+                    conn,
+                    run_id=run_id,
+                    status="verified",
+                )
+                status = updated["status"]
+                message = "bundle identity, artifacts, sizes, and checksums verified"
+        except (OSError, ValueError) as exc:
+            message = _error_summary(str(exc))
+            if dry_run:
+                status = "invalid"
+            else:
+                updated = mark_result_sync_status(
+                    conn,
+                    run_id=run_id,
+                    status="failed",
+                    error_summary=message,
+                )
+                status = updated["status"]
+
+        result = BundleVerificationResult(
+            run_id=run_id,
+            previous_status=previous_status,
+            status=status,
+            message=message,
+        )
+        log_func = logger.error if status in {"failed", "invalid"} else logger.info
+        log_func(
+            "Result-sync bundle verification run_id=%s status=%s->%s message=%s",
+            run_id,
+            previous_status,
+            status,
+            message,
+        )
+        results.append(result)
+    return results
+
+
 def print_results(results: Sequence[InboxRequestResult]) -> bool:
     """Print a compact operator summary and return whether any request failed."""
     print("\n-- Atlas result-sync requests ----------------------------------")
@@ -741,6 +864,27 @@ def print_bundle_results(results: Sequence[BundleTransferResult]) -> bool:
     return any_error
 
 
+def print_verification_results(
+    results: Sequence[BundleVerificationResult],
+) -> bool:
+    """Print Ceres bundle-verification outcomes and report any failures."""
+    print("\n-- Ceres run-bundle verification -------------------------------")
+    any_error = False
+    for result in results:
+        marker = "+"
+        if result.status in {"failed", "invalid"}:
+            marker = "!"
+            any_error = True
+        print(
+            f"  {marker} {result.run_id:<36} "
+            f"{result.previous_status}->{result.status}: {result.message}"
+        )
+    if not results:
+        print("  No transferred run bundles found for verification.")
+    print()
+    return any_error
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Receive Atlas requests and transfer their run bundles to Ceres."
@@ -751,7 +895,8 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Do not contact Globus or write SQLite; validate inbox requests and "
-            "plan transfers for rows already registered as requested."
+            "plan requested transfers and validate transferred bundles without "
+            "changing their states."
         ),
     )
     parser.add_argument(
@@ -819,6 +964,7 @@ def main() -> int:
 
         conn = None
         bundle_results: list[BundleTransferResult] = []
+        verification_results: list[BundleVerificationResult] = []
         bundle_timed_out = False
         try:
             conn = open_db(config.db_path, readonly=args.dry_run)
@@ -830,6 +976,11 @@ def main() -> int:
                 limit=args.bundle_limit,
                 dry_run=args.dry_run,
             )
+            verification_results = verify_transferred_run_bundles(
+                conn,
+                config,
+                dry_run=args.dry_run,
+            )
         except (OSError, sqlite3.Error, ValueError) as exc:
             logger.error("Unable to process Ceres result synchronization: %s", exc)
             return 1
@@ -839,6 +990,7 @@ def main() -> int:
 
         any_error = print_results(results)
         any_error = print_bundle_results(bundle_results) or any_error
+        any_error = print_verification_results(verification_results) or any_error
         if bundle_timed_out:
             logger.error(
                 "Timed out with run-bundle transfers still active; rerun the command "
@@ -848,9 +1000,11 @@ def main() -> int:
         else:
             exit_code = 1 if any_error else 0
         logger.info(
-            "Finished Atlas result synchronization requests=%d bundles=%d exit_code=%d",
+            "Finished Atlas result synchronization requests=%d bundles=%d "
+            "verifications=%d exit_code=%d",
             len(results),
             len(bundle_results),
+            len(verification_results),
             exit_code,
         )
         return exit_code

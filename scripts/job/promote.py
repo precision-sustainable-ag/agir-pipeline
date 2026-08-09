@@ -56,7 +56,7 @@ from pathlib import Path
 
 from orchestrator.artifact_validation import (
     ArtifactValidationError,
-    validate_run_bundle,
+    validate_promotable_run_bundle,
 )
 
 
@@ -106,7 +106,7 @@ def _rewrite_manifest(manifest: dict, dest: Path) -> dict:
 
 def promote(run_dir: Path, dest: Path) -> int:
     try:
-        validated = validate_run_bundle(run_dir)
+        validated = validate_promotable_run_bundle(run_dir)
     except ArtifactValidationError as exc:
         print(f"PROMOTE {exc.outcome.upper()}: {exc}")
         return 1
