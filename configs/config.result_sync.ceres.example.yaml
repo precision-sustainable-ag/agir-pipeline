@@ -19,6 +19,14 @@ result_sync:
   atlas_run_root: /90daydata/dash_agir/tmp/stage_runs
   ceres_run_root: /90daydata/dash_agir/tmp/stage_runs
 
+  # Successful Atlas promotions are reproduced under this Ceres root. Each
+  # stage suffix must match the suffix used by that stage's Atlas config.
+  promotion:
+    root: /90daydata/dash_agir/semifield-developed-images
+    stage_suffixes:
+      raw_to_jpg: images
+      jpg_to_det: detections
+
   polling:
     interval_seconds: 30
     timeout_seconds: 3600

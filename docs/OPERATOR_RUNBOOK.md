@@ -526,6 +526,7 @@ Review these values before running:
 - `result_sync.atlas_endpoint` and `result_sync.ceres_endpoint`
 - `result_sync.atlas_outbox` and `result_sync.ceres_inbox`
 - `result_sync.atlas_run_root` and `result_sync.ceres_run_root`
+- `result_sync.promotion.root` and its stage suffixes
 - polling interval and timeout
 
 Confirm that schema version `7` and the `result_syncs` table are installed,
@@ -552,9 +553,10 @@ python scripts/admin/sync_atlas_results.py \
 Dry-run mode does not start Globus transfers or write to the database. It
 validates requests already present in the Ceres inbox and plans bundle
 transfers for previously registered rows in `requested` state. It also
-validates local bundles already in `transferred` state without advancing them.
-Because it does not register new rows, a newly discovered request will not also
-appear as a planned bundle transfer during the same dry run.
+validates local bundles already in `transferred` state and previews promotion
+and ingestion for `verified` rows without advancing them. Because it does not
+register new rows, a newly discovered request will not also appear as a planned
+bundle transfer during the same dry run.
 
 ### Run the synchronization
 
@@ -568,7 +570,7 @@ python scripts/admin/sync_atlas_results.py \
 one invocation. The normal state progression is:
 
 ```text
-requested -> transferring -> transferred -> verified
+requested -> transferring -> transferred -> verified -> ingested
 ```
 
 Failed or canceled Globus tasks are recorded as `failed` or `canceled`.
@@ -640,15 +642,16 @@ that passes advances to `verified`; a bundle that fails validation is marked
 Checksums are currently verified when present but are not yet required for
 every artifact.
 
-A `verified` result does not yet mean that Ceres has:
+After verification, the command reproduces successful Atlas promotions on
+Ceres and ingests each run report into canonical `stage_runs`. Failed and
+partial run reports are ingested for history without promotion. An older
+successful run cannot replace a newer Atlas promotion for the same batch and
+stage. A completed row advances to `ingested`.
 
-- promoted the outputs;
-- ingested `run_report.json` into canonical `stage_runs`; or
-- refreshed the canonical file inventory.
-
-Those actions belong to later result-sync changes. Do not treat `verified` as
-final canonical ingestion or as approval to publish a fresh database snapshot
-to Atlas.
+An `ingested` result does not yet mean that Ceres has refreshed the canonical
+file inventory. Do not publish a fresh database snapshot to Atlas until the
+promoted output inventory has been refreshed and result synchronization has
+been reconciled.
 
 ## Common Recovery Procedures
 
@@ -768,7 +771,7 @@ python scripts/job/submit.py \
 - [ ] Run artifacts include `run_report.json`.
 - [ ] The run was ingested with `success` status and its lease released.
 - [ ] Atlas result-sync requests were received by Ceres.
-- [ ] Expected run bundles reached `verified` in `result_syncs`.
+- [ ] Expected run bundles reached `ingested` in `result_syncs`.
 - [ ] Output inventory was refreshed after completion.
 - [ ] Successfully completed batches disappeared from the readiness view.
 

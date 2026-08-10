@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Receive, transfer, and verify Atlas run bundles on Ceres."""
+"""Receive, transfer, verify, promote, and ingest Atlas results on Ceres."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 from orchestrator.logging_utils import command_logging
 from orchestrator.result_sync import (
     CeresResultSyncConfig,
+    finalize_verified_run_bundles,
     RequestTransferError,
     RequestTransferTimeout,
     ResultSyncConfigError,
@@ -62,7 +63,7 @@ def print_outcomes(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Receive Atlas requests and transfer their run bundles to Ceres."
+        description="Synchronize Atlas run results into canonical Ceres storage."
     )
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument(
@@ -70,8 +71,8 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Do not contact Globus or write SQLite; validate inbox requests and "
-            "plan requested transfers and validate transferred bundles without "
-            "changing their states."
+            "plan transfers, verify bundles, and preview promotion and ingestion "
+            "without changing their states."
         ),
     )
     parser.add_argument(
@@ -98,6 +99,7 @@ def _print_summary(
     requests: list[SyncOutcome],
     transfers: list[SyncOutcome],
     verifications: list[SyncOutcome],
+    finalizations: list[SyncOutcome],
 ) -> bool:
     any_error = print_outcomes(
         "Atlas result-sync requests",
@@ -109,10 +111,15 @@ def _print_summary(
         transfers,
         empty_message="No requested or transferring run bundles found.",
     ) or any_error
-    return print_outcomes(
+    any_error = print_outcomes(
         "Ceres run-bundle verification",
         verifications,
         empty_message="No transferred run bundles found for verification.",
+    ) or any_error
+    return print_outcomes(
+        "Ceres promotion and canonical ingestion",
+        finalizations,
+        empty_message="No verified run bundles found for finalization.",
     ) or any_error
 
 
@@ -162,6 +169,7 @@ def main() -> int:
         requests: list[SyncOutcome] = []
         transfers: list[SyncOutcome] = []
         verifications: list[SyncOutcome] = []
+        finalizations: list[SyncOutcome] = []
         timed_out = False
         try:
             conn = open_db(config.db_path, readonly=args.dry_run)
@@ -178,6 +186,11 @@ def main() -> int:
                 config,
                 dry_run=args.dry_run,
             )
+            finalizations = finalize_verified_run_bundles(
+                conn,
+                config,
+                dry_run=args.dry_run,
+            )
         except (OSError, sqlite3.Error, ValueError) as exc:
             logger.error("Unable to process Ceres result synchronization: %s", exc)
             return 1
@@ -185,7 +198,12 @@ def main() -> int:
             if conn is not None:
                 conn.close()
 
-        any_error = _print_summary(requests, transfers, verifications)
+        any_error = _print_summary(
+            requests,
+            transfers,
+            verifications,
+            finalizations,
+        )
         if timed_out:
             logger.error(
                 "Timed out with run-bundle transfers still active; rerun the command "
@@ -196,10 +214,11 @@ def main() -> int:
             exit_code = 1 if any_error else 0
         logger.info(
             "Finished Atlas result synchronization requests=%d bundles=%d "
-            "verifications=%d exit_code=%d",
+            "verifications=%d finalizations=%d exit_code=%d",
             len(requests),
             len(transfers),
             len(verifications),
+            len(finalizations),
             exit_code,
         )
         return exit_code

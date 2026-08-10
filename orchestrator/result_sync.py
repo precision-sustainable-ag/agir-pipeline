@@ -12,6 +12,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -25,6 +26,7 @@ from orchestrator.globus_transfer import (
     poll_task,
     submit_transfer,
 )
+from orchestrator.promotion import promote_run_bundle
 from orchestrator.result_sync_request import (
     ResultSyncRequestError,
     load_result_sync_request,
@@ -32,6 +34,7 @@ from orchestrator.result_sync_request import (
 )
 from orchestrator.sqlite_db import (
     get_result_syncs,
+    ingest_run_report,
     mark_result_sync_status,
     register_result_sync,
 )
@@ -60,6 +63,7 @@ PollFunc = Callable[..., TransferPollResult]
 
 __all__ = [
     "CeresResultSyncConfig",
+    "finalize_verified_run_bundles",
     "RequestTransferError",
     "RequestTransferTimeout",
     "ResultSyncConfigError",
@@ -99,6 +103,8 @@ class CeresResultSyncConfig:
     ceres_inbox: Path
     atlas_run_root: str
     ceres_run_root: str
+    promotion_root: Path
+    promotion_suffixes: dict[str, str]
     poll_interval_seconds: float
     poll_timeout_seconds: float
 
@@ -148,6 +154,27 @@ def _require_positive_number(value: Any, field: str) -> float:
     return float(value)
 
 
+def _load_promotion_suffixes(value: Any) -> dict[str, str]:
+    suffixes = _require_object(value, "result_sync.promotion.stage_suffixes")
+    if not suffixes:
+        raise ResultSyncConfigError(
+            "result_sync.promotion.stage_suffixes must not be empty"
+        )
+    result: dict[str, str] = {}
+    for stage, suffix in suffixes.items():
+        stage_name = _require_nonempty_string(stage, "promotion stage name")
+        suffix_name = _require_nonempty_string(
+            suffix,
+            f"result_sync.promotion.stage_suffixes.{stage_name}",
+        )
+        if PurePosixPath(suffix_name).parts != (suffix_name,) or suffix_name in {".", ".."}:
+            raise ResultSyncConfigError(
+                f"promotion suffix for {stage_name!r} must be one directory name"
+            )
+        result[stage_name] = suffix_name
+    return result
+
+
 def load_ceres_result_sync_config(path: Path) -> CeresResultSyncConfig:
     """Load and validate one Ceres result-sync YAML configuration."""
     try:
@@ -173,6 +200,7 @@ def load_ceres_result_sync_config(path: Path) -> CeresResultSyncConfig:
         raise ResultSyncConfigError("Atlas and Ceres endpoints must differ")
 
     polling = _require_object(sync.get("polling", {}), "result_sync.polling")
+    promotion = _require_object(sync.get("promotion"), "result_sync.promotion")
     return CeresResultSyncConfig(
         db_path=Path(_require_nonempty_string(paths.get("db"), "paths.db")),
         log_dir=Path(_require_nonempty_string(paths.get("log_dir"), "paths.log_dir")),
@@ -189,6 +217,15 @@ def load_ceres_result_sync_config(path: Path) -> CeresResultSyncConfig:
         ),
         ceres_run_root=_validate_transfer_path(
             sync.get("ceres_run_root"), "result_sync.ceres_run_root"
+        ),
+        promotion_root=Path(
+            _validate_transfer_path(
+                promotion.get("root"),
+                "result_sync.promotion.root",
+            )
+        ),
+        promotion_suffixes=_load_promotion_suffixes(
+            promotion.get("stage_suffixes")
         ),
         poll_interval_seconds=_require_positive_number(
             polling.get("interval_seconds", 30),
@@ -794,5 +831,185 @@ def verify_transferred_run_bundles(
             )
 
         _log_outcome(outcome, "bundle verification")
+        outcomes.append(outcome)
+    return outcomes
+
+
+# Ceres promotion and canonical ingestion ------------------------------------
+
+
+def _promotion_order(sync: Mapping[str, Any]) -> tuple[datetime, datetime, str]:
+    request = json.loads(sync["request_json"])
+    promoted_at = request["promotion"]["promoted_at"]
+    return (
+        datetime.fromisoformat(promoted_at.replace("Z", "+00:00"))
+        if promoted_at
+        else datetime.min.replace(tzinfo=timezone.utc),
+        datetime.fromisoformat(request["request_created_at"].replace("Z", "+00:00")),
+        str(sync["run_id"]),
+    )
+
+
+def _latest_promoted_sync(
+    conn,
+    *,
+    batch_id: str,
+    stage: str,
+) -> dict[str, Any] | None:
+    rows = conn.execute(
+        """
+        SELECT * FROM result_syncs
+        WHERE batch_id = ? AND stage = ?
+          AND run_status = 'success' AND promotion_succeeded = 1
+        """,
+        (batch_id, stage),
+    ).fetchall()
+    if not rows:
+        return None
+    return max((dict(row) for row in rows), key=_promotion_order)
+
+
+def _promotion_destination(
+    config: CeresResultSyncConfig,
+    *,
+    batch_id: str,
+    stage: str,
+) -> Path:
+    if PurePosixPath(batch_id).parts != (batch_id,) or batch_id in {".", ".."}:
+        raise ResultSyncConfigError(
+            f"batch_id must be one safe directory name for promotion: {batch_id!r}"
+        )
+    try:
+        suffix = config.promotion_suffixes[stage]
+    except KeyError as exc:
+        raise ResultSyncConfigError(
+            f"No Ceres promotion suffix configured for stage {stage!r}"
+        ) from exc
+    return config.promotion_root / batch_id / suffix
+
+
+def _ingest_and_mark_result_sync(conn, sync: Mapping[str, Any]) -> None:
+    report_path = Path(sync["dst_path"]) / "run_report.json"
+    ingested = ingest_run_report(conn, report_path)
+    if ingested["run_id"] != sync["run_id"]:
+        conn.rollback()
+        raise ValueError(
+            f"ingested run_id {ingested['run_id']!r} does not match {sync['run_id']!r}"
+        )
+    conn.commit()
+    mark_result_sync_status(conn, run_id=str(sync["run_id"]), status="ingested")
+
+
+def finalize_verified_run_bundles(
+    conn,
+    config: CeresResultSyncConfig,
+    *,
+    dry_run: bool = False,
+) -> list[SyncOutcome]:
+    """Promote eligible Ceres results and ingest verified run reports."""
+    outcomes: list[SyncOutcome] = []
+    verified = get_result_syncs(conn, statuses=["verified"], limit=10000)
+
+    def priority(sync: Mapping[str, Any]) -> tuple[int, tuple[datetime, datetime, str]]:
+        latest = _latest_promoted_sync(
+            conn,
+            batch_id=str(sync["batch_id"]),
+            stage=str(sync["stage"]),
+        )
+        is_latest = latest is not None and latest["run_id"] == sync["run_id"]
+        return (0 if is_latest else 1, _promotion_order(sync))
+
+    for sync in sorted(verified, key=priority):
+        run_id = str(sync["run_id"])
+        previous_status = str(sync["status"])
+        try:
+            run_status = str(sync["run_status"])
+            if run_status == "success":
+                if not bool(sync["promotion_succeeded"]):
+                    raise ValueError(
+                        "successful Atlas run was not promoted; refusing canonical ingestion"
+                    )
+                latest = _latest_promoted_sync(
+                    conn,
+                    batch_id=str(sync["batch_id"]),
+                    stage=str(sync["stage"]),
+                )
+                if latest is None:
+                    raise ValueError("no promoted Atlas run found for successful result")
+                if latest["run_id"] == run_id:
+                    destination = _promotion_destination(
+                        config,
+                        batch_id=str(sync["batch_id"]),
+                        stage=str(sync["stage"]),
+                    )
+                    if dry_run:
+                        message = f"would promote to {destination} and ingest run report"
+                    else:
+                        promoted = promote_run_bundle(
+                            Path(sync["dst_path"]),
+                            destination,
+                            artifacts_root=Path(sync["dst_path"]) / "artifacts",
+                        )
+                        message = (
+                            f"promoted {promoted.artifact_count} artifacts to "
+                            f"{promoted.destination} and ingested run report"
+                        )
+                elif latest["status"] == "ingested":
+                    message = (
+                        f"superseded by promoted run {latest['run_id']}; "
+                        "ingested for history only"
+                    )
+                else:
+                    outcome = SyncOutcome(
+                        phase="finalization",
+                        run_id=run_id,
+                        previous_status=previous_status,
+                        status="deferred",
+                        message=(
+                            f"waiting for newer promoted run {latest['run_id']} "
+                            "to be ingested"
+                        ),
+                        is_error=True,
+                    )
+                    _log_outcome(outcome, "bundle finalization")
+                    outcomes.append(outcome)
+                    continue
+            else:
+                message = "ingested non-successful run report without promotion"
+
+            if dry_run:
+                status = "would_ingest"
+            else:
+                _ingest_and_mark_result_sync(conn, sync)
+                status = "ingested"
+            outcome = SyncOutcome(
+                phase="finalization",
+                run_id=run_id,
+                previous_status=previous_status,
+                status=status,
+                message=message,
+            )
+        except (OSError, ValueError) as exc:
+            message = _error_summary(str(exc))
+            if dry_run:
+                status = "invalid"
+            else:
+                conn.rollback()
+                status = mark_result_sync_status(
+                    conn,
+                    run_id=run_id,
+                    status="failed",
+                    error_summary=message,
+                )["status"]
+            outcome = SyncOutcome(
+                phase="finalization",
+                run_id=run_id,
+                previous_status=previous_status,
+                status=status,
+                message=message,
+                is_error=True,
+            )
+
+        _log_outcome(outcome, "bundle finalization")
         outcomes.append(outcome)
     return outcomes

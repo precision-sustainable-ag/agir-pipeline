@@ -1,191 +1,49 @@
 #!/usr/bin/env python3
-"""
-scripts/job/promote.py
-===================
-
-Promote stage outputs to the final destination.
-
-Works for any stage whose manifest follows the standard contract:
-  - run_report.json with exit_code, stage, and batch_id fields
-  - manifest.json with items, each having an "artifacts" dict and
-    optional "checksum" dict
-
-The script is fully generic — it reads artifact keys, file paths, and
-checksums directly from the manifest so no changes are needed when adding
-new stages. Examples of what it handles without modification:
-
-  raw_to_jpg   → artifacts: {jpg_path: "TX_123.jpg"}
-  jpg_to_det   → artifacts: {det_txt_path: "TX_123.txt"}
-                 + batch-level {batch_id}.csv
-  det_to_seg   → artifacts: {mask_png_path: "TX_123_mask.png"}
-  seg_to_cutouts → artifacts: {cutout_path: "TX_123_crop_0.jpg",
-                                meta_path:  "TX_123_crop_0.json"}
-
-Multi-artifact items (multiple keys in "artifacts") are fully supported —
-all keys are verified and copied.
-
-The only stage-specific behaviour is the optional batch-level CSV copy,
-which is non-fatal if no CSV is found, so it is harmless for stages that
-don't produce one.
-
-Promotion rules:
-  - run_report.json must show exit_code == 0
-  - manifest.json must have zero failed items (100% success required)
-  - Every artifact file must exist on disk and its SHA-256 checksum must
-    match the manifest (if a checksum is recorded)
-  - Only after all checks pass are files copied to --dest
-  - run_report.json, manifest.json, run.log, and any inputs_manifest are
-    copied to dest.parent/<stage>/ so each stage's metadata is isolated
-
-Exit codes:
-  0  all checks passed and files copied
-  1  promotion skipped or failed (details printed to stdout)
-
-Usage
------
-python scripts/job/promote.py --run-dir /path/to/run_dir --dest /path/to/dest
-"""
+"""Promote a successful, manifest-backed stage run to its final destination."""
 
 from __future__ import annotations
 
 import argparse
-import copy
-import json
-import shutil
 from pathlib import Path
 
-from orchestrator.artifact_validation import (
-    ArtifactValidationError,
-    validate_promotable_run_bundle,
-)
+from orchestrator.artifact_validation import ArtifactValidationError
+from orchestrator.promotion import promote_run_bundle
 
-
-def _rewrite_run_report(report: dict, dest: Path, meta_dest: Path) -> dict:
-    """Return a copy of report with all output paths rewritten to the promoted location."""
-    r = copy.deepcopy(report)
-
-    outputs = r.get("outputs", {})
-    old_artifacts_dir = outputs.get("artifacts_dir", "")
-    outputs["output_root"]   = str(meta_dest.parent)
-    outputs["run_root"]      = str(meta_dest)
-    outputs["artifacts_dir"] = str(dest)
-    outputs["report_path"]   = str(meta_dest / "run_report.json")
-    outputs["manifest_path"] = str(meta_dest / "manifest.json")
-
-    for entry in outputs.get("artifacts", []):
-        p = entry.get("path", "")
-        if p == old_artifacts_dir:
-            entry["path"] = str(dest)
-        elif old_artifacts_dir and p.startswith(old_artifacts_dir):
-            rel = Path(p).relative_to(old_artifacts_dir)
-            entry["path"] = str(dest / rel)
-
-    inputs = r.get("inputs", {})
-    old_manifest = inputs.get("inputs_manifest_path")
-    if old_manifest:
-        inputs["inputs_manifest_path"] = str(meta_dest / Path(old_manifest).name)
-
-    pointers = r.get("pointers", {})
-    old_logs = pointers.get("logs_path")
-    if old_logs:
-        pointers["logs_path"] = str(meta_dest / Path(old_logs).name)
-
-    return r
-
-
-def _rewrite_manifest(manifest: dict, dest: Path) -> dict:
-    """Return a copy of manifest with artifacts_root updated to the promoted location."""
-    m = copy.deepcopy(manifest)
-    m["artifacts_root"] = str(dest)
-    return m
-
-
-# ---------------------------------------------------------------------------
-# Core promote logic
-# ---------------------------------------------------------------------------
 
 def promote(run_dir: Path, dest: Path) -> int:
+    """CLI-compatible wrapper around the shared promotion service."""
     try:
-        validated = validate_promotable_run_bundle(run_dir)
+        result = promote_run_bundle(run_dir, dest)
     except ArtifactValidationError as exc:
         print(f"PROMOTE {exc.outcome.upper()}: {exc}")
         return 1
 
-    run_report = validated.run_report
-    manifest = validated.manifest
-    items = validated.items
-    artifacts_root = validated.artifacts_root
-    stage    = run_report.get("stage", "unknown_stage")
-    batch_id = run_report.get("batch_id", "")
-
-    # ── All checks passed — copy artifacts to destination ─────────────────────
-    dest.mkdir(parents=True, exist_ok=True)
-    promoted = 0
-    for item in items:
-        for artifact_rel in (item.get("artifacts") or {}).values():
-            if not artifact_rel:
-                continue
-            src = artifacts_root / artifact_rel
-            if src.exists():
-                shutil.copy2(src, dest / src.name)
-                promoted += 1
-
-    print(f"PROMOTE OK: {promoted} artifact file(s) copied to {dest}")
-
-    # ── Optional batch-level CSV ───────────────────────────────────────────────
-    # jpg_to_det (and potentially other stages) produce a {batch_id}.csv
-    # alongside per-image artifacts. Non-fatal if not present.
-    if batch_id:
-        csv_src = artifacts_root / f"{batch_id}.csv"
-        if csv_src.exists():
-            shutil.copy2(csv_src, dest / csv_src.name)
-            print(f"PROMOTE OK: batch CSV copied to {dest / csv_src.name}")
-
-    # ── Copy metadata to stage-namespaced dir ─────────────────────────────────
-    # dest      e.g. .../semifield-developed-images/<batch_id>/images/
-    # meta_dest e.g. .../semifield-developed-images/<batch_id>/raw_to_jpg/
-    # Stage name comes from run_report so this is always correct.
-    meta_dest = dest.parent / stage
-    meta_dest.mkdir(parents=True, exist_ok=True)
-
-    (meta_dest / "run_report.json").write_text(
-        json.dumps(_rewrite_run_report(run_report, dest, meta_dest), indent=2)
+    print(
+        f"PROMOTE OK: {result.artifact_count} artifact file(s) copied to "
+        f"{result.destination}"
     )
-    (meta_dest / "manifest.json").write_text(
-        json.dumps(_rewrite_manifest(manifest, dest), indent=2)
-    )
-
-    logs_path_str = run_report.get("pointers", {}).get("logs_path")
-    if logs_path_str:
-        logs_path = Path(logs_path_str)
-        if logs_path.exists():
-            shutil.copy2(logs_path, meta_dest / logs_path.name)
-
-    input_manifest_str = run_report.get("inputs", {}).get("inputs_manifest_path")
-    if input_manifest_str:
-        input_manifest = Path(input_manifest_str)
-        if input_manifest.exists():
-            shutil.copy2(input_manifest, meta_dest / input_manifest.name)
-
-    print(f"PROMOTE OK: metadata copied to {meta_dest}")
+    print(f"PROMOTE OK: metadata copied to {result.metadata_destination}")
     return 0
 
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Promote stage artifacts to the final destination."
     )
     parser.add_argument(
-        "--run-dir", required=True, type=Path,
-        help="Directory containing run_report.json, manifest.json, and artifacts/",
+        "--run-dir",
+        required=True,
+        type=Path,
+        help="Directory containing run_report.json, manifest.json, and artifacts/.",
     )
     parser.add_argument(
-        "--dest", required=True, type=Path,
-        help="Destination directory (e.g. .../semifield-developed-images/<batch_id>/images)",
+        "--dest",
+        required=True,
+        type=Path,
+        help=(
+            "Final artifact directory, for example "
+            ".../semifield-developed-images/<batch_id>/images."
+        ),
     )
     args = parser.parse_args()
     return promote(args.run_dir, args.dest)
