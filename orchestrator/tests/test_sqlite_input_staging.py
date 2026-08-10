@@ -150,14 +150,31 @@ def test_stage_input_specs_define_current_stages() -> None:
     assert STAGE_INPUT_SPECS["raw_to_jpg"].destination_subdir == ""
 
     assert STAGE_INPUT_SPECS["jpg_to_det"].readiness_view == "v_batches_needing_jpg_to_det"
-    assert STAGE_INPUT_SPECS["jpg_to_det"].source_subdir == "images"
-    assert STAGE_INPUT_SPECS["jpg_to_det"].destination_subdir == "images"
+    assert STAGE_INPUT_SPECS["jpg_to_det"].subdirs == ("images",)
 
     assert STAGE_INPUT_SPECS["det_to_world"].readiness_view == "v_batches_needing_det_to_world"
     assert STAGE_INPUT_SPECS["det_to_world"].subdirs == ("images", "detections")
 
 
-def test_plan_input_staging_for_jpg_to_det_with_input_subdir(tmp_path: Path) -> None:
+def _jpg_to_det_cfg() -> dict:
+    return {
+        "paths": {"input_staging_root": "/90daydata/dash_agir/semifield-developed-images"},
+        "transfer": {
+            "juno_endpoint": "juno-uuid",
+            "atlas_endpoint": "atlas-uuid",
+            "ceres_endpoint": "ceres-uuid",
+            "routes": {
+                "jpg_to_det": {
+                    "destination_site": "ATLAS",
+                    "source_root_ceres": "/90daydata/dash_agir/semifield-developed-images",
+                    "source_root_juno": "/LTS/project/dash_agir/semifield-developed-images",
+                }
+            },
+        },
+    }
+
+
+def test_plan_input_staging_for_jpg_to_det_falls_back_to_juno(tmp_path: Path) -> None:
     conn = make_conn(tmp_path)
     insert_indexed_file(
         conn,
@@ -165,22 +182,12 @@ def test_plan_input_staging_for_jpg_to_det_with_input_subdir(tmp_path: Path) -> 
         data_state="semifield-developed-images",
         file_ext="jpg",
         parent_dir="images",
+        site="JUNO",
     )
-    cfg = {
-        "paths": {"input_staging_root": "/90daydata/dash_agir/semifield-developed-images"},
-        "transfer": {
-            "juno_endpoint": "juno-uuid",
-            "atlas_endpoint": "atlas-uuid",
-            "routes": {
-                "jpg_to_det": {
-                    "source_root_juno": "/LTS/project/dash_agir/semifield-developed-images",
-                    "priority": 50,
-                }
-            },
-        },
-    }
+    cfg = _jpg_to_det_cfg()
+    cfg["transfer"]["routes"]["jpg_to_det"]["priority"] = 50
 
-    requests = plan_input_staging(conn, cfg, stage="jpg_to_det")
+    requests = plan_input_staging(conn, cfg, stage="jpg_to_det", site=None)
 
     assert requests_as_dicts(requests) == [
         {
@@ -195,6 +202,67 @@ def test_plan_input_staging_for_jpg_to_det_with_input_subdir(tmp_path: Path) -> 
             "file_names": None,
         }
     ]
+
+
+def test_plan_input_staging_for_jpg_to_det_prefers_ceres_over_juno(tmp_path: Path) -> None:
+    # Real-world layout: raw_to_jpg (CERES) writes JPGs there before
+    # jpg_to_det (ATLAS) needs them — CERES should win over JUNO LTS.
+    conn = make_conn(tmp_path)
+    insert_indexed_file(
+        conn, batch_id="NC_2025-01-05", data_state="semifield-developed-images",
+        file_ext="jpg", parent_dir="images", site="JUNO",
+    )
+    insert_indexed_file(
+        conn, batch_id="NC_2025-01-05", data_state="semifield-developed-images",
+        file_ext="jpg", parent_dir="images", site="CERES",
+        storage_root="/90daydata/dash_agir",
+    )
+
+    requests = requests_as_dicts(
+        plan_input_staging(conn, _jpg_to_det_cfg(), stage="jpg_to_det", site=None)
+    )
+
+    assert len(requests) == 1
+    assert requests[0]["src_endpoint"] == "ceres-uuid"
+    assert requests[0]["src_path"] == "/90daydata/dash_agir/semifield-developed-images/NC_2025-01-05/images"
+
+
+def test_plan_input_staging_for_jpg_to_det_marks_already_local_satisfied(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    insert_indexed_file(
+        conn, batch_id="NC_2025-01-06", data_state="semifield-developed-images",
+        file_ext="jpg", parent_dir="images", site="ATLAS",
+        storage_root="/90daydata/dash_agir",
+    )
+
+    requests = plan_input_staging(conn, _jpg_to_det_cfg(), stage="jpg_to_det", site=None)
+
+    assert len(requests) == 1
+    assert requests[0].already_satisfied is True
+    assert requests[0].src_path == requests[0].dst_path
+
+
+def test_plan_input_staging_for_jpg_to_det_transfers_full_directory_not_sampled(
+    tmp_path: Path,
+) -> None:
+    # Regression guard: det_to_world's "images" subdir is sampled for
+    # visualization, but jpg_to_det's detector reads every image, so its
+    # images subdir must always be a full recursive transfer (file_names
+    # stays None) even though the subdir has the same name.
+    conn = make_conn(tmp_path)
+    n_source_images = DEFAULT_IMAGE_SAMPLE_SIZE + 12
+    insert_indexed_images(
+        conn,
+        batch_id="NC_2025-01-07",
+        site="JUNO",
+        storage_root="/LTS/project/dash_agir",
+        file_names=[f"img_{i:03d}.jpg" for i in range(n_source_images)],
+    )
+
+    requests = plan_input_staging(conn, _jpg_to_det_cfg(), stage="jpg_to_det", site=None)
+
+    assert len(requests) == 1
+    assert requests[0].file_names is None
 
 
 def _det_to_world_cfg() -> dict:

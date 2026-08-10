@@ -79,8 +79,7 @@ STAGE_INPUT_SPECS: Dict[str, StageInputSpec] = {
     "jpg_to_det": StageInputSpec(
         stage_name="jpg_to_det",
         readiness_view="v_batches_needing_jpg_to_det",
-        source_subdir="images",
-        destination_subdir="images",
+        subdirs=("images",),
     ),
     "det_to_world": StageInputSpec(
         stage_name="det_to_world",
@@ -90,7 +89,9 @@ STAGE_INPUT_SPECS: Dict[str, StageInputSpec] = {
 }
 
 # data_state/parent_dir matched when checking whether a site already has a
-# given det_to_world input subdir indexed (see _site_has_subdir).
+# given input subdir indexed (see _site_has_subdir). Shared by det_to_world
+# (images + detections) and jpg_to_det (images only) — both stages' inputs
+# live under the same semifield-developed-images convention.
 _DEVELOPED_IMAGES_DATA_STATE = "semifield-developed-images"
 _DET_TO_WORLD_PARENT_DIRS = {
     "images": "parent_dir = 'images'",
@@ -127,7 +128,11 @@ def _rows_for_stage(
     if spec.readiness_view == "v_batches_needing_raw_to_jpg":
         return get_batches_needing_raw_to_jpg(conn, site=site, limit=limit, batch_ids=batch_ids)
     if spec.readiness_view == "v_batches_needing_jpg_to_det":
-        return get_batches_needing_jpg_to_det(conn, site=site, limit=limit, batch_ids=batch_ids)
+        # site-agnostic: jpg_to_det's per-subdir multi-site resolver (see
+        # _plan_multi_site_requests) checks destination/CERES/JUNO itself,
+        # so scoping readiness to one --site would wrongly exclude batches
+        # whose images landed on CERES or ATLAS instead of JUNO.
+        return get_batches_needing_jpg_to_det(conn, site=None, limit=limit, batch_ids=batch_ids)
     if spec.readiness_view == "v_batches_needing_det_to_world":
         # site-agnostic: det_to_world's per-subdir multi-site resolver (see
         # _plan_multi_site_requests) checks destination/CERES/JUNO itself,
@@ -180,7 +185,8 @@ def _site_has_files(
 
 
 def _site_has_subdir(conn: sqlite3.Connection, batch_id: str, subdir: str, site: str) -> bool:
-    """Check whether ``site`` currently has ``subdir`` (images|detections) indexed for a batch."""
+    """Check whether ``site`` currently has ``subdir`` (images|detections, used by
+    det_to_world and jpg_to_det) indexed for a batch."""
     return _site_has_files(
         conn, batch_id, site,
         data_state=_DEVELOPED_IMAGES_DATA_STATE,
@@ -360,6 +366,7 @@ def _plan_multi_site_requests(
     dst_root = route.get("destination_root") or paths["input_staging_root"]
     dst_site = route.get("destination_site", "ATLAS")
     dst_endpoint = _endpoint_for_site(transfer, dst_site)
+    priority = int(route.get("priority", priority))
 
     requests: List[StagingRequest] = []
     for subdir in subdirs:
@@ -390,7 +397,12 @@ def _plan_multi_site_requests(
         )
 
         file_names: Optional[Sequence[str]] = None
-        if subdir == "images":
+        if stage == "det_to_world" and subdir == "images":
+            # Only det_to_world's images subdir is a visualization sample —
+            # the stage CLI itself never reads image pixels. Other stages
+            # with an "images" subdir (e.g. jpg_to_det) need every file, so
+            # file_names stays None below, which build_transfer_command()
+            # treats as a full recursive directory transfer.
             sample_size = int(route.get("image_sample_size", DEFAULT_IMAGE_SAMPLE_SIZE))
             file_names = tuple(
                 _sample_image_file_names(conn, batch_id, src_site, sample_size)
@@ -427,8 +439,11 @@ def plan_input_staging(
     ``paths.input_staging_root`` is the 90daydata destination root and
     ``transfer.routes.<stage>.source_root_juno`` is the JUNO/LTS source root.
     ``transfer.routes.<stage>.input_subdir`` is optionally appended to both
-    paths for stages such as jpg_to_det. Use ``source_subdir`` when the source
-    subdirectory differs from the destination.
+    paths for single-route stages (e.g. raw_to_jpg). Use ``source_subdir``
+    when the source subdirectory differs from the destination. Stages with
+    ``StageInputSpec.subdirs`` set (jpg_to_det, det_to_world) instead resolve
+    each subdir independently via ``_plan_multi_site_requests`` — see there
+    for that config shape (``destination_site``, ``source_root_<site>``).
     """
     if stage not in STAGE_INPUT_SPECS:
         raise ValueError(f"Unsupported stage for input staging: {stage!r}")

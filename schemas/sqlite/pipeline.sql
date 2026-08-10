@@ -637,6 +637,14 @@ ORDER BY r.batch_date ASC, r.batch_id ASC;
 -- deliberate fan-out, not an accidental duplicate: callers that need one row
 -- per batch should DISTINCT/GROUP BY batch_id themselves (see
 -- get_batches_needing_jpg_to_det's site=None branch in orchestrator/sqlite_db.py).
+--
+-- Unlike an earlier version of this view, jpg_batches/jpg_locations are NOT
+-- restricted to site IN ('JUNO', 'CERES') — jpg_to_det's multi-site resolver
+-- (orchestrator/input_staging_planner.py's _plan_multi_site_requests) checks
+-- destination (ATLAS) → CERES → JUNO itself, so a batch whose JPGs only
+-- exist on ATLAS (e.g. already staged from a prior run) must still surface
+-- here, the same way v_batches_needing_det_to_world's img_batches CTE below
+-- has no site restriction at all.
 -- -----------------------------------------------------------------------------
 DROP VIEW IF EXISTS v_batches_needing_jpg_to_det;
 CREATE VIEW v_batches_needing_jpg_to_det AS
@@ -653,7 +661,6 @@ jpg_batches AS (
       AND is_current = 1
       AND file_ext   IN ('jpg', 'jpeg')
       AND parent_dir = 'images'
-      AND site in ('JUNO', 'CERES')
     GROUP BY batch_id
 ),
 jpg_locations AS (
@@ -669,7 +676,6 @@ jpg_locations AS (
       AND is_current = 1
       AND file_ext   IN ('jpg', 'jpeg')
       AND parent_dir = 'images'
-      AND site in ('JUNO', 'CERES')
 ),
 det_batches AS (
     SELECT
@@ -822,5 +828,9 @@ ORDER BY i.batch_date ASC, i.batch_id ASC;
 -- v8: add v_batches_needing_det_to_world for stage 3 (det_to_world) readiness.
 -- v9: add species/species_aliases/species_multi_symbols/cultivars/
 --     cultivar_aliases/color_palette reference tables.
-PRAGMA user_version = 9;
+-- v10: v_batches_needing_jpg_to_det no longer restricts jpg_batches/
+--      jpg_locations to site IN ('JUNO', 'CERES') — jpg_to_det now resolves
+--      its images input via the same destination/CERES/JUNO priority chain
+--      as det_to_world, so ATLAS-resident batches must surface here too.
+PRAGMA user_version = 10;
 COMMIT;

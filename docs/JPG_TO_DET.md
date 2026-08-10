@@ -322,6 +322,55 @@ High-level summary including:
 
 ---
 
+## Orchestration
+
+`jpg_to_det` is wired into `scripts/job/submit.py` (`SUPPORTED_STAGES`) and
+`orchestrator/input_staging_planner.py` (`STAGE_INPUT_SPECS`), with its own
+`v_batches_needing_jpg_to_det` SQLite readiness view. Unlike `raw_to_jpg`,
+it resolves its one input (`images/`) through the same multi-site priority
+resolver `det_to_world` uses, rather than one fixed Juno route.
+
+### Destination ATLAS, then CERES, then JUNO LTS
+
+`jpg_to_det` needs GPU (A100) and runs on ATLAS, but its images are usually
+written by `raw_to_jpg`, which runs on CERES
+(`configs/config.raw_to_jpg.example.yaml`'s `final_dest_root`). For each
+batch, `orchestrator/input_staging_planner.py`'s `_plan_multi_site_requests()`
+checks, in order:
+
+1. **ATLAS** (`destination_site`) — if already indexed there (e.g. a rerun),
+   nothing is transferred; the request is recorded as immediately
+   `already_satisfied` in `staged_inputs`.
+2. **CERES** (`transfer.routes.jpg_to_det.source_root_ceres`) — the common
+   case, since `raw_to_jpg` just wrote the images there.
+3. **JUNO LTS** (`transfer.routes.jpg_to_det.source_root_juno`) — final
+   fallback when neither cluster has current images indexed.
+
+`v_batches_needing_jpg_to_det` (see `schemas/sqlite/pipeline.sql`) does not
+restrict which site a batch's JPGs must be indexed at — a batch is a
+candidate regardless of whether its images currently live on ATLAS, CERES,
+or JUNO, since the resolver above figures out where to pull from (or
+whether staging is even needed).
+
+### Full directory transfer, not sampled
+
+`det_to_world`'s `images/` subdir is only a small random sample for an
+optional visualization step — the stage CLI itself never reads image
+pixels. `jpg_to_det` is the opposite: the detector reads every JPG, so its
+`images/` subdir is always transferred as a whole recursive directory
+(`StagingRequest.file_names` stays `None`), never sampled.
+
+### Readiness gating
+
+Because `jpg_to_det` has a single input piece, readiness is a straight
+"any `staged_inputs` row completed" check
+(`scripts/job/submit.py`'s `filter_completed_staged_inputs()`) — it does not
+need `det_to_world`'s multi-piece "ALL pieces completed" gate
+(`filter_det_to_world_staged_ready()`), since there's only one piece to wait
+on.
+
+---
+
 ## Sample Run Command
 
 ```sh

@@ -100,7 +100,12 @@ def find_batches(cfg: dict, stage: str, *, site: str, limit: int) -> List[str]:
         if stage == "raw_to_jpg":
             rows = get_batches_needing_raw_to_jpg(conn, site=site, limit=limit * 2)
         elif stage == "jpg_to_det":
-            rows = get_batches_needing_jpg_to_det(conn, site=site, limit=limit * 2)
+            # Site-agnostic like det_to_world below: jpg_to_det's multi-site
+            # resolver (orchestrator/input_staging_planner.py) independently
+            # checks destination (ATLAS) -> CERES -> JUNO, so scoping this
+            # query to --site would wrongly exclude batches whose images
+            # landed somewhere other than that one site.
+            rows = get_batches_needing_jpg_to_det(conn, site=None, limit=limit * 2)
         elif stage == "det_to_world":
             # Unlike raw_to_jpg/jpg_to_det, det_to_world's readiness isn't
             # scoped to one site — its multi-site resolver (see

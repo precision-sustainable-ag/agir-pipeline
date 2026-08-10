@@ -524,8 +524,12 @@ The view excludes active `raw_to_jpg` leases and successful `raw_to_jpg` runs.
 
 ### `v_batches_needing_jpg_to_det`
 
-Returns batches that have current JPG inputs in an `images` directory but no
-current detection-related files.
+Returns batches that have current JPG inputs in an `images` directory —
+anywhere, any site — but no current detection-related files. `jpg_to_det`
+resolves the actual transfer source via the same destination/CERES/JUNO
+priority chain `det_to_world` uses (see
+`orchestrator/input_staging_planner.py`'s `_plan_multi_site_requests`), so
+this view isn't restricted to a fixed set of sites.
 
 Output columns:
 
