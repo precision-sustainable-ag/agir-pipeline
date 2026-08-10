@@ -11,6 +11,7 @@ Public API
 ----------
 open_db(db_path, *, readonly=False, local_copy=False, temp_dir=None)
     → sqlite3.Connection
+create_sqlite_snapshot(db_path, snapshot_path) → Path
 claim_stage_lease(conn, batch_id, stage, orchestrator_id, ttl_seconds)  → dict
 release_stage_lease(conn, lease_id, orchestrator_id)  → bool
 request_input_staging(conn, ...)  → dict
@@ -268,6 +269,60 @@ def open_db(
     conn.row_factory = sqlite3.Row
     logger.debug("Opened SQLite DB: %s (readonly=%s)", db_path, readonly)
     return conn
+
+
+def create_sqlite_snapshot(
+    db_path: str | Path,
+    snapshot_path: str | Path,
+) -> Path:
+    """Create and atomically publish a consistent snapshot of a live SQLite DB.
+
+    SQLite's backup API includes committed WAL contents. The destination is
+    built beside the requested path, checked for integrity, and then replaced
+    atomically so readers never observe a partially written database.
+    """
+    source_path = Path(db_path)
+    destination_path = Path(snapshot_path)
+    if not source_path.is_file():
+        raise FileNotFoundError(f"SQLite DB not found: {source_path}")
+    if source_path.resolve() == destination_path.resolve():
+        raise ValueError("Snapshot path must differ from the canonical database path")
+
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        prefix=f".{destination_path.name}.",
+        suffix=".tmp",
+        dir=destination_path.parent,
+        delete=False,
+    ) as tmp_file:
+        temporary_path = Path(tmp_file.name)
+
+    source = None
+    destination = None
+    try:
+        source_uri = f"{source_path.resolve().as_uri()}?mode=ro"
+        source = sqlite3.connect(source_uri, uri=True, timeout=60)
+        destination = sqlite3.connect(str(temporary_path), timeout=60)
+        source.backup(destination, pages=1000, sleep=0.1)
+        integrity = destination.execute("PRAGMA integrity_check").fetchone()
+        if integrity is None or integrity[0] != "ok":
+            raise sqlite3.DatabaseError(
+                f"Snapshot integrity check failed: {integrity[0] if integrity else 'no result'}"
+            )
+        destination.close()
+        destination = None
+        source.close()
+        source = None
+        temporary_path.replace(destination_path)
+        return destination_path
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
+    finally:
+        if destination is not None:
+            destination.close()
+        if source is not None:
+            source.close()
 
 
 # ---------------------------------------------------------------------------
@@ -995,6 +1050,7 @@ def reopen_result_sync(conn: sqlite3.Connection, *, run_id: str) -> Dict:
             SET status = 'requested',
                 globus_task_id = NULL,
                 error_summary = NULL,
+                transfer_started_at = NULL,
                 transferred_at = NULL,
                 verified_at = NULL,
                 ingested_at = NULL,

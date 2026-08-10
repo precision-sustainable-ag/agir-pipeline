@@ -7,6 +7,13 @@ paths:
   db: /project/dash_agir/globus_index/globus_file_index.sqlite3
   log_dir: /project/dash_agir/logs/result_sync
 
+# A consistent copy of the canonical database is published here only after
+# final result-sync reconciliation passes. The Atlas path is used only when
+# publish_ceres_db_snapshot.py is run with --transfer.
+snapshot:
+  ceres_publish_path: /90daydata/dash_agir/result_sync/db/globus_file_index.sqlite3
+  atlas_destination_path: /90daydata/dash_agir/result_sync/db/globus_file_index.sqlite3
+
 result_sync:
   # First Globus transfer: Atlas request outbox -> Ceres request inbox.
   atlas_endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"

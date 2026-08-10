@@ -36,6 +36,7 @@ from orchestrator.sqlite_db import (
     get_result_syncs,
     ingest_run_report,
     mark_result_sync_status,
+    reopen_result_sync,
     register_result_sync,
 )
 
@@ -64,6 +65,7 @@ PollFunc = Callable[..., TransferPollResult]
 __all__ = [
     "CeresResultSyncConfig",
     "finalize_verified_run_bundles",
+    "expected_promoted_inventory_paths",
     "RequestTransferError",
     "RequestTransferTimeout",
     "ResultSyncConfigError",
@@ -72,6 +74,7 @@ __all__ = [
     "poll_transferring_bundle_transfers",
     "process_inbox_requests",
     "receive_request_outbox",
+    "reopen_terminal_result_syncs",
     "require_result_sync_schema",
     "submit_requested_bundle_transfers",
     "synchronize_run_bundles",
@@ -129,6 +132,80 @@ class SyncOutcome:
     request_path: Path | None = None
     inventory_paths: tuple[Path, ...] = ()
     is_error: bool = False
+
+
+def reopen_terminal_result_syncs(
+    conn,
+    run_ids: list[str],
+    *,
+    dry_run: bool = False,
+) -> list[SyncOutcome]:
+    """Reopen explicitly selected failed or canceled synchronizations."""
+    selected = list(dict.fromkeys(run_ids))
+    outcomes: list[SyncOutcome] = []
+    recoverable: list[tuple[str, str]] = []
+    for run_id in selected:
+        row = conn.execute(
+            "SELECT status FROM result_syncs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            outcomes.append(
+                SyncOutcome(
+                    phase="recovery",
+                    run_id=run_id,
+                    status="invalid",
+                    message="unknown result sync run_id",
+                    is_error=True,
+                )
+            )
+            continue
+        previous = str(row["status"])
+        if previous not in {"failed", "canceled"}:
+            outcomes.append(
+                SyncOutcome(
+                    phase="recovery",
+                    run_id=run_id,
+                    previous_status=previous,
+                    status="invalid",
+                    message="only failed or canceled synchronizations can be reopened",
+                    is_error=True,
+                )
+            )
+            continue
+        recoverable.append((run_id, previous))
+
+    if outcomes:
+        for run_id, previous in recoverable:
+            outcomes.append(
+                SyncOutcome(
+                    phase="recovery",
+                    run_id=run_id,
+                    previous_status=previous,
+                    status="not_reopened",
+                    message="another selected run was invalid; no recovery changes made",
+                    is_error=True,
+                )
+            )
+        return outcomes
+
+    for run_id, previous in recoverable:
+        if dry_run:
+            status = "would_reopen"
+            message = "would reset synchronization for a new transfer attempt"
+        else:
+            status = str(reopen_result_sync(conn, run_id=run_id)["status"])
+            message = "reset synchronization for a new transfer attempt"
+        outcomes.append(
+            SyncOutcome(
+                phase="recovery",
+                run_id=run_id,
+                previous_status=previous,
+                status=status,
+                message=message,
+            )
+        )
+    return outcomes
 
 
 # Configuration ---------------------------------------------------------------
@@ -1104,3 +1181,41 @@ def verify_promoted_inventory(
             f"{len(missing)} promoted files missing from current Ceres inventory: "
             f"{preview}{remainder}"
         )
+
+
+def expected_promoted_inventory_paths(
+    conn,
+    config: CeresResultSyncConfig,
+) -> tuple[Path, ...]:
+    """Return the files expected from each latest promoted Atlas run."""
+    rows = conn.execute(
+        """
+        SELECT * FROM result_syncs
+        WHERE status = 'ingested'
+          AND run_status = 'success'
+          AND promotion_succeeded = 1
+        """
+    ).fetchall()
+    latest_by_batch_stage: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        sync = dict(row)
+        key = (str(sync["batch_id"]), str(sync["stage"]))
+        current = latest_by_batch_stage.get(key)
+        if current is None or _promotion_order(sync) > _promotion_order(current):
+            latest_by_batch_stage[key] = sync
+
+    paths: list[Path] = []
+    for sync in latest_by_batch_stage.values():
+        destination = _promotion_destination(
+            config,
+            batch_id=str(sync["batch_id"]),
+            stage=str(sync["stage"]),
+        )
+        paths.extend(
+            plan_promoted_paths(
+                Path(sync["dst_path"]),
+                destination,
+                artifacts_root=Path(sync["dst_path"]) / "artifacts",
+            )
+        )
+    return tuple(dict.fromkeys(paths))

@@ -25,6 +25,7 @@ from orchestrator.result_sync import (
     poll_transferring_bundle_transfers,
     process_inbox_requests,
     receive_request_outbox,
+    reopen_terminal_result_syncs,
     require_result_sync_schema,
     submit_requested_bundle_transfers,
     synchronize_run_bundles,
@@ -68,6 +69,16 @@ def _parser() -> argparse.ArgumentParser:
         description="Synchronize Atlas run results into canonical Ceres storage."
     )
     parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument(
+        "--reopen-run-id",
+        action="append",
+        default=[],
+        metavar="RUN_ID",
+        help=(
+            "Reopen one failed or canceled synchronization before processing; "
+            "repeat for multiple run IDs."
+        ),
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -222,6 +233,28 @@ def main() -> int:
             config.db_path,
             args.dry_run,
         )
+        if args.reopen_run_id:
+            recovery_conn = None
+            try:
+                recovery_conn = open_db(config.db_path, readonly=args.dry_run)
+                require_result_sync_schema(recovery_conn)
+                recovery = reopen_terminal_result_syncs(
+                    recovery_conn,
+                    args.reopen_run_id,
+                    dry_run=args.dry_run,
+                )
+            except (OSError, sqlite3.Error, ValueError) as exc:
+                logger.error("Unable to reopen result synchronization: %s", exc)
+                return 1
+            finally:
+                if recovery_conn is not None:
+                    recovery_conn.close()
+            if print_outcomes(
+                "Result-sync recovery",
+                recovery,
+                empty_message="No result synchronizations selected for recovery.",
+            ):
+                return 1
         try:
             if not args.dry_run:
                 config.ceres_inbox.mkdir(parents=True, exist_ok=True)

@@ -630,8 +630,17 @@ command again. It resumes polling the recorded Globus task instead of
 submitting a duplicate transfer.
 
 If a task reaches `failed` or `canceled`, resolve the underlying Globus or path
-problem before reopening it. Do not update `result_syncs.status` manually;
-there is not yet an operator-facing command for reopening terminal rows.
+problem before reopening it. Do not update `result_syncs.status` manually.
+Reopen an explicitly selected run and resume the normal workflow with:
+
+```bash
+python scripts/admin/sync_atlas_results.py \
+  --config configs/config.result_sync.ceres.local.yaml \
+  --reopen-run-id <run-id>
+```
+
+Repeat `--reopen-run-id` to reopen multiple failed or canceled runs. Other
+states are rejected so active or already-ingested work cannot be reset.
 
 ### Current completion boundary
 
@@ -668,6 +677,48 @@ An inventory or confirmation failure makes the command exit unsuccessfully but
 does not reverse completed promotion or ingestion. Correct the inventory issue
 and rerun with `--refresh-inventory`. Do not publish a fresh database snapshot
 to Atlas until result synchronization and inventory are reconciled.
+
+### Publish the reconciled Ceres database snapshot
+
+After Atlas jobs are no longer creating requests for the nightly window, run
+the result synchronization command through completion. Then preview the final
+snapshot check:
+
+```bash
+python scripts/admin/publish_ceres_db_snapshot.py \
+  --config configs/config.result_sync.ceres.local.yaml \
+  --dry-run
+```
+
+Final reconciliation blocks publication when a result sync is unfinished,
+failed, or canceled; an ingested sync is absent or inconsistent in
+`stage_runs`; or the promoted-output inventory is missing, unsuccessful,
+stale, or does not contain the expected files.
+
+Publish a consistent snapshot on Ceres without transferring it:
+
+```bash
+python scripts/admin/publish_ceres_db_snapshot.py \
+  --config configs/config.result_sync.ceres.local.yaml
+```
+
+When `snapshot.atlas_destination_path` has been confirmed for the Atlas
+deployment, publish and transfer the snapshot with Globus:
+
+```bash
+python scripts/admin/publish_ceres_db_snapshot.py \
+  --config configs/config.result_sync.ceres.local.yaml \
+  --transfer
+```
+
+The publisher uses SQLite's backup API, checks the exact candidate snapshot,
+and atomically replaces `snapshot.ceres_publish_path` only when reconciliation
+passes. `--transfer` waits for Globus to report successful checksum-based
+delivery. It does not discover requests that are still only in the Atlas
+outbox, so Atlas jobs must be quiesced or allowed to finish before the final
+sync and publication window. Coordinate or disable the pre-existing external
+nightly copy before enabling `--transfer`; two independent publishers must not
+write the Atlas database destination.
 
 ## Common Recovery Procedures
 
