@@ -26,7 +26,7 @@ from orchestrator.globus_transfer import (
     poll_task,
     submit_transfer,
 )
-from orchestrator.promotion import promote_run_bundle
+from orchestrator.promotion import plan_promoted_paths, promote_run_bundle
 from orchestrator.result_sync_request import (
     ResultSyncRequestError,
     load_result_sync_request,
@@ -76,6 +76,7 @@ __all__ = [
     "submit_requested_bundle_transfers",
     "synchronize_run_bundles",
     "verify_transferred_run_bundles",
+    "verify_promoted_inventory",
 ]
 
 
@@ -105,6 +106,12 @@ class CeresResultSyncConfig:
     ceres_run_root: str
     promotion_root: Path
     promotion_suffixes: dict[str, str]
+    inventory_storage_domain: str
+    inventory_namespace: str
+    inventory_storage_root: str
+    inventory_data_state: str
+    inventory_batch_size: int
+    inventory_max_workers: int
     poll_interval_seconds: float
     poll_timeout_seconds: float
 
@@ -120,6 +127,7 @@ class SyncOutcome:
     previous_status: str | None = None
     globus_task_id: str | None = None
     request_path: Path | None = None
+    inventory_paths: tuple[Path, ...] = ()
     is_error: bool = False
 
 
@@ -152,6 +160,12 @@ def _require_positive_number(value: Any, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         raise ResultSyncConfigError(f"{field} must be greater than zero")
     return float(value)
+
+
+def _require_positive_integer(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ResultSyncConfigError(f"{field} must be a positive integer")
+    return value
 
 
 def _load_promotion_suffixes(value: Any) -> dict[str, str]:
@@ -201,6 +215,25 @@ def load_ceres_result_sync_config(path: Path) -> CeresResultSyncConfig:
 
     polling = _require_object(sync.get("polling", {}), "result_sync.polling")
     promotion = _require_object(sync.get("promotion"), "result_sync.promotion")
+    inventory = _require_object(sync.get("inventory"), "result_sync.inventory")
+    inventory_storage_root = _validate_transfer_path(
+        inventory.get("storage_root"),
+        "result_sync.inventory.storage_root",
+    )
+    inventory_data_state = _require_nonempty_string(
+        inventory.get("data_state"),
+        "result_sync.inventory.data_state",
+    )
+    promotion_root = Path(
+        _validate_transfer_path(
+            promotion.get("root"),
+            "result_sync.promotion.root",
+        )
+    )
+    if Path(inventory_storage_root) / inventory_data_state != promotion_root:
+        raise ResultSyncConfigError(
+            "result_sync.promotion.root must equal inventory.storage_root/data_state"
+        )
     return CeresResultSyncConfig(
         db_path=Path(_require_nonempty_string(paths.get("db"), "paths.db")),
         log_dir=Path(_require_nonempty_string(paths.get("log_dir"), "paths.log_dir")),
@@ -218,14 +251,27 @@ def load_ceres_result_sync_config(path: Path) -> CeresResultSyncConfig:
         ceres_run_root=_validate_transfer_path(
             sync.get("ceres_run_root"), "result_sync.ceres_run_root"
         ),
-        promotion_root=Path(
-            _validate_transfer_path(
-                promotion.get("root"),
-                "result_sync.promotion.root",
-            )
-        ),
+        promotion_root=promotion_root,
         promotion_suffixes=_load_promotion_suffixes(
             promotion.get("stage_suffixes")
+        ),
+        inventory_storage_domain=_require_nonempty_string(
+            inventory.get("storage_domain"),
+            "result_sync.inventory.storage_domain",
+        ),
+        inventory_namespace=_require_nonempty_string(
+            inventory.get("namespace"),
+            "result_sync.inventory.namespace",
+        ),
+        inventory_storage_root=inventory_storage_root,
+        inventory_data_state=inventory_data_state,
+        inventory_batch_size=_require_positive_integer(
+            inventory.get("batch_size", 10000),
+            "result_sync.inventory.batch_size",
+        ),
+        inventory_max_workers=_require_positive_integer(
+            inventory.get("max_workers", 8),
+            "result_sync.inventory.max_workers",
         ),
         poll_interval_seconds=_require_positive_number(
             polling.get("interval_seconds", 30),
@@ -922,6 +968,7 @@ def finalize_verified_run_bundles(
     for sync in sorted(verified, key=priority):
         run_id = str(sync["run_id"])
         previous_status = str(sync["status"])
+        inventory_paths: tuple[Path, ...] = ()
         try:
             run_status = str(sync["run_status"])
             if run_status == "success":
@@ -943,6 +990,11 @@ def finalize_verified_run_bundles(
                         stage=str(sync["stage"]),
                     )
                     if dry_run:
+                        inventory_paths = plan_promoted_paths(
+                            Path(sync["dst_path"]),
+                            destination,
+                            artifacts_root=Path(sync["dst_path"]) / "artifacts",
+                        )
                         message = f"would promote to {destination} and ingest run report"
                     else:
                         promoted = promote_run_bundle(
@@ -950,6 +1002,7 @@ def finalize_verified_run_bundles(
                             destination,
                             artifacts_root=Path(sync["dst_path"]) / "artifacts",
                         )
+                        inventory_paths = promoted.promoted_paths
                         message = (
                             f"promoted {promoted.artifact_count} artifacts to "
                             f"{promoted.destination} and ingested run report"
@@ -988,6 +1041,7 @@ def finalize_verified_run_bundles(
                 previous_status=previous_status,
                 status=status,
                 message=message,
+                inventory_paths=inventory_paths,
             )
         except (OSError, ValueError) as exc:
             message = _error_summary(str(exc))
@@ -1013,3 +1067,40 @@ def finalize_verified_run_bundles(
         _log_outcome(outcome, "bundle finalization")
         outcomes.append(outcome)
     return outcomes
+
+
+def verify_promoted_inventory(
+    conn,
+    config: CeresResultSyncConfig,
+    promoted_paths: tuple[Path, ...],
+) -> None:
+    """Require every newly promoted path to be current in Ceres inventory."""
+    missing: list[str] = []
+    for path in dict.fromkeys(promoted_paths):
+        found = conn.execute(
+            """
+            SELECT 1 FROM globus_file_index
+            WHERE endpoint = ? AND site = 'CERES'
+              AND storage_domain = ? AND namespace = ?
+              AND storage_root = ? AND data_state = ?
+              AND full_path = ? AND entry_type = 'file' AND is_current = 1
+            LIMIT 1
+            """,
+            (
+                config.ceres_endpoint,
+                config.inventory_storage_domain,
+                config.inventory_namespace,
+                config.inventory_storage_root,
+                config.inventory_data_state,
+                str(path),
+            ),
+        ).fetchone()
+        if found is None:
+            missing.append(str(path))
+    if missing:
+        preview = ", ".join(missing[:10])
+        remainder = f" (+{len(missing) - 10} more)" if len(missing) > 10 else ""
+        raise ValueError(
+            f"{len(missing)} promoted files missing from current Ceres inventory: "
+            f"{preview}{remainder}"
+        )

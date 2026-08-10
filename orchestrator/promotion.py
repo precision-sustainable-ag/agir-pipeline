@@ -16,6 +16,7 @@ class PromotionResult:
     artifact_count: int
     destination: Path
     metadata_destination: Path
+    promoted_paths: tuple[Path, ...]
 
 
 def _rewrite_run_report(report: dict, dest: Path, meta_dest: Path) -> dict:
@@ -80,17 +81,22 @@ def promote_run_bundle(
 
     dest.mkdir(parents=True, exist_ok=True)
     promoted = 0
+    promoted_paths: list[Path] = []
     for item in validated.items:
         for artifact_rel in (item.get("artifacts") or {}).values():
             if artifact_rel:
                 source = validated.artifacts_root / artifact_rel
-                shutil.copy2(source, dest / source.name)
+                promoted_path = dest / source.name
+                shutil.copy2(source, promoted_path)
+                promoted_paths.append(promoted_path)
                 promoted += 1
 
     if batch_id:
         batch_csv = validated.artifacts_root / f"{batch_id}.csv"
         if batch_csv.is_file():
-            shutil.copy2(batch_csv, dest / batch_csv.name)
+            promoted_csv = dest / batch_csv.name
+            shutil.copy2(batch_csv, promoted_csv)
+            promoted_paths.append(promoted_csv)
 
     metadata_dest = dest.parent / stage
     metadata_dest.mkdir(parents=True, exist_ok=True)
@@ -114,4 +120,29 @@ def promote_run_bundle(
         report.get("inputs", {}).get("inputs_manifest_path"),
         metadata_dest,
     )
-    return PromotionResult(promoted, dest, metadata_dest)
+    return PromotionResult(promoted, dest, metadata_dest, tuple(promoted_paths))
+
+
+def plan_promoted_paths(
+    run_dir: Path,
+    dest: Path,
+    *,
+    artifacts_root: Path | None = None,
+) -> tuple[Path, ...]:
+    """Return artifact paths a promotion would create without writing them."""
+    validated = validate_promotable_run_bundle(
+        run_dir,
+        artifacts_root=artifacts_root,
+    )
+    paths = [
+        dest / Path(artifact_rel).name
+        for item in validated.items
+        for artifact_rel in (item.get("artifacts") or {}).values()
+        if artifact_rel
+    ]
+    batch_id = validated.run_report.get("batch_id", "")
+    if batch_id:
+        batch_csv = validated.artifacts_root / f"{batch_id}.csv"
+        if batch_csv.is_file():
+            paths.append(dest / batch_csv.name)
+    return tuple(paths)

@@ -527,6 +527,7 @@ Review these values before running:
 - `result_sync.atlas_outbox` and `result_sync.ceres_inbox`
 - `result_sync.atlas_run_root` and `result_sync.ceres_run_root`
 - `result_sync.promotion.root` and its stage suffixes
+- `result_sync.inventory` Ceres developed-images scope and worker settings
 - polling interval and timeout
 
 Confirm that schema version `7` and the `result_syncs` table are installed,
@@ -554,9 +555,10 @@ Dry-run mode does not start Globus transfers or write to the database. It
 validates requests already present in the Ceres inbox and plans bundle
 transfers for previously registered rows in `requested` state. It also
 validates local bundles already in `transferred` state and previews promotion
-and ingestion for `verified` rows without advancing them. Because it does not
+and ingestion for `verified` rows without advancing them. If a promotion would
+occur, it also reports the planned inventory refresh. Because dry-run does not
 register new rows, a newly discovered request will not also appear as a planned
-bundle transfer during the same dry run.
+bundle transfer during the same invocation.
 
 ### Run the synchronization
 
@@ -648,10 +650,24 @@ partial run reports are ingested for history without promotion. An older
 successful run cannot replace a newer Atlas promotion for the same batch and
 stage. A completed row advances to `ingested`.
 
-An `ingested` result does not yet mean that Ceres has refreshed the canonical
-file inventory. Do not publish a fresh database snapshot to Atlas until the
-promoted output inventory has been refreshed and result synchronization has
-been reconciled.
+When at least one promotion succeeds, the command performs one complete Ceres
+`semifield-developed-images` inventory refresh, rebuilds the inventory summary
+tables, and confirms every newly promoted artifact is current in
+`globus_file_index`. The inventory refresh runs once per command, not once per
+bundle.
+
+Force a recovery refresh when no new promotion occurred:
+
+```bash
+python scripts/admin/sync_atlas_results.py \
+  --config configs/config.result_sync.ceres.local.yaml \
+  --refresh-inventory
+```
+
+An inventory or confirmation failure makes the command exit unsuccessfully but
+does not reverse completed promotion or ingestion. Correct the inventory issue
+and rerun with `--refresh-inventory`. Do not publish a fresh database snapshot
+to Atlas until result synchronization and inventory are reconciled.
 
 ## Common Recovery Procedures
 

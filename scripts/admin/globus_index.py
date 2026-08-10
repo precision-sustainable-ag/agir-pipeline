@@ -1011,6 +1011,33 @@ def run_one_config(
         return run_id, "failed"
 
 
+def refresh_inventory_scope(
+    *,
+    db_path: str | Path,
+    config: EndpointConfig,
+    batch_size: int = 10_000,
+    max_workers: int = 8,
+    logger: logging.Logger,
+) -> Tuple[int, str]:
+    """Refresh one complete inventory scope using the standard scanner."""
+    validate_endpoint_config(config)
+    conn = init_db(str(db_path), logger)
+    try:
+        return run_one_config(
+            conn=conn,
+            cfg=config,
+            batch_size=batch_size,
+            max_workers=max_workers,
+            clean_slate=False,
+            mark_stale=True,
+            build_summaries=True,
+            vacuum_after_clean=False,
+            logger=logger,
+        )
+    finally:
+        conn.close()
+
+
 # ============================================================
 #                          CLI
 # ============================================================

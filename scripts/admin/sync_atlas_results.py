@@ -29,8 +29,10 @@ from orchestrator.result_sync import (
     submit_requested_bundle_transfers,
     synchronize_run_bundles,
     verify_transferred_run_bundles,
+    verify_promoted_inventory,
 )
 from orchestrator.sqlite_db import open_db
+from scripts.admin.globus_index import EndpointConfig, refresh_inventory_scope
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +84,11 @@ def _parser() -> argparse.ArgumentParser:
         help="Maximum requested run-bundle transfers to submit (default: 50).",
     )
     parser.add_argument(
+        "--refresh-inventory",
+        action="store_true",
+        help="Force a Ceres developed-images inventory refresh.",
+    )
+    parser.add_argument(
         "--log-dir",
         type=Path,
         default=None,
@@ -100,6 +107,7 @@ def _print_summary(
     transfers: list[SyncOutcome],
     verifications: list[SyncOutcome],
     finalizations: list[SyncOutcome],
+    inventory: list[SyncOutcome],
 ) -> bool:
     any_error = print_outcomes(
         "Atlas result-sync requests",
@@ -116,11 +124,72 @@ def _print_summary(
         verifications,
         empty_message="No transferred run bundles found for verification.",
     ) or any_error
-    return print_outcomes(
+    any_error = print_outcomes(
         "Ceres promotion and canonical ingestion",
         finalizations,
         empty_message="No verified run bundles found for finalization.",
     ) or any_error
+    return print_outcomes(
+        "Ceres promoted-output inventory",
+        inventory,
+        empty_message="No promoted-output inventory refresh was required.",
+    ) or any_error
+
+
+def _refresh_promoted_inventory(
+    config: CeresResultSyncConfig,
+    promoted_paths: tuple[Path, ...],
+    *,
+    dry_run: bool,
+) -> SyncOutcome:
+    if dry_run:
+        return SyncOutcome(
+            phase="inventory",
+            run_id=None,
+            status="would_refresh",
+            message="would refresh Ceres semifield-developed-images inventory",
+        )
+    try:
+        inventory_run_id, status = refresh_inventory_scope(
+            db_path=config.db_path,
+            config=EndpointConfig(
+                endpoint=config.ceres_endpoint,
+                site="CERES",
+                storage_domain=config.inventory_storage_domain,
+                namespace=config.inventory_namespace,
+                storage_root=config.inventory_storage_root,
+                data_state=config.inventory_data_state,
+            ),
+            batch_size=config.inventory_batch_size,
+            max_workers=config.inventory_max_workers,
+            logger=logger,
+        )
+        if status != "success":
+            raise RuntimeError(
+                f"inventory run {inventory_run_id} completed with status {status}"
+            )
+        conn = open_db(config.db_path, readonly=True)
+        try:
+            verify_promoted_inventory(conn, config, promoted_paths)
+        finally:
+            conn.close()
+        return SyncOutcome(
+            phase="inventory",
+            run_id=None,
+            status="refreshed",
+            message=(
+                f"inventory run {inventory_run_id} indexed and confirmed "
+                f"{len(set(promoted_paths))} promoted files"
+            ),
+        )
+    except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
+        return SyncOutcome(
+            phase="inventory",
+            run_id=None,
+            status="failed",
+            message=str(exc),
+            is_error=True,
+        )
 
 
 def main() -> int:
@@ -170,6 +239,7 @@ def main() -> int:
         transfers: list[SyncOutcome] = []
         verifications: list[SyncOutcome] = []
         finalizations: list[SyncOutcome] = []
+        inventory: list[SyncOutcome] = []
         timed_out = False
         try:
             conn = open_db(config.db_path, readonly=args.dry_run)
@@ -198,11 +268,26 @@ def main() -> int:
             if conn is not None:
                 conn.close()
 
+        promoted_paths = tuple(
+            path
+            for outcome in finalizations
+            for path in outcome.inventory_paths
+        )
+        if promoted_paths or args.refresh_inventory:
+            inventory = [
+                _refresh_promoted_inventory(
+                    config,
+                    promoted_paths,
+                    dry_run=args.dry_run,
+                )
+            ]
+
         any_error = _print_summary(
             requests,
             transfers,
             verifications,
             finalizations,
+            inventory,
         )
         if timed_out:
             logger.error(
@@ -214,11 +299,12 @@ def main() -> int:
             exit_code = 1 if any_error else 0
         logger.info(
             "Finished Atlas result synchronization requests=%d bundles=%d "
-            "verifications=%d finalizations=%d exit_code=%d",
+            "verifications=%d finalizations=%d inventory=%d exit_code=%d",
             len(requests),
             len(transfers),
             len(verifications),
             len(finalizations),
+            len(inventory),
             exit_code,
         )
         return exit_code
