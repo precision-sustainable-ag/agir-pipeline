@@ -6,6 +6,8 @@ import pytest
 from shapely.geometry import box
 
 from stages.det_to_world.species import (
+    UnknownSpeciesCodeError,
+    ZoneTooFarError,
     assign_monoculture,
     assign_spatial,
     enrich_with_catalog,
@@ -80,7 +82,8 @@ def cultivar_shapefile(tmp_path):
 
 @pytest.fixture
 def geo_df():
-    """Three detections: two inside zones, one outside all zones (for nearest fallback)."""
+    """Three detections: two inside zones, one just outside both (~2.8m from the
+    nearest zone 1 corner, well within the default nearest-fallback threshold)."""
     return pd.DataFrame(
         {
             "image_id": ["IMG_0001", "IMG_0001", "IMG_0001"],
@@ -91,18 +94,47 @@ def geo_df():
             "ymin": [0.1, 0.4, 0.7],
             "xmax": [0.2, 0.5, 0.8],
             "ymax": [0.2, 0.5, 0.8],
-            # inside zone 1, inside zone 2, outside both
-            "world_centroid_x": [5.0, 25.0, 15.0],
-            "world_centroid_y": [5.0, 25.0, 15.0],
-            "world_tl_x": [4.0, 24.0, 14.0],
-            "world_tl_y": [4.0, 24.0, 14.0],
-            "world_tr_x": [6.0, 26.0, 16.0],
-            "world_tr_y": [4.0, 24.0, 14.0],
-            "world_bl_x": [4.0, 24.0, 14.0],
-            "world_bl_y": [6.0, 26.0, 16.0],
-            "world_br_x": [6.0, 26.0, 16.0],
-            "world_br_y": [6.0, 26.0, 16.0],
+            # inside zone 1, inside zone 2, just outside both (nearest: zone 1)
+            "world_centroid_x": [5.0, 25.0, 12.0],
+            "world_centroid_y": [5.0, 25.0, 12.0],
+            "world_tl_x": [4.0, 24.0, 11.0],
+            "world_tl_y": [4.0, 24.0, 11.0],
+            "world_tr_x": [6.0, 26.0, 13.0],
+            "world_tr_y": [4.0, 24.0, 11.0],
+            "world_bl_x": [4.0, 24.0, 11.0],
+            "world_bl_y": [6.0, 26.0, 13.0],
+            "world_br_x": [6.0, 26.0, 13.0],
+            "world_br_y": [6.0, 26.0, 13.0],
             "crs": [ZONE_CRS, ZONE_CRS, ZONE_CRS],
+        }
+    )
+
+
+@pytest.fixture
+def far_geo_df():
+    """Single detection ~99m from the nearest zone polygon — beyond any
+    reasonable nearest-fallback threshold."""
+    return pd.DataFrame(
+        {
+            "image_id": ["IMG_0001"],
+            "bounding_box_id": [0],
+            "classname": ["weed"],
+            "conf": [0.95],
+            "xmin": [0.1],
+            "ymin": [0.1],
+            "xmax": [0.2],
+            "ymax": [0.2],
+            "world_centroid_x": [100.0],
+            "world_centroid_y": [100.0],
+            "world_tl_x": [99.0],
+            "world_tl_y": [99.0],
+            "world_tr_x": [101.0],
+            "world_tr_y": [99.0],
+            "world_bl_x": [99.0],
+            "world_bl_y": [101.0],
+            "world_br_x": [101.0],
+            "world_br_y": [101.0],
+            "crs": [ZONE_CRS],
         }
     )
 
@@ -146,6 +178,26 @@ def test_assign_spatial_nearest_fallback(geo_df, shapefile):
     outside = result[result["bounding_box_id"] == 2]
     assert outside["species_id"].notna().all()
     assert (outside["assignment_method"] == "nearest_polygon").all()
+
+
+def test_assign_spatial_raises_when_nearest_zone_beyond_default_threshold(far_geo_df, shapefile):
+    """A detection ~99m from every zone polygon exceeds the 5m default and raises."""
+    with pytest.raises(ZoneTooFarError, match="IMG_0001:0"):
+        assign_spatial(far_geo_df, str(shapefile))
+
+
+def test_assign_spatial_raises_when_nearest_zone_beyond_custom_threshold(geo_df, shapefile):
+    """A custom, stricter max_nearest_distance_m can flag a point normally within tolerance."""
+    with pytest.raises(ZoneTooFarError, match="IMG_0001:2"):
+        assign_spatial(geo_df, str(shapefile), max_nearest_distance_m=1.0)
+
+
+def test_assign_spatial_nearest_fallback_within_custom_threshold(far_geo_df, shapefile):
+    """Raising max_nearest_distance_m lets a farther point still fall back normally."""
+    result = assign_spatial(far_geo_df, str(shapefile), max_nearest_distance_m=200.0)
+
+    assert result.loc[0, "species_id"] == "BETVU"
+    assert result.loc[0, "assignment_method"] == "nearest_polygon"
 
 
 def test_assign_spatial_no_cultivar_columns_when_shapefile_lacks_them(geo_df, shapefile):
@@ -246,6 +298,15 @@ def catalog():
                 "g": 5,
                 "b": 242,
             },
+            "102": {
+                "display_name": "Peanut - TifNV-HG",
+                "line_name": "high-oleic",
+                "registered": 1,
+                "hex": "#0f52f1",
+                "r": 15,
+                "g": 82,
+                "b": 241,
+            },
         },
     }
 
@@ -267,14 +328,21 @@ def test_enrich_with_catalog_adds_species_columns(catalog):
     assert (result.loc[0, "species_r"], result.loc[0, "species_g"], result.loc[0, "species_b"]) == (165, 72, 47)
 
 
-def test_enrich_with_catalog_blanks_unmatched_species(catalog, caplog):
+def test_enrich_with_catalog_raises_on_unmatched_species(catalog):
     dets = pd.DataFrame({"species_id": ["UNKNOWN_CODE"], "assignment_method": ["monoculture_config"]})
 
-    with caplog.at_level("WARNING"):
-        result = enrich_with_catalog(dets, catalog)
+    with pytest.raises(UnknownSpeciesCodeError, match="UNKNOWN_CODE"):
+        enrich_with_catalog(dets, catalog)
 
-    assert result.loc[0, "species_common_name"] is None
-    assert "UNKNOWN_CODE" in caplog.text
+
+def test_enrich_with_catalog_raises_on_unmatched_cultivar(catalog):
+    dets = pd.DataFrame({
+        "species_id": ["ARHY"],
+        "cultivar_id": ["UNKNOWN_CULTIVAR"],
+    })
+
+    with pytest.raises(UnknownSpeciesCodeError, match="UNKNOWN_CULTIVAR"):
+        enrich_with_catalog(dets, catalog)
 
 
 def test_enrich_with_catalog_adds_cultivar_columns_only_when_present(catalog):

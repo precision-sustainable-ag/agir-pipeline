@@ -29,6 +29,8 @@ from . import (
     ERROR_REMAP_FAILED,
     ERROR_SHAPEFILE_UNREADABLE,
     ERROR_SPATIAL_JOIN_FAILED,
+    ERROR_ZONE_TOO_FAR,
+    ERROR_UNKNOWN_SPECIES_CODE,
 )
 from .remapper import (
     GEO_COLUMNS,
@@ -36,7 +38,15 @@ from .remapper import (
     remap_rows,
     write_georeferenced_csv,
 )
-from .species import assign_monoculture, assign_spatial, enrich_with_catalog, load_catalog
+from .species import (
+    DEFAULT_MAX_NEAREST_DISTANCE_M,
+    UnknownSpeciesCodeError,
+    ZoneTooFarError,
+    assign_monoculture,
+    assign_spatial,
+    enrich_with_catalog,
+    load_catalog,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +117,11 @@ def main() -> int:
     parser.add_argument("--skip-remap", action="store_true", help="Skip remapping for monoculture batches.")
     parser.add_argument("--shp", type=Path, default=None, help="Species zone shapefile. Required unless --skip-remap.")
     parser.add_argument("--species", type=str, default=None, help="Species code for monoculture batches. Required with --skip-remap.")
+    parser.add_argument(
+        "--max-nearest-distance-m", type=float, default=DEFAULT_MAX_NEAREST_DISTANCE_M,
+        help="Max distance (zone shapefile CRS units, meters for UTM) a detection outside every "
+        f"zone polygon may fall back to its nearest zone before the run fails (default: {DEFAULT_MAX_NEAREST_DISTANCE_M}).",
+    )
     parser.add_argument("--bbot-version", type=str, required=True, help="BBot version string.")
     parser.add_argument(
         "--species-catalog", type=Path, default=DEFAULT_SPECIES_CATALOG,
@@ -267,7 +282,29 @@ def main() -> int:
             return EXIT_FAILURE
 
         if species_catalog is not None:
-            species_df = enrich_with_catalog(species_df, species_catalog)
+            try:
+                species_df = enrich_with_catalog(species_df, species_catalog)
+            except UnknownSpeciesCodeError as exc:
+                logger.error("Species catalog enrichment failed: %s", exc)
+                report.set_stage_error(f"Species catalog enrichment failed: {exc}")
+                report.add_error(
+                    unit_id="__stage__",
+                    code=ERROR_UNKNOWN_SPECIES_CODE,
+                    error_type=type(exc).__name__,
+                    message=str(exc),
+                )
+                report.stop(EXIT_FAILURE)
+                report.set_outputs(
+                    output_root=str(args.o),
+                    run_root=str(run_dir),
+                    artifacts_dir=str(artifacts_dir),
+                    n_succeeded=0,
+                    n_failed=len(image_ids),
+                )
+                report.set_pointers(logs_path=str(log_path))
+                report.write(run_dir / "run_report.json")
+                manifest.write(run_dir / "manifest.json")
+                return EXIT_FAILURE
 
         output_fieldnames = _build_output_fieldnames(input_fieldnames, species_df.columns)
         output_rows = _to_output_rows(species_df, output_fieldnames)
@@ -340,11 +377,19 @@ def main() -> int:
     # unusable without species columns.
     if mapped_rows:
         try:
-            species_df = assign_spatial(pd.DataFrame(mapped_rows), str(args.shp))
+            species_df = assign_spatial(
+                pd.DataFrame(mapped_rows), str(args.shp),
+                max_nearest_distance_m=args.max_nearest_distance_m,
+            )
         except Exception as exc:
             logger.error("Spatial species assignment failed: %s", exc)
             report.set_stage_error(f"Spatial species assignment failed: {exc}")
-            error_code = ERROR_SHAPEFILE_UNREADABLE if "shapefile" in str(exc).lower() else ERROR_SPATIAL_JOIN_FAILED
+            if isinstance(exc, ZoneTooFarError):
+                error_code = ERROR_ZONE_TOO_FAR
+            elif "shapefile" in str(exc).lower():
+                error_code = ERROR_SHAPEFILE_UNREADABLE
+            else:
+                error_code = ERROR_SPATIAL_JOIN_FAILED
             report.add_error(
                 unit_id="__stage__",
                 code=error_code,
@@ -365,7 +410,29 @@ def main() -> int:
             return EXIT_FAILURE
 
         if species_catalog is not None:
-            species_df = enrich_with_catalog(species_df, species_catalog)
+            try:
+                species_df = enrich_with_catalog(species_df, species_catalog)
+            except UnknownSpeciesCodeError as exc:
+                logger.error("Species catalog enrichment failed: %s", exc)
+                report.set_stage_error(f"Species catalog enrichment failed: {exc}")
+                report.add_error(
+                    unit_id="__stage__",
+                    code=ERROR_UNKNOWN_SPECIES_CODE,
+                    error_type=type(exc).__name__,
+                    message=str(exc),
+                )
+                report.stop(EXIT_FAILURE)
+                report.set_outputs(
+                    output_root=str(args.o),
+                    run_root=str(run_dir),
+                    artifacts_dir=str(artifacts_dir),
+                    n_succeeded=0,
+                    n_failed=len(image_ids),
+                )
+                report.set_pointers(logs_path=str(log_path))
+                report.write(run_dir / "run_report.json")
+                manifest.write(run_dir / "manifest.json")
+                return EXIT_FAILURE
 
         output_fieldnames = _build_output_fieldnames(input_fieldnames, species_df.columns)
         output_rows = _to_output_rows(species_df, output_fieldnames)

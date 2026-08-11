@@ -14,7 +14,7 @@ paths:
   agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
 
   # Detection YAML config passed to jpg_to_det --c
-  stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/configs/jpg_to_det.yaml
+  stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/stages/jpg_to_det/configs/default.yaml
 
   # Detection model weights passed to jpg_to_det --m
   det_model_path: /90daydata/dash_agir/semifield-tools/models/plant_detector/With_Synthetic_Train_Data/weights/last.pt
@@ -63,6 +63,16 @@ transfer:
       # (implicit), then CERES (raw_to_jpg's final_dest_root), then JUNO LTS.
       source_root_ceres: /90daydata/dash_agir/semifield-developed-images
       source_root_juno: /LTS/project/dash_agir/semifield-developed-images
+
+      # Required — orchestrator/submit_jobs.py (job rendering, separate from
+      # the transfer planning above) reads this to build the compute job's
+      # $INPUT_STAGING_DIR as <input_staging_root>/<batch_id>/images, which
+      # must match the dst_path _plan_multi_site_requests() stages files
+      # into. Without it, jpg_to_det's flat rsync step
+      # (slurm_job.sh.j2, non-det_to_world branch) would copy files into
+      # $TMPDIR/input/images/ instead of $TMPDIR/input/, and the CLI's
+      # non-recursive JPG discovery would find nothing.
+      input_subdir: images
 
 # ── Slurm job parameters ──────────────────────────────────────────────────────
 slurm:
