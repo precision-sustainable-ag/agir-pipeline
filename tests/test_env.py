@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -177,7 +178,15 @@ def check_torch() -> None:
     ok(f"torch import OK ({torch.__version__})")
 
     # CUDA is optional
-    if torch.cuda.is_available():
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="CUDA initialization: Unexpected error from cudaGetDeviceCount.*",
+            category=UserWarning,
+        )
+        cuda_available = torch.cuda.is_available()
+
+    if cuda_available:
         ok(f"torch CUDA available: {torch.version.cuda}")
     else:
         warn("torch CUDA not available (OK if you intend CPU-only).")
