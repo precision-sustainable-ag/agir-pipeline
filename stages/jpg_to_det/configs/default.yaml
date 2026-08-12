@@ -1,4 +1,4 @@
-base_imgsz: 4096
+base_imgsz: 2048
 scales: [0.5, 0.75, 1.0, 1.25, 1.5]
 per_scale_conf: 0.15
 per_scale_iou: 0.5

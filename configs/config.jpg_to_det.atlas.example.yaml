@@ -56,13 +56,14 @@ result_sync:
   source_endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
   destination_endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
   destination_run_root: /90daydata/dash_agir/tmp/stage_runs
+  input_subdir: images
 
 # ── Slurm job parameters ──────────────────────────────────────────────────────
 slurm:
   account: dash_agir
   partition: gpu-a100
   gres: gpu:1
-  cpus_per_task: 16
+  cpus_per_task: 8
   mem: 128G
   time: "4:00:00"
 
