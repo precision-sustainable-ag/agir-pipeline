@@ -90,7 +90,7 @@ visualization:
     images: '"$TMPINPUT"'
     detections: '"$RUN_DIR/artifacts"'
     output: '"$VIZ_DIR"'
-    sample_size: 50
+    sample_size: 100
     max_width: 1800
 
 # ── Render template ───────────────────────────────────────────────────────────
