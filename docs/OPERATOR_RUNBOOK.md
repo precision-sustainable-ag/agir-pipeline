@@ -445,6 +445,64 @@ If `sbatch` fails, do not repeatedly resubmit immediately. The lease remains
 until it expires or is deliberately released through an approved recovery
 procedure.
 
+### Group-Based Scheduled Submission
+
+For `jpg_to_det` and `det_to_world`, [`scripts/job/schedule_jpg_to_det_groups.sh`](../scripts/job/schedule_jpg_to_det_groups.sh)
+and [`scripts/job/schedule_det_to_world_groups.sh`](../scripts/job/schedule_det_to_world_groups.sh)
+offer an alternative to running Steps 2–9 by hand for every batch: they split
+a master batch list into groups and submit one Slurm job per group, staggered
+over time, so the whole list doesn't hit the queue — or Globus — at once.
+
+```bash
+bash scripts/job/schedule_jpg_to_det_groups.sh
+bash scripts/job/schedule_det_to_world_groups.sh
+```
+
+Each script:
+
+1. Reads the master batch list (`configs/batch_list.example.txt`), dropping
+   blank lines and `#` comments.
+2. Splits it into fixed-size groups (`BATCHES_PER_GROUP`) and writes them to
+   `configs/jpg_to_det_groups/batch_group_NN.txt` or
+   `configs/det_to_world_groups/batch_group_NN.txt`, replacing any
+   previously generated group files.
+3. Submits one Slurm job per group via `sbatch --begin=now+<offset>hours`,
+   spacing group start times by `INTERVAL_HOURS` — group 1 starts
+   immediately, group 2 after one interval, and so on. Both knobs are set at
+   the top of the script; `det_to_world`'s are larger (12 batches/group, 1h
+   apart) since that stage is CPU-only and cheap, while `jpg_to_det`'s are
+   smaller (5 batches/group, 3h apart) to match its heavier GPU footprint.
+
+**For `jpg_to_det` specifically, this staggering is not just a queue-courtesy
+default — it protects a shared GPU resource.** Slurm scheduling alone does
+not guarantee that concurrently-submitted `jpg_to_det` batches land on
+different nodes or otherwise avoid sharing a GPU's CUDA memory. If batches
+are instead submitted manually or in bulk without this scheduler (e.g. many
+back-to-back `submit.py` calls or a large `--limit`), multiple inference
+jobs can end up competing for the same GPU's memory. The result is not a
+clean failure: batches can throw inference errors mid-run, produce partial
+or no detection output, or fail outright with CUDA out-of-memory (OOM)
+errors — and because this happens at the CUDA/driver level rather than in
+`submit.py`'s own lease logic, it isn't prevented by the database lease.
+Prefer `schedule_jpg_to_det_groups.sh` for any multi-batch `jpg_to_det` run
+rather than submitting a large batch of jobs by hand.
+
+Each submitted group job (`run_jpg_to_det_group.sbatch` /
+`run_det_to_world_group.sbatch`) then works through its batch IDs one at a
+time, running the same staging → submission flow as Steps 2–7 for each:
+`stage_inputs.py`, `poll_stage_inputs.py --wait`, then `submit.py`. After
+submitting a batch's compute job, it polls `squeue`/`sacct` until that job
+(`<stage>_<batch-id>`) leaves the queue and its final state is confirmed
+`COMPLETED` before moving to the next batch — so batches within a group
+never run concurrently, only groups overlap.
+
+This is a convenience wrapper around the manual workflow, not a separate
+mechanism — it still claims the same database leases and is subject to the
+same recovery procedures below. Both the outer scheduling scripts and the
+group `.sbatch` runners hardcode `PROJECT_DIR`, the virtualenv activation
+path, and Slurm log directories for this environment; update those before
+running them elsewhere.
+
 ## Step 8: Monitor Compute Jobs
 
 Use standard Slurm commands for scheduler state:
