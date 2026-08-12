@@ -28,7 +28,7 @@ The database contains three groups of objects:
 | Inventory | `inventory_runs`, `globus_file_index` | Track storage scans and current file state |
 | Reporting | `batch_inventory_summary`, `storage_gap_summary` | Store per-scan aggregate counts |
 | Orchestration | `stage_runs`, `stage_leases`, `staged_inputs` | Track execution, concurrency, and prerequisite transfers |
-| Readiness | `v_batches_needing_raw_to_jpg`, `v_batches_needing_jpg_to_det` | Calculate batches eligible for pipeline stages |
+| Readiness | `v_batches_needing_raw_to_jpg`, `v_batches_needing_jpg_to_det`, `v_batches_needing_det_to_world` | Calculate batches eligible for pipeline stages |
 
 ## Logical Relationships
 
@@ -524,8 +524,12 @@ The view excludes active `raw_to_jpg` leases and successful `raw_to_jpg` runs.
 
 ### `v_batches_needing_jpg_to_det`
 
-Returns batches that have current JPG inputs in an `images` directory but no
-current detection-related files.
+Returns batches that have current JPG inputs in an `images` directory —
+anywhere, any site — but no current detection-related files. `jpg_to_det`
+resolves the actual transfer source via the same destination/CERES/JUNO
+priority chain `det_to_world` uses (see
+`orchestrator/input_staging_planner.py`'s `_plan_multi_site_requests`), so
+this view isn't restricted to a fixed set of sites.
 
 Output columns:
 
@@ -539,6 +543,33 @@ Output columns:
 Detection output is identified through the `detections`,
 `plant-detections`, and `metadata` parent directories. The view excludes active
 `jpg_to_det` leases and successful `jpg_to_det` runs.
+
+### `v_batches_needing_det_to_world`
+
+Returns batches that have current detection files, current developed-image
+files, AND current pixel-to-world NPZ grids (`semifield-asfm`,
+`pixel_world_grids` parent dir) — anywhere, any site — with no current
+georeferenced output yet.
+
+Output columns:
+
+| Column | Meaning |
+| --- | --- |
+| `batch_id` | Ready batch |
+| `batch_date` | Earliest batch date found in inventory |
+| `img_count` | Current developed-image inputs |
+| `det_count` | Current detection inputs |
+| `grid_count` | Current pixel-to-world NPZ grid inputs |
+| `georef_count` | Current georeferenced outputs; expected to be zero |
+
+Unlike the two views above, this does **not** gate on locality — it answers
+"does this batch's data exist somewhere so `det_to_world` could run", not
+"is it staged on the compute cluster". The actual submission/locality gate
+is `scripts/job/submit.py`'s `filter_det_to_world_staged_ready()`, which
+checks `staged_inputs` directly (see the `staged_inputs` table above and
+[`DET_TO_WORLD.md`](DET_TO_WORLD.md#readiness-and-staging-completion-gating))
+rather than re-querying this view's underlying inventory. The view excludes
+active `det_to_world` leases and successful `det_to_world` runs.
 
 ## Indexes
 

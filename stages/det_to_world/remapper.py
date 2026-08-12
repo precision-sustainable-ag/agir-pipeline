@@ -4,6 +4,7 @@ Core bbox remapping logic for det_to_world.
 
 import csv
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,20 @@ from . import ERROR_GRID_NOT_FOUND, ERROR_REMAP_FAILED
 logger = logging.getLogger(__name__)
 
 WARNING_SURFACE_MISS = "W_SURFACE_MISS"
+
+# ASFM writes each NPZ's crs field as the str() of its own CRS object rather
+# than a plain identifier, e.g. "<CoordinateSystem 'WGS 84 / UTM zone 18N
+# (EPSG::32618)'>" — pyproj can't parse that directly (surfaces as "Invalid
+# projection" when species.assign_spatial builds a GeoDataFrame from it), so
+# pull out just the EPSG code it's built around.
+_EPSG_CODE_PATTERN = re.compile(r"EPSG:{1,2}(\d+)", re.IGNORECASE)
+
+
+def _normalize_crs(raw_crs: str) -> str:
+    match = _EPSG_CODE_PATTERN.search(raw_crs)
+    if match:
+        return f"EPSG:{match.group(1)}"
+    return raw_crs
 NUDGE_PX = [0, 1, 2, 3, 5, 10]
 
 REQUIRED_INPUT_COLUMNS = [
@@ -77,21 +92,45 @@ class GridData:
 
 
 class GridCache:
-    """Load each image's NPZ grid at most once per run."""
+    """Load each image's NPZ grid at most once per run.
+
+    ``grid_dir`` may be a flat directory of ``<image_id>.npz`` files, or a
+    batch root containing NPZ files nested under sub-batch directories (e.g.
+    ASFM's per-time-range ``<start>_<end>/pixel_world_grids/`` layout) — the
+    NPZ index below is built with a recursive glob, so both layouts resolve
+    the same way.
+    """
 
     def __init__(self, grid_dir: Path):
         self.grid_dir = Path(grid_dir)
         # image id -> npz data dictionary
         self._cache: dict[str, GridData] = {}
+        self._npz_index: dict[str, Path] | None = None
+
+    def _index(self) -> dict[str, Path]:
+        if self._npz_index is None:
+            index: dict[str, Path] = {}
+            for npz_path in sorted(self.grid_dir.rglob("*.npz")):
+                if npz_path.stem in index:
+                    logger.warning(
+                        "Duplicate NPZ grid for image_id=%s: keeping %s, ignoring %s",
+                        npz_path.stem, index[npz_path.stem], npz_path,
+                    )
+                    continue
+                index[npz_path.stem] = npz_path
+            self._npz_index = index
+        return self._npz_index
 
     # load and cache grid data for an image id
     def get(self, image_id: str) -> GridData:
         if image_id in self._cache:
             return self._cache[image_id]
 
-        npz_path = self.grid_dir / f"{image_id}.npz"
-        if not npz_path.exists():
-            raise FileNotFoundError(f"Grid file not found for image_id={image_id}: {npz_path}")
+        npz_path = self._index().get(image_id)
+        if npz_path is None:
+            raise FileNotFoundError(
+                f"Grid file not found for image_id={image_id} under {self.grid_dir}"
+            )
 
         try:
             with np.load(npz_path, allow_pickle=True) as data:
@@ -148,7 +187,7 @@ class GridCache:
         )
 
         crs_raw = np.asarray(data["crs"]).reshape(-1)
-        crs = str(crs_raw[0]) if crs_raw.size else None
+        crs = _normalize_crs(str(crs_raw[0])) if crs_raw.size else None
 
         return GridData(
             image_id=image_id,

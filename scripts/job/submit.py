@@ -44,17 +44,27 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from orchestrator.input_staging_planner import det_to_world_expected_dst_paths
 from orchestrator.sqlite_db import (
     open_db,
     get_batches_needing_raw_to_jpg,
     get_batches_needing_jpg_to_det,
+    get_batches_needing_det_to_world,
     get_completed_input_staging_batch_ids,
+    get_det_to_world_staged_batch_ids,
 )
 from orchestrator.submit_jobs import submit_jobs, JobResult
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_STAGES = ("raw_to_jpg", "jpg_to_det")
+SUPPORTED_STAGES = ("raw_to_jpg", "jpg_to_det", "det_to_world")
+
+# det_to_world needs multiple independent inputs (images + detections +
+# grids), each with its own staged_inputs dst_path, so readiness requires
+# ALL of them to show completed rather than the "any row completed" check
+# filter_completed_staged_inputs uses for raw_to_jpg/jpg_to_det's single
+# fixed route — see filter_det_to_world_staged_ready().
+_MULTI_PIECE_STAGED_GATE_STAGES = ("det_to_world",)
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +100,20 @@ def find_batches(cfg: dict, stage: str, *, site: str, limit: int) -> List[str]:
         if stage == "raw_to_jpg":
             rows = get_batches_needing_raw_to_jpg(conn, site=site, limit=limit * 2)
         elif stage == "jpg_to_det":
-            rows = get_batches_needing_jpg_to_det(conn, site=site, limit=limit * 2)
+            # Site-agnostic like det_to_world below: jpg_to_det's multi-site
+            # resolver (orchestrator/input_staging_planner.py) independently
+            # checks destination (ATLAS) -> CERES -> JUNO, so scoping this
+            # query to --site would wrongly exclude batches whose images
+            # landed somewhere other than that one site.
+            rows = get_batches_needing_jpg_to_det(conn, site=None, limit=limit * 2)
+        elif stage == "det_to_world":
+            # Unlike raw_to_jpg/jpg_to_det, det_to_world's readiness isn't
+            # scoped to one site — its multi-site resolver (see
+            # orchestrator/input_staging_planner.py) independently checks
+            # each subdir against destination/CERES/JUNO. Restricting the
+            # readiness query to --site here would just wrongly exclude
+            # batches whose data landed somewhere other than that one site.
+            rows = get_batches_needing_det_to_world(conn, site=None, limit=limit * 2)
         else:
             raise ValueError(f"Unsupported stage: {stage!r}")
     finally:
@@ -155,6 +178,51 @@ def filter_completed_staged_inputs(cfg: dict, stage: str, batch_ids: List[str]) 
         len(staged),
         len(batch_ids),
         stage,
+    )
+    return staged
+
+
+def filter_det_to_world_staged_ready(cfg: dict, batch_ids: List[str]) -> List[str]:
+    """
+    Keep only batches where every expected staged_inputs piece (images,
+    detections, grids) has status='completed'.
+
+    Unlike filter_completed_staged_inputs (which only requires ANY row
+    completed — correct for raw_to_jpg/jpg_to_det's single fixed route),
+    det_to_world has multiple independent pieces, each with its own
+    staged_inputs dst_path (see
+    orchestrator.input_staging_planner.det_to_world_expected_dst_paths), so
+    readiness requires ALL of them to show completed. Pieces already
+    resident at the destination when planned are recorded as
+    immediately-completed rows too (StagingRequest.already_satisfied), so
+    this reflects readiness the moment stage_inputs.py/poll_stage_inputs.py
+    mark them — no fresh globus_file_index inventory scan required.
+    """
+    if not batch_ids:
+        return []
+
+    expected = {
+        batch_id: det_to_world_expected_dst_paths(cfg, batch_id) for batch_id in batch_ids
+    }
+
+    conn = open_submission_read_db(cfg)
+    try:
+        ready = get_det_to_world_staged_batch_ids(conn, expected_dst_paths=expected)
+    finally:
+        conn.close()
+
+    staged = [batch_id for batch_id in batch_ids if batch_id in ready]
+    skipped = [batch_id for batch_id in batch_ids if batch_id not in ready]
+    if skipped:
+        logger.info(
+            "Skipping %d batch(es) not fully staged (images/detections/grids) for det_to_world: %s",
+            len(skipped),
+            ", ".join(skipped[:10]) + (" ..." if len(skipped) > 10 else ""),
+        )
+    logger.info(
+        "Staged-inputs gate kept %d/%d batch(es) for det_to_world",
+        len(staged),
+        len(batch_ids),
     )
     return staged
 
@@ -243,7 +311,10 @@ def main() -> int:
     else:
         batch_ids = find_batches(cfg, args.stage, site=args.site, limit=args.limit)
 
-    batch_ids = filter_completed_staged_inputs(cfg, args.stage, batch_ids)
+    if args.stage in _MULTI_PIECE_STAGED_GATE_STAGES:
+        batch_ids = filter_det_to_world_staged_ready(cfg, batch_ids)
+    else:
+        batch_ids = filter_completed_staged_inputs(cfg, args.stage, batch_ids)
 
     if not batch_ids:
         logger.info("No batches to process.")

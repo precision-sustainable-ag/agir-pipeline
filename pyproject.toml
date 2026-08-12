@@ -13,6 +13,13 @@ dependencies = [
   "pytz>=2026.2",
   "opencv-python>=4.13.0.92",
   "jinja2>=3.1.0",
+  "tqdm>=4.70",
+  "pandas>=3.0.5",
+  "geopandas>=1.1.4",
+  "packaging>=26.3",
+  "pyogrio>=0.13.0",
+  "pyproj>=3.7.2",
+  "shapely>=2.1.2",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +49,8 @@ cv = [
   "scikit-image>=0.21.0",
   "opencv-python>=4.8.0",
   "pytz>=2023.3",
+  "geopandas>=0.14.0",
+  "packaging>=23.0",
 ]
 
 ml = [
@@ -70,6 +79,8 @@ all = [
   "scikit-image>=0.21.0",
   "opencv-python>=4.8.0",
   "pytz>=2023.3",
+  "geopandas>=0.14.0",
+  "packaging>=23.0",
   "torch>=2.0.0",
   "torchvision>=0.15.0",
   "ultralytics>=8.0.0",

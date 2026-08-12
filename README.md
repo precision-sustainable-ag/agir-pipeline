@@ -41,12 +41,12 @@ binary masks        georeferenced detections
 | `raw_to_jpg` | Convert camera RAW files into developed JPG images | Yes |
 | `jpg_to_det` | Detect plants and export per-image labels and a batch CSV | Yes |
 | `det_to_seg` | Produce full-image binary masks within detection regions | Not yet |
-| `det_to_world` | Map image detections into real-world coordinates | Not yet |
+| `det_to_world` | Map image detections into real-world coordinates | Yes |
 
-`raw_to_jpg` and `jpg_to_det` currently participate in SQLite readiness,
-input staging, lease management, and Slurm submission. The downstream stage
-CLIs are implemented and can be run directly, but are not yet wired into the
-orchestrator.
+`raw_to_jpg`, `jpg_to_det`, and `det_to_world` currently participate in
+SQLite readiness, input staging, lease management, and Slurm submission.
+`det_to_seg`'s CLI is implemented and can be run directly, but is not yet
+wired into the orchestrator.
 
 See [Pipeline Architecture](docs/PIPELINE_ARCHITECTURE.md) for the complete
 stage and data-flow design.
