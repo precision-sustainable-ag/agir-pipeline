@@ -387,32 +387,44 @@ def main() -> int:
         )
         _log_requested_batches(batch_ids, args.batches)
 
-        conn = open_db(cfg["paths"]["db"], readonly=args.dry_run)
+        # Readonly planning read honors db_read_mode for local snapshot queries
+        db_read_mode = cfg["paths"].get("db_read_mode", "direct")
+        plan_conn = open_db(
+            cfg["paths"]["db"],
+            readonly=True,
+            local_copy=(db_read_mode == "snapshot"),
+            temp_dir=cfg["paths"].get("db_temp_dir"),
+        )
         try:
             requests = plan_input_staging(
-                conn,
+                plan_conn,
                 cfg,
                 stage=args.stage,
                 site=args.site,
                 limit=args.limit,
                 batch_ids=batch_ids,
             )
-            logger.info("Planned %d input staging request(s)", len(requests))
-            _warn_unplanned_requested_batches(
-                requested_batch_ids=batch_ids,
-                requests=requests,
-                stage=args.stage,
-                site=args.site,
-            )
+        finally:
+            plan_conn.close()
 
-            if not requests:
-                print(f"No input staging requests found for stage={args.stage} site={args.site}")
-                logger.info("No input staging requests found for stage=%s site=%s", args.stage, args.site)
-                return 0
+        logger.info("Planned %d input staging request(s)", len(requests))
+        _warn_unplanned_requested_batches(
+            requested_batch_ids=batch_ids,
+            requests=requests,
+            stage=args.stage,
+            site=args.site,
+        )
 
-            if args.dry_run:
-                print_planned_requests(requests)
+        if not requests:
+            print(f"No input staging requests found for stage={args.stage} site={args.site}")
+            logger.info("No input staging requests found for stage=%s site=%s", args.stage, args.site)
+            return 0
 
+        if args.dry_run:
+            print_planned_requests(requests)
+
+        conn = open_db(cfg["paths"]["db"], readonly=args.dry_run)
+        try:
             results = process_requests(
                 conn,
                 requests,

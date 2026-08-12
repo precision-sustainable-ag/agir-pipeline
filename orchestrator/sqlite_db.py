@@ -260,7 +260,12 @@ def open_db(
     else:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(db_path), timeout=120)
-        conn.execute("PRAGMA journal_mode=WAL;")
+        # NFS mount doesn't support WAL memory-mapped files; use DELETE mode
+        # with NFS byte-range locks instead. Only change journal_mode if needed
+        # to avoid contending for exclusive locks on every open_db() call.
+        current_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
+        if current_mode.lower() != "delete":
+            conn.execute("PRAGMA journal_mode=DELETE;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA temp_store=MEMORY;")
         conn.execute("PRAGMA busy_timeout=120000;")
