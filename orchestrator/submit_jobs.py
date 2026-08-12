@@ -55,7 +55,9 @@ Generated job script lifecycle (on compute node):
   3. python -m       stage CLI
   4. python          promote script
   5. rsync           $TMPDIR/output → 90daydata/stage_runs/<run_id>/
-  6. python          scripts/job/ingest_and_release.py (writes stage_runs row,
+  6. python          scripts/job/register_result_sync.py (Atlas jobs only;
+                     atomically writes a run-bundle request to the outbox)
+  7. python          scripts/job/ingest_and_release.py (writes stage_runs row,
                      releases lease)
 """
 
@@ -157,6 +159,11 @@ def _render_slurm_script(
     input_staging_dir: str,
     output_stage_runs: str,
     final_dest: str,
+    result_sync_enabled: bool,
+    result_sync_outbox: str,
+    result_sync_src_endpoint: str,
+    result_sync_dst_endpoint: str,
+    result_sync_dst_run_root: str,
     log_dir: str,
     account: str,
     partition: str,
@@ -184,6 +191,11 @@ def _render_slurm_script(
         "input_staging_dir": input_staging_dir,
         "output_stage_runs": output_stage_runs,
         "final_dest": final_dest,
+        "result_sync_enabled": result_sync_enabled,
+        "result_sync_outbox": result_sync_outbox,
+        "result_sync_src_endpoint": result_sync_src_endpoint,
+        "result_sync_dst_endpoint": result_sync_dst_endpoint,
+        "result_sync_dst_run_root": result_sync_dst_run_root,
         "log_dir": log_dir,
         "account": account,
         "partition": partition,
@@ -256,6 +268,47 @@ def submit_jobs(
     #      raw_to_jpg reads from .../semifield-upload/<batch_id>/  (no subdir)
     input_subdir   = route.get("input_subdir", "")
 
+    # ── Atlas-to-Ceres result synchronization ────────────────────────────────
+    result_sync = cfg.get("result_sync") or {}
+    result_sync_enabled_value = result_sync.get("enabled", False)
+    if not isinstance(result_sync_enabled_value, bool):
+        raise ValueError("result_sync.enabled must be true or false")
+    result_sync_enabled = result_sync_enabled_value
+    if result_sync_enabled:
+        required_result_sync = (
+            "outbox",
+            "source_endpoint",
+            "destination_endpoint",
+            "destination_run_root",
+        )
+        missing_result_sync = [
+            key for key in required_result_sync if not result_sync.get(key)
+        ]
+        if missing_result_sync:
+            raise ValueError(
+                "Enabled result_sync config is missing: "
+                + ", ".join(missing_result_sync)
+            )
+        if result_sync["source_endpoint"] == result_sync["destination_endpoint"]:
+            raise ValueError("Result-sync source and destination endpoints must differ")
+        for field, value in (
+            ("paths.output_stage_runs", output_runs),
+            ("result_sync.outbox", result_sync["outbox"]),
+            ("result_sync.destination_run_root", result_sync["destination_run_root"]),
+        ):
+            path = Path(value)
+            if (
+                not path.is_absolute()
+                or len(path.parts) < 3
+                or path.parts[1] != "90daydata"
+                or ".." in path.parts
+            ):
+                raise ValueError(f"{field} must be an absolute path below /90daydata")
+    result_sync_outbox = str(result_sync.get("outbox", ""))
+    result_sync_src_endpoint = str(result_sync.get("source_endpoint", ""))
+    result_sync_dst_endpoint = str(result_sync.get("destination_endpoint", ""))
+    result_sync_dst_run_root = str(result_sync.get("destination_run_root", ""))
+
     # ── Slurm block ───────────────────────────────────────────────────────────
     slurm          = cfg["slurm"]
     account        = slurm["account"]
@@ -327,6 +380,11 @@ def submit_jobs(
                 input_staging_dir=input_staging_dir,
                 output_stage_runs=output_runs,
                 final_dest=final_dest,
+                result_sync_enabled=result_sync_enabled,
+                result_sync_outbox=result_sync_outbox,
+                result_sync_src_endpoint=result_sync_src_endpoint,
+                result_sync_dst_endpoint=result_sync_dst_endpoint,
+                result_sync_dst_run_root=result_sync_dst_run_root,
                 log_dir=log_dir,
                 account=account,
                 partition=partition,

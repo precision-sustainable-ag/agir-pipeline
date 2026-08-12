@@ -36,6 +36,30 @@ endpoints:
     storage_root: "/rsstu/users/s/screberg/longterm_images"
     data_state: "semifield-cutouts"
 
+  - enabled: true
+    endpoint: "2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
+    site: "NCSU"
+    storage_domain: "screberg"
+    namespace: "longterm_images"
+    storage_root: "/rsstu/users/s/screberg/longterm_images"
+    data_state: "semifield-utils"
+
+  - enabled: true
+    endpoint: "2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
+    site: "NCSU"
+    storage_domain: "screberg"
+    namespace: "longterm_images"
+    storage_root: "/rsstu/users/s/screberg/longterm_images"
+    data_state: "semifield-tools"
+
+  - enabled: true
+    endpoint: "2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
+    site: "NCSU"
+    storage_domain: "screberg"
+    namespace: "longterm_images"
+    storage_root: "/rsstu/users/s/screberg/longterm_images"
+    data_state: "semifield-asfm"
+
   # ============================================================
   # NCSU / screberg / longterm_images2
   # ============================================================
@@ -62,6 +86,32 @@ endpoints:
     namespace: "longterm_images2"
     storage_root: "/rsstu/users/s/screberg/longterm_images2"
     data_state: "semifield-cutouts"
+  
+  - enabled: true
+    endpoint: "2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
+    site: "NCSU"
+    storage_domain: "screberg"
+    namespace: "longterm_images2"
+    storage_root: "/rsstu/users/s/screberg/longterm_images2"
+    data_state: "semifield-tools"
+
+  - enabled: true
+    endpoint: "2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
+    site: "NCSU"
+    storage_domain: "screberg"
+    namespace: "longterm_images2"
+    storage_root: "/rsstu/users/s/screberg/longterm_images2"
+    data_state: "semifield-utils"
+
+  - enabled: true
+    endpoint: "2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
+    site: "NCSU"
+    storage_domain: "screberg"
+    namespace: "longterm_images2"
+    storage_root: "/rsstu/users/s/screberg/longterm_images2"
+    data_state: "semifield-asfm"
+
+  
 
   # ============================================================
   # NCSU / screberg / GROW_DATA
@@ -116,6 +166,30 @@ endpoints:
     namespace: "LTS"
     storage_root: "/LTS/project/dash_agir"
     data_state: "semifield-cutouts"
+  
+  - enabled: true
+    endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
+    site: "JUNO"
+    storage_domain: "dash_agir"
+    namespace: "LTS"
+    storage_root: "/LTS/project/dash_agir"
+    data_state: "semifield-utils"
+  
+  - enabled: true
+    endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
+    site: "JUNO"
+    storage_domain: "dash_agir"
+    namespace: "LTS"
+    storage_root: "/LTS/project/dash_agir"
+    data_state: "semifield-tools"
+
+  - enabled: true
+    endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
+    site: "JUNO"
+    storage_domain: "dash_agir"
+    namespace: "LTS"
+    storage_root: "/LTS/project/dash_agir"
+    data_state: "semifield-asfm"
 
   # ============================================================
   # JUNO / national_plant_image_repository / LTS
@@ -165,7 +239,7 @@ endpoints:
   # CERES / dash_agir / 90daydata
   # Enabled in original wrapper
   # ============================================================
-  - enabled: false
+  - enabled: true
     endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
     site: "CERES"
     storage_domain: "dash_agir"
@@ -173,7 +247,7 @@ endpoints:
     storage_root: "/90daydata/dash_agir"
     data_state: "semifield-upload"
 
-  - enabled: false
+  - enabled: true
     endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
     site: "CERES"
     storage_domain: "dash_agir"
@@ -188,12 +262,36 @@ endpoints:
     namespace: "90daydata"
     storage_root: "/90daydata/dash_agir"
     data_state: "semifield-cutouts"
+  
+  - enabled: true
+    endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+    site: "CERES"
+    storage_domain: "dash_agir"
+    namespace: "90daydata"
+    storage_root: "/90daydata/dash_agir"
+    data_state: "semifield-tools"
+  
+  - enabled: true
+    endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+    site: "CERES"
+    storage_domain: "dash_agir"
+    namespace: "90daydata"
+    storage_root: "/90daydata/dash_agir"
+    data_state: "semifield-utils"
+  
+  - enabled: true
+    endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+    site: "CERES"
+    storage_domain: "dash_agir"
+    namespace: "90daydata"
+    storage_root: "/90daydata/dash_agir"
+    data_state: "semifield-asfm"
 
   # ============================================================
   # CERES / dash_agir / project
   # Enabled in original wrapper
   # ============================================================
-  - enabled: false
+  - enabled: true
     endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
     site: "CERES"
     storage_domain: "dash_agir"
@@ -201,7 +299,7 @@ endpoints:
     storage_root: "/project/dash_agir"
     data_state: "semifield-upload"
 
-  - enabled: false
+  - enabled: true
     endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
     site: "CERES"
     storage_domain: "dash_agir"
@@ -216,6 +314,30 @@ endpoints:
     namespace: "project"
     storage_root: "/project/dash_agir"
     data_state: "semifield-cutouts"
+  
+  - enabled: true
+    endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+    site: "CERES"
+    storage_domain: "dash_agir"
+    namespace: "project"
+    storage_root: "/project/dash_agir"
+    data_state: "semifield-utils"
+
+  - enabled: true
+    endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+    site: "CERES"
+    storage_domain: "dash_agir"
+    namespace: "project"
+    storage_root: "/project/dash_agir"
+    data_state: "semifield-tools"
+
+  - enabled: true
+    endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+    site: "CERES"
+    storage_domain: "dash_agir"
+    namespace: "project"
+    storage_root: "/project/dash_agir"
+    data_state: "semifield-asfm"
 
   # ============================================================
   # CERES / national_plant_image_repository / 90daydata
@@ -274,7 +396,7 @@ endpoints:
   # ============================================================
   # ATLAS / dash_agir / 90daydata
   # ============================================================
-  - enabled: false
+  - enabled: true
     endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
     site: "ATLAS"
     storage_domain: "dash_agir"
@@ -282,7 +404,7 @@ endpoints:
     storage_root: "/90daydata/dash_agir"
     data_state: "semifield-upload"
 
-  - enabled: false
+  - enabled: true
     endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
     site: "ATLAS"
     storage_domain: "dash_agir"
@@ -297,11 +419,43 @@ endpoints:
     namespace: "90daydata"
     storage_root: "/90daydata/dash_agir"
     data_state: "semifield-cutouts"
+  
+  - enabled: true
+    endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+    site: "ATLAS"
+    storage_domain: "dash_agir"
+    namespace: "90daydata"
+    storage_root: "/90daydata/dash_agir"
+    data_state: "semifield-tools"
+
+  - enabled: true
+    endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+    site: "ATLAS"
+    storage_domain: "dash_agir"
+    namespace: "90daydata"
+    storage_root: "/90daydata/dash_agir"
+    data_state: "semifield-utils"
+
+  - enabled: true
+    endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+    site: "ATLAS"
+    storage_domain: "dash_agir"
+    namespace: "90daydata"
+    storage_root: "/90daydata/dash_agir"
+    data_state: "semifield-asfm"
+
+  - enabled: true
+    endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+    site: "ATLAS"
+    storage_domain: "dash_agir"
+    namespace: "90daydata"
+    storage_root: "/90daydata/dash_agir"
+    data_state: "result_sync"
 
   # ============================================================
   # ATLAS / dash_agir / project
   # ============================================================
-  - enabled: false
+  - enabled: true
     endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
     site: "ATLAS"
     storage_domain: "dash_agir"
@@ -309,7 +463,7 @@ endpoints:
     storage_root: "/project/dash_agir"
     data_state: "semifield-upload"
 
-  - enabled: false
+  - enabled: true
     endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
     site: "ATLAS"
     storage_domain: "dash_agir"
@@ -324,6 +478,38 @@ endpoints:
     namespace: "project"
     storage_root: "/project/dash_agir"
     data_state: "semifield-cutouts"
+
+  - enabled: true
+    endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+    site: "ATLAS"
+    storage_domain: "dash_agir"
+    namespace: "project"
+    storage_root: "/project/dash_agir"
+    data_state: "semifield-tools"
+
+  - enabled: true
+    endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+    site: "ATLAS"
+    storage_domain: "dash_agir"
+    namespace: "project"
+    storage_root: "/project/dash_agir"
+    data_state: "semifield-utils"
+
+  - enabled: true
+    endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+    site: "ATLAS"
+    storage_domain: "dash_agir"
+    namespace: "project"
+    storage_root: "/project/dash_agir"
+    data_state: "semifield-asfm"
+
+  - enabled: true
+    endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+    site: "ATLAS"
+    storage_domain: "dash_agir"
+    namespace: "project"
+    storage_root: "/project/dash_agir"
+    data_state: "result_sync"
 
   # ============================================================
   # ATLAS / national_plant_image_repository / 90daydata

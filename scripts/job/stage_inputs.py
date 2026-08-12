@@ -23,7 +23,9 @@ if str(REPO_ROOT) not in sys.path:
 
 from orchestrator.config import load_stage_config
 from orchestrator.globus_transfer import (
+    TransferRequest,
     TransferSubmitResult,
+    build_input_staging_label,
     submit_transfer,
 )
 from orchestrator.input_staging_planner import (
@@ -153,7 +155,14 @@ def process_requests(
             req.stage,
             staging_id,
         )
-        submit_result = submit_func(req)
+        transfer_request = TransferRequest(
+            src_endpoint=req.src_endpoint,
+            dst_endpoint=req.dst_endpoint,
+            src_path=req.src_path,
+            dst_path=req.dst_path,
+            label=build_input_staging_label(req.stage, req.batch_id),
+        )
+        submit_result = submit_func(transfer_request)
         if submit_result.status == "submitted":
             updated = mark_input_staging_status(
                 conn,
@@ -378,32 +387,44 @@ def main() -> int:
         )
         _log_requested_batches(batch_ids, args.batches)
 
-        conn = open_db(cfg["paths"]["db"], readonly=args.dry_run)
+        # Readonly planning read honors db_read_mode for local snapshot queries
+        db_read_mode = cfg["paths"].get("db_read_mode", "direct")
+        plan_conn = open_db(
+            cfg["paths"]["db"],
+            readonly=True,
+            local_copy=(db_read_mode == "snapshot"),
+            temp_dir=cfg["paths"].get("db_temp_dir"),
+        )
         try:
             requests = plan_input_staging(
-                conn,
+                plan_conn,
                 cfg,
                 stage=args.stage,
                 site=args.site,
                 limit=args.limit,
                 batch_ids=batch_ids,
             )
-            logger.info("Planned %d input staging request(s)", len(requests))
-            _warn_unplanned_requested_batches(
-                requested_batch_ids=batch_ids,
-                requests=requests,
-                stage=args.stage,
-                site=args.site,
-            )
+        finally:
+            plan_conn.close()
 
-            if not requests:
-                print(f"No input staging requests found for stage={args.stage} site={args.site}")
-                logger.info("No input staging requests found for stage=%s site=%s", args.stage, args.site)
-                return 0
+        logger.info("Planned %d input staging request(s)", len(requests))
+        _warn_unplanned_requested_batches(
+            requested_batch_ids=batch_ids,
+            requests=requests,
+            stage=args.stage,
+            site=args.site,
+        )
 
-            if args.dry_run:
-                print_planned_requests(requests)
+        if not requests:
+            print(f"No input staging requests found for stage={args.stage} site={args.site}")
+            logger.info("No input staging requests found for stage=%s site=%s", args.stage, args.site)
+            return 0
 
+        if args.dry_run:
+            print_planned_requests(requests)
+
+        conn = open_db(cfg["paths"]["db"], readonly=args.dry_run)
+        try:
             results = process_requests(
                 conn,
                 requests,

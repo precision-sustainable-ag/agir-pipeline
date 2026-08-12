@@ -28,6 +28,7 @@ Run commands from the repository root unless a command says otherwise.
 7. Render or submit compute jobs
 8. Monitor Slurm and pipeline logs
 9. Verify run records and outputs
+10. Synchronize Atlas result requests and run bundles to Ceres
 ```
 
 Do not submit compute jobs until input polling shows that the required
@@ -41,6 +42,7 @@ Examples use the following placeholders:
 | --- | --- |
 | `<stage>` | `raw_to_jpg` or `jpg_to_det` |
 | `<stage-config.yaml>` | Cluster-specific stage configuration |
+| `<result-sync-config.yaml>` | Ceres result-sync configuration |
 | `<endpoint-config.yaml>` | Inventory scanner endpoint configuration |
 | `<database.sqlite3>` | Shared SQLite database path |
 | `<count>` | Maximum number of batches or rows to process |
@@ -127,7 +129,7 @@ Verify the installed schema version:
 sqlite3 <database.sqlite3> 'PRAGMA user_version;'
 ```
 
-The current schema declares version `4`.
+The current schema declares version `7`.
 
 Schema application changes database objects. Coordinate it with other
 operators and do not run it during active inventory, staging, polling, or
@@ -494,6 +496,230 @@ The next inventory refresh provides the final end-to-end confirmation. Once
 the promoted outputs are indexed as current, the corresponding readiness view
 should no longer return the successfully completed batch.
 
+## Step 10: Synchronize Atlas Results to Ceres
+
+Run this step on Ceres after Atlas GPU jobs have written result-sync request
+files to the Atlas outbox.
+
+The command performs two Globus transfers:
+
+1. Atlas result-sync outbox to the Ceres inbox.
+2. Each registered Atlas run bundle to its Ceres run-bundle directory.
+
+It validates each request, records it in `result_syncs`, submits the run-bundle
+transfer, and polls the Globus task until it reaches a terminal state or the
+configured timeout expires.
+
+### Prepare the Ceres configuration
+
+Create a local configuration from the example:
+
+```bash
+cp configs/config.result_sync.ceres.example.yaml \
+  configs/config.result_sync.ceres.local.yaml
+```
+
+Review these values before running:
+
+- `paths.db`: canonical Ceres SQLite database
+- `paths.log_dir`: Ceres result-sync log directory
+- `result_sync.atlas_endpoint` and `result_sync.ceres_endpoint`
+- `result_sync.atlas_outbox` and `result_sync.ceres_inbox`
+- `result_sync.atlas_run_root` and `result_sync.ceres_run_root`
+- `result_sync.promotion.root` and its stage suffixes
+- `result_sync.inventory` Ceres developed-images scope and worker settings
+- polling interval and timeout
+
+Confirm that schema version `7` and the `result_syncs` table are installed,
+and that Globus authentication is available:
+
+```bash
+sqlite3 <database.sqlite3> 'PRAGMA user_version;'
+sqlite3 <database.sqlite3> 'PRAGMA table_info(result_syncs);'
+globus whoami
+```
+
+If the schema is missing, follow the coordinated procedure in
+[One-Time Database Setup](#one-time-database-setup) before continuing.
+
+### Preview the synchronization
+
+```bash
+python scripts/admin/sync_atlas_results.py \
+  --config configs/config.result_sync.ceres.local.yaml \
+  --dry-run \
+  --bundle-limit 1
+```
+
+Dry-run mode does not start Globus transfers or write to the database. It
+validates requests already present in the Ceres inbox and plans bundle
+transfers for previously registered rows in `requested` state. It also
+validates local bundles already in `transferred` state and previews promotion
+and ingestion for `verified` rows without advancing them. If a promotion would
+occur, it also reports the planned inventory refresh. Because dry-run does not
+register new rows, a newly discovered request will not also appear as a planned
+bundle transfer during the same invocation.
+
+### Run the synchronization
+
+```bash
+python scripts/admin/sync_atlas_results.py \
+  --config configs/config.result_sync.ceres.local.yaml \
+  --bundle-limit 10
+```
+
+`--bundle-limit` limits the number of requested run bundles submitted during
+one invocation. The normal state progression is:
+
+```text
+requested -> transferring -> transferred -> verified -> ingested
+```
+
+Failed or canceled Globus tasks are recorded as `failed` or `canceled`.
+Bundles that fail post-transfer validation are recorded as `failed`.
+
+### Verify synchronization state
+
+```bash
+sqlite3 -header -column <database.sqlite3> "
+SELECT
+    run_id,
+    batch_id,
+    stage,
+    run_status,
+    status,
+    attempt_count,
+    globus_task_id,
+    error_summary,
+    registered_at,
+    transfer_started_at,
+    transferred_at
+FROM result_syncs
+ORDER BY registered_at DESC;
+"
+```
+
+Summarize outstanding work:
+
+```bash
+sqlite3 -header -column <database.sqlite3> "
+SELECT status, COUNT(*) AS runs
+FROM result_syncs
+GROUP BY status
+ORDER BY status;
+"
+```
+
+Inspect a specific Globus task when needed:
+
+```bash
+globus task show <globus-task-id> --format json
+```
+
+Logs are written below:
+
+```text
+<paths.log_dir>/result_sync/sync_atlas_results/YYYY-MM-DD/
+```
+
+### Timeout and retry behavior
+
+If the command exits with status `124`, the local polling timeout expired but
+the transfer remains recorded as `transferring`. Run the same synchronization
+command again. It resumes polling the recorded Globus task instead of
+submitting a duplicate transfer.
+
+If a task reaches `failed` or `canceled`, resolve the underlying Globus or path
+problem before reopening it. Do not update `result_syncs.status` manually.
+Reopen an explicitly selected run and resume the normal workflow with:
+
+```bash
+python scripts/admin/sync_atlas_results.py \
+  --config configs/config.result_sync.ceres.local.yaml \
+  --reopen-run-id <run-id>
+```
+
+Repeat `--reopen-run-id` to reopen multiple failed or canceled runs. Other
+states are rejected so active or already-ingested work cannot be reset.
+
+### Current completion boundary
+
+A `transferred` result means that Globus successfully copied the run bundle to
+Ceres. The command then validates request-to-bundle identity, required files,
+declared artifact sizes, and any checksums present in the manifest. A bundle
+that passes advances to `verified`; a bundle that fails validation is marked
+`failed` with an error summary.
+
+Checksums are currently verified when present but are not yet required for
+every artifact.
+
+After verification, the command reproduces successful Atlas promotions on
+Ceres and ingests each run report into canonical `stage_runs`. Failed and
+partial run reports are ingested for history without promotion. An older
+successful run cannot replace a newer Atlas promotion for the same batch and
+stage. A completed row advances to `ingested`.
+
+When at least one promotion succeeds, the command performs one complete Ceres
+`semifield-developed-images` inventory refresh, rebuilds the inventory summary
+tables, and confirms every newly promoted artifact is current in
+`globus_file_index`. The inventory refresh runs once per command, not once per
+bundle.
+
+Force a recovery refresh when no new promotion occurred:
+
+```bash
+python scripts/admin/sync_atlas_results.py \
+  --config configs/config.result_sync.ceres.local.yaml \
+  --refresh-inventory
+```
+
+An inventory or confirmation failure makes the command exit unsuccessfully but
+does not reverse completed promotion or ingestion. Correct the inventory issue
+and rerun with `--refresh-inventory`. Do not publish a fresh database snapshot
+to Atlas until result synchronization and inventory are reconciled.
+
+### Publish the reconciled Ceres database snapshot
+
+After Atlas jobs are no longer creating requests for the nightly window, run
+the result synchronization command through completion. Then preview the final
+snapshot check:
+
+```bash
+python scripts/admin/publish_ceres_db_snapshot.py \
+  --config configs/config.result_sync.ceres.local.yaml \
+  --dry-run
+```
+
+Final reconciliation blocks publication when a result sync is unfinished,
+failed, or canceled; an ingested sync is absent or inconsistent in
+`stage_runs`; or the promoted-output inventory is missing, unsuccessful,
+stale, or does not contain the expected files.
+
+Publish a consistent snapshot on Ceres without transferring it:
+
+```bash
+python scripts/admin/publish_ceres_db_snapshot.py \
+  --config configs/config.result_sync.ceres.local.yaml
+```
+
+When `snapshot.atlas_destination_path` has been confirmed for the Atlas
+deployment, publish and transfer the snapshot with Globus:
+
+```bash
+python scripts/admin/publish_ceres_db_snapshot.py \
+  --config configs/config.result_sync.ceres.local.yaml \
+  --transfer
+```
+
+The publisher uses SQLite's backup API, checks the exact candidate snapshot,
+and atomically replaces `snapshot.ceres_publish_path` only when reconciliation
+passes. `--transfer` waits for Globus to report successful checksum-based
+delivery. It does not discover requests that are still only in the Atlas
+outbox, so Atlas jobs must be quiesced or allowed to finish before the final
+sync and publication window. Coordinate or disable the pre-existing external
+nightly copy before enabling `--transfer`; two independent publishers must not
+write the Atlas database destination.
+
 ## Common Recovery Procedures
 
 ### No input-staging requests were found
@@ -611,6 +837,8 @@ python scripts/job/submit.py \
 - [ ] Promoted outputs exist at the expected destination.
 - [ ] Run artifacts include `run_report.json`.
 - [ ] The run was ingested with `success` status and its lease released.
+- [ ] Atlas result-sync requests were received by Ceres.
+- [ ] Expected run bundles reached `ingested` in `result_syncs`.
 - [ ] Output inventory was refreshed after completion.
 - [ ] Successfully completed batches disappeared from the readiness view.
 

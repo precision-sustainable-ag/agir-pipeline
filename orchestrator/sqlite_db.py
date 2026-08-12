@@ -11,11 +11,16 @@ Public API
 ----------
 open_db(db_path, *, readonly=False, local_copy=False, temp_dir=None)
     → sqlite3.Connection
+create_sqlite_snapshot(db_path, snapshot_path) → Path
 claim_stage_lease(conn, batch_id, stage, orchestrator_id, ttl_seconds)  → dict
 release_stage_lease(conn, lease_id, orchestrator_id)  → bool
 request_input_staging(conn, ...)  → dict
 mark_input_staging_status(conn, staging_id, status, ...)  → dict
 get_completed_input_staging_batch_ids(conn, stage, batch_ids)  → set[str]
+register_result_sync(conn, ...)  → dict
+mark_result_sync_status(conn, run_id, status, ...)  → dict
+get_result_syncs(conn, ...)  → list[dict]
+reopen_result_sync(conn, run_id)  → dict
 ingest_run_report(conn, run_report_path)  → dict
 get_batches_needing_raw_to_jpg(conn, *, site=None, limit=200)  → list[dict]
 
@@ -51,6 +56,25 @@ _JPG_EXTS = "('jpg','jpeg','JPG','JPEG')"
 _ACTIVE_STAGING_STATUSES = ("planned", "requested", "submitted", "active")
 _TERMINAL_STAGING_STATUSES = ("completed", "failed", "canceled")
 _VALID_STAGING_STATUSES = _ACTIVE_STAGING_STATUSES + _TERMINAL_STAGING_STATUSES
+_VALID_RESULT_SYNC_STATUSES = (
+    "requested",
+    "transferring",
+    "transferred",
+    "verified",
+    "ingested",
+    "failed",
+    "canceled",
+)
+_RESULT_SYNC_TRANSITIONS = {
+    "requested": {"requested", "transferring", "failed", "canceled"},
+    "transferring": {"transferring", "transferred", "failed", "canceled"},
+    "transferred": {"transferred", "verified", "failed", "canceled"},
+    "verified": {"verified", "ingested", "failed", "canceled"},
+    "ingested": {"ingested"},
+    "failed": {"failed"},
+    "canceled": {"canceled"},
+}
+
 
 def get_batches_needing_jpg_to_det(
     conn: sqlite3.Connection,
@@ -236,7 +260,12 @@ def open_db(
     else:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(db_path), timeout=120)
-        conn.execute("PRAGMA journal_mode=WAL;")
+        # NFS mount doesn't support WAL memory-mapped files; use DELETE mode
+        # with NFS byte-range locks instead. Only change journal_mode if needed
+        # to avoid contending for exclusive locks on every open_db() call.
+        current_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
+        if current_mode.lower() != "delete":
+            conn.execute("PRAGMA journal_mode=DELETE;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA temp_store=MEMORY;")
         conn.execute("PRAGMA busy_timeout=120000;")
@@ -245,6 +274,60 @@ def open_db(
     conn.row_factory = sqlite3.Row
     logger.debug("Opened SQLite DB: %s (readonly=%s)", db_path, readonly)
     return conn
+
+
+def create_sqlite_snapshot(
+    db_path: str | Path,
+    snapshot_path: str | Path,
+) -> Path:
+    """Create and atomically publish a consistent snapshot of a live SQLite DB.
+
+    SQLite's backup API includes committed WAL contents. The destination is
+    built beside the requested path, checked for integrity, and then replaced
+    atomically so readers never observe a partially written database.
+    """
+    source_path = Path(db_path)
+    destination_path = Path(snapshot_path)
+    if not source_path.is_file():
+        raise FileNotFoundError(f"SQLite DB not found: {source_path}")
+    if source_path.resolve() == destination_path.resolve():
+        raise ValueError("Snapshot path must differ from the canonical database path")
+
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        prefix=f".{destination_path.name}.",
+        suffix=".tmp",
+        dir=destination_path.parent,
+        delete=False,
+    ) as tmp_file:
+        temporary_path = Path(tmp_file.name)
+
+    source = None
+    destination = None
+    try:
+        source_uri = f"{source_path.resolve().as_uri()}?mode=ro"
+        source = sqlite3.connect(source_uri, uri=True, timeout=60)
+        destination = sqlite3.connect(str(temporary_path), timeout=60)
+        source.backup(destination, pages=1000, sleep=0.1)
+        integrity = destination.execute("PRAGMA integrity_check").fetchone()
+        if integrity is None or integrity[0] != "ok":
+            raise sqlite3.DatabaseError(
+                f"Snapshot integrity check failed: {integrity[0] if integrity else 'no result'}"
+            )
+        destination.close()
+        destination = None
+        source.close()
+        source = None
+        temporary_path.replace(destination_path)
+        return destination_path
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
+    finally:
+        if destination is not None:
+            destination.close()
+        if source is not None:
+            source.close()
 
 
 # ---------------------------------------------------------------------------
@@ -644,6 +727,356 @@ def get_completed_input_staging_batch_ids(
         [stage, *unique_batch_ids],
     ).fetchall()
     return {row["batch_id"] for row in rows}
+
+
+# ---------------------------------------------------------------------------
+# Atlas-to-Ceres result synchronization tracking
+# ---------------------------------------------------------------------------
+
+
+def register_result_sync(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    batch_id: str,
+    stage: str,
+    run_status: str,
+    promotion_succeeded: bool,
+    src_endpoint: str,
+    dst_endpoint: str,
+    src_path: str,
+    dst_path: str,
+    request_path: str,
+    request_json: Dict | str,
+    request_created_at: str,
+    recursive: bool = True,
+    source_site: str = "ATLAS",
+    destination_site: str = "CERES",
+) -> Dict:
+    """
+    Idempotently register one Atlas-to-Ceres result synchronization.
+
+    One row owns one immutable run-bundle transfer. Reimporting the same
+    request returns the existing row; conflicting identity, routing, run
+    outcome, or request content raises ``ValueError``.
+    """
+    normalized_run_status = _STATUS_MAP.get(run_status)
+    if normalized_run_status is None:
+        raise ValueError(
+            f"Invalid result sync run status {run_status!r}; "
+            f"expected one of {sorted(_STATUS_MAP)}"
+        )
+    if promotion_succeeded and normalized_run_status != "success":
+        raise ValueError("Promotion cannot succeed unless run_status is success")
+
+    required_strings = {
+        "run_id": run_id,
+        "batch_id": batch_id,
+        "stage": stage,
+        "src_endpoint": src_endpoint,
+        "dst_endpoint": dst_endpoint,
+        "src_path": src_path,
+        "dst_path": dst_path,
+        "request_path": request_path,
+        "request_created_at": request_created_at,
+    }
+    empty = sorted(
+        name
+        for name, value in required_strings.items()
+        if not isinstance(value, str) or not value.strip()
+    )
+    if empty:
+        raise ValueError(f"Result sync fields must be non-empty strings: {empty}")
+
+    if isinstance(request_json, str):
+        json.loads(request_json)
+        serialized_request = request_json
+    else:
+        serialized_request = json.dumps(request_json, sort_keys=True)
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT * FROM result_syncs WHERE run_id = ?",
+            (str(run_id),),
+        ).fetchone()
+        if existing is not None:
+            identity_conflicts = {
+                "batch_id": batch_id,
+                "stage": stage,
+                "run_status": normalized_run_status,
+                "promotion_succeeded": int(bool(promotion_succeeded)),
+            }
+            conflicting_identity = [
+                name for name, value in identity_conflicts.items() if existing[name] != value
+            ]
+            if conflicting_identity:
+                raise ValueError(
+                    f"Conflicting result sync identity for run_id {run_id!r}: "
+                    f"fields={conflicting_identity}"
+                )
+            route_conflicts = {
+                "source_site": source_site,
+                "destination_site": destination_site,
+                "src_endpoint": src_endpoint,
+                "dst_endpoint": dst_endpoint,
+                "src_path": src_path,
+                "dst_path": dst_path,
+                "recursive": int(bool(recursive)),
+            }
+            conflicting_route = [
+                name for name, value in route_conflicts.items() if existing[name] != value
+            ]
+            if conflicting_route:
+                raise ValueError(
+                    f"Conflicting result sync route for run_id {run_id!r}: "
+                    f"fields={conflicting_route}"
+                )
+            if json.loads(existing["request_json"]) != json.loads(serialized_request):
+                raise ValueError(f"Conflicting result sync request content for run_id {run_id!r}")
+            conn.execute("COMMIT")
+            result = dict(existing)
+            result.update({"accepted": False, "state": "existing"})
+            return result
+
+        conn.execute(
+            """
+            INSERT INTO result_syncs (
+                run_id, batch_id, stage, run_status, promotion_succeeded,
+                source_site, destination_site,
+                src_endpoint, dst_endpoint, src_path, dst_path, recursive,
+                request_path, request_json,
+                status, attempt_count, request_created_at, registered_at,
+                updated_at
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?,
+                'requested', 0, ?, ?, ?
+            )
+            """,
+            (
+                str(run_id),
+                batch_id,
+                stage,
+                normalized_run_status,
+                int(bool(promotion_succeeded)),
+                source_site,
+                destination_site,
+                src_endpoint,
+                dst_endpoint,
+                src_path,
+                dst_path,
+                int(bool(recursive)),
+                request_path,
+                serialized_request,
+                request_created_at,
+                now_str,
+                now_str,
+            ),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+
+    created = conn.execute(
+        "SELECT * FROM result_syncs WHERE run_id = ?",
+        (str(run_id),),
+    ).fetchone()
+    result = dict(created)
+    result.update({"accepted": True, "state": "created"})
+    return result
+
+
+def mark_result_sync_status(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    status: str,
+    globus_task_id: Optional[str] = None,
+    error_summary: Optional[str] = None,
+) -> Dict:
+    """Atomically advance one run-bundle synchronization lifecycle."""
+    if status not in _VALID_RESULT_SYNC_STATUSES:
+        raise ValueError(
+            f"Invalid result sync status {status!r}; "
+            f"expected one of {_VALID_RESULT_SYNC_STATUSES}"
+        )
+
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            """
+            SELECT status, globus_task_id, attempt_count
+            FROM result_syncs
+            WHERE run_id = ?
+            """,
+            (str(run_id),),
+        ).fetchone()
+        if current is None:
+            raise ValueError(f"Unknown result sync run_id: {run_id}")
+        if status not in _RESULT_SYNC_TRANSITIONS[current["status"]]:
+            raise ValueError(
+                f"Invalid result sync transition for {run_id!r}: "
+                f"{current['status']!r} -> {status!r}"
+            )
+
+        new_attempt = status == "transferring" and current["status"] != "transferring"
+        attempt_count = int(current["attempt_count"]) + int(new_attempt)
+        resolved_task_id = (
+            None if status == "requested" else globus_task_id or current["globus_task_id"]
+        )
+
+        conn.execute(
+            """
+            UPDATE result_syncs
+            SET status = ?,
+                globus_task_id = ?,
+                attempt_count = ?,
+                error_summary = ?,
+                transfer_started_at = CASE
+                    WHEN ? = 'transferring'
+                    THEN COALESCE(transfer_started_at, ?)
+                    ELSE transfer_started_at
+                END,
+                transferred_at = CASE
+                    WHEN ? = 'transferred' THEN ?
+                    ELSE transferred_at
+                END,
+                verified_at = CASE
+                    WHEN ? = 'verified' THEN ?
+                    ELSE verified_at
+                END,
+                ingested_at = CASE
+                    WHEN ? = 'ingested' THEN ?
+                    ELSE ingested_at
+                END,
+                updated_at = ?
+            WHERE run_id = ?
+            """,
+            (
+                status,
+                resolved_task_id,
+                attempt_count,
+                error_summary,
+                status,
+                now_str,
+                status,
+                now_str,
+                status,
+                now_str,
+                status,
+                now_str,
+                now_str,
+                str(run_id),
+            ),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+
+    updated = conn.execute(
+        "SELECT * FROM result_syncs WHERE run_id = ?",
+        (str(run_id),),
+    ).fetchone()
+    return dict(updated)
+
+
+def get_result_syncs(
+    conn: sqlite3.Connection,
+    *,
+    statuses: Optional[Sequence[str]] = None,
+    stage: Optional[str] = None,
+    require_globus_task_id: bool = False,
+    limit: int = 200,
+) -> List[Dict]:
+    """Return result synchronizations ordered by registration time."""
+    clauses: List[str] = []
+    params: List[object] = []
+    if statuses:
+        invalid = [status for status in statuses if status not in _VALID_RESULT_SYNC_STATUSES]
+        if invalid:
+            raise ValueError(f"Invalid result sync statuses: {invalid}")
+        placeholders = ",".join("?" for _ in statuses)
+        clauses.append(f"status IN ({placeholders})")
+        params.extend(statuses)
+    if stage:
+        clauses.append("stage = ?")
+        params.append(stage)
+    if require_globus_task_id:
+        clauses.append("globus_task_id IS NOT NULL")
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(int(limit))
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM result_syncs
+        {where}
+        ORDER BY registered_at ASC, run_id ASC
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def reopen_result_sync(conn: sqlite3.Connection, *, run_id: str) -> Dict:
+    """Reset a failed or canceled run-bundle synchronization for retry."""
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        sync = conn.execute(
+            "SELECT status FROM result_syncs WHERE run_id = ?",
+            (str(run_id),),
+        ).fetchone()
+        if sync is None:
+            raise ValueError(f"Unknown result sync run_id: {run_id}")
+        if sync["status"] not in {"failed", "canceled"}:
+            raise ValueError(
+                f"Result sync {run_id!r} is {sync['status']!r}; "
+                "only failed or canceled syncs can be reopened"
+            )
+
+        conn.execute(
+            """
+            UPDATE result_syncs
+            SET status = 'requested',
+                globus_task_id = NULL,
+                error_summary = NULL,
+                transfer_started_at = NULL,
+                transferred_at = NULL,
+                verified_at = NULL,
+                ingested_at = NULL,
+                updated_at = ?
+            WHERE run_id = ?
+            """,
+            (now_str, str(run_id)),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+
+    updated = conn.execute(
+        "SELECT * FROM result_syncs WHERE run_id = ?",
+        (str(run_id),),
+    ).fetchone()
+    return dict(updated)
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,49 @@
+# Ceres operator configuration for Atlas-to-Ceres result synchronization.
+# Copy this file to an untracked local config and replace site-specific paths.
+
+site: CERES
+
+paths:
+  db: /project/dash_agir/globus_index/globus_file_index.sqlite3
+  log_dir: /project/dash_agir/logs/result_sync
+
+# A consistent copy of the canonical database is published here only after
+# final result-sync reconciliation passes. The Atlas path is used only when
+# publish_ceres_db_snapshot.py is run with --transfer.
+snapshot:
+  ceres_publish_path: /90daydata/dash_agir/result_sync/db/globus_file_index.sqlite3
+  atlas_destination_path: /90daydata/dash_agir/result_sync/db/globus_file_index.sqlite3
+
+result_sync:
+  # First Globus transfer: Atlas request outbox -> Ceres request inbox.
+  atlas_endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+  atlas_outbox: /90daydata/dash_agir/result_sync/outbox
+  ceres_endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+  ceres_inbox: /90daydata/dash_agir/result_sync/inbox
+
+  # Incoming request paths must be direct children of these roots. Ceres uses
+  # them as the trust boundary for the second, immutable run-bundle transfer.
+  atlas_run_root: /90daydata/dash_agir/tmp/stage_runs
+  ceres_run_root: /90daydata/dash_agir/tmp/stage_runs
+
+  # Successful Atlas promotions are reproduced under this Ceres root. Each
+  # stage suffix must match the suffix used by that stage's Atlas config.
+  promotion:
+    root: /90daydata/dash_agir/semifield-developed-images
+    stage_suffixes:
+      raw_to_jpg: images
+      jpg_to_det: detections
+
+  # One complete Ceres scope refresh runs after any successful promotion.
+  # promotion.root must equal <storage_root>/<data_state>.
+  inventory:
+    storage_domain: dash_agir
+    namespace: 90daydata
+    storage_root: /90daydata/dash_agir
+    data_state: semifield-developed-images
+    batch_size: 10000
+    max_workers: 8
+
+  polling:
+    interval_seconds: 30
+    timeout_seconds: 3600

@@ -47,6 +47,16 @@ transfer:
       # Subdirectory under <input_staging_root>/<batch_id>/ where JPGs live
       input_subdir: images
 
+# ── Atlas-to-Ceres result synchronization ────────────────────────────────────
+# The Slurm job writes one request per immutable run bundle. Ceres later pulls
+# these requests and bundles with scripts/admin/sync_atlas_results.py.
+result_sync:
+  enabled: true
+  outbox: /90daydata/dash_agir/result_sync/outbox
+  source_endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+  destination_endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+  destination_run_root: /90daydata/dash_agir/tmp/stage_runs
+
 # ── Slurm job parameters ──────────────────────────────────────────────────────
 slurm:
   account: dash_agir

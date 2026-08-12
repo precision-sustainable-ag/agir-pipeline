@@ -28,6 +28,13 @@ INPUT_STAGING_DIR="{{ input_staging_dir }}"
 OUTPUT_STAGE_RUNS="{{ output_stage_runs }}"
 FINAL_DEST="{{ final_dest }}"
 
+{% if result_sync_enabled %}
+RESULT_SYNC_OUTBOX="{{ result_sync_outbox }}"
+RESULT_SYNC_SRC_ENDPOINT="{{ result_sync_src_endpoint }}"
+RESULT_SYNC_DST_ENDPOINT="{{ result_sync_dst_endpoint }}"
+RESULT_SYNC_DST_RUN_ROOT="{{ result_sync_dst_run_root }}"
+{% endif %}
+
 # ── Logging helpers ───────────────────────────────────────────────────────────
 JOB_LOG="{{ log_dir }}/{{ batch_id }}-${SLURM_JOB_ID}.log"
 
@@ -59,6 +66,62 @@ export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
+JOB_STARTED_AT=$(python -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))')
+
+finalize_early_failure() {
+    local reason="$1"
+
+{% if result_sync_enabled %}
+    local failure_run_id
+    local failure_bundle
+    local register_exit
+    local ingest_exit
+
+    failure_run_id=$(python -c 'import uuid; print(uuid.uuid4())')
+    failure_bundle="$OUTPUT_STAGE_RUNS/$failure_run_id"
+
+    set +e
+    python "$AGIR_DIR/scripts/job/register_result_sync.py" \
+        --run-bundle "$failure_bundle" \
+        --outbox "$RESULT_SYNC_OUTBOX" \
+        --src-endpoint "$RESULT_SYNC_SRC_ENDPOINT" \
+        --dst-endpoint "$RESULT_SYNC_DST_ENDPOINT" \
+        --dst-run-root "$RESULT_SYNC_DST_RUN_ROOT" \
+        --create-failure-bundle \
+        --run-id "$failure_run_id" \
+        --batch-id "$BATCH_ID" \
+        --stage "{{ stage_name }}" \
+        --failure-reason "$reason" \
+        --started-at "$JOB_STARTED_AT" \
+        --job-log "$JOB_LOG"
+    register_exit=$?
+
+    python "$AGIR_DIR/scripts/job/ingest_and_release.py" \
+        --db "$DB_PATH" \
+        --run-report "$failure_bundle/run_report.json" \
+        --lease-id "$LEASE_ID" \
+        --orchestrator-id "$ORCHESTRATOR_ID" \
+        --release-reason "$reason"
+    ingest_exit=$?
+    set -e
+
+    if [[ "$register_exit" -ne 0 ]]; then
+        log "[ERROR] Failed to register early failure bundle: $failure_bundle"
+    fi
+    if [[ "$ingest_exit" -ne 0 ]]; then
+        log "[ERROR] Failed to ingest early failure bundle: $failure_bundle"
+    fi
+{% else %}
+    python "$AGIR_DIR/scripts/job/ingest_and_release.py" \
+        --db "$DB_PATH" \
+        --lease-id "$LEASE_ID" \
+        --orchestrator-id "$ORCHESTRATOR_ID" \
+        --release-reason "$reason"
+{% endif %}
+
+    exit 1
+}
+
 log_section "{{ stage_name }} starting"
 log "Batch:   $BATCH_ID"
 log "Node:    $(hostname -f)"
@@ -74,12 +137,7 @@ set -e
 
 if [[ "$FILE_COUNT" -eq 0 ]]; then
     log "[ERROR] No input files found at $INPUT_STAGING_DIR"
-    python "$AGIR_DIR/scripts/job/ingest_and_release.py" \
-        --db "$DB_PATH" \
-        --lease-id "$LEASE_ID" \
-        --orchestrator-id "$ORCHESTRATOR_ID" \
-        --release-reason "no_input_files"
-    exit 1
+    finalize_early_failure "no_input_files"
 fi
 log "Staged files available: $FILE_COUNT"
 
@@ -108,12 +166,7 @@ RUN_ID=$(basename "$RUN_DIR" 2>/dev/null || echo "unknown")
 
 if [[ -z "$RUN_DIR" || ! -d "$RUN_DIR" ]]; then
     log "[ERROR] Could not resolve run directory under $TMPOUTPUT/{{ output_subdir }}"
-    python "$AGIR_DIR/scripts/job/ingest_and_release.py" \
-        --db "$DB_PATH" \
-        --lease-id "$LEASE_ID" \
-        --orchestrator-id "$ORCHESTRATOR_ID" \
-        --release-reason "no_run_dir"
-    exit 1
+    finalize_early_failure "no_run_dir"
 fi
 log "Run dir: $RUN_DIR"
 log "Run ID:  $RUN_ID"
@@ -142,6 +195,8 @@ fi
 # ── Step 5: Promote outputs and ingest ────────────────────────────────────────
 log_section "[5/6] Promoting outputs"
 PROMOTE_EXIT=0
+PROMOTION_SUCCEEDED=0
+PROMOTED_AT=""
 VIZ_DEST="{{ viz_dest }}"
 
 if [[ "$STAGE_EXIT" -le 1 ]]; then
@@ -153,6 +208,10 @@ if [[ "$STAGE_EXIT" -le 1 ]]; then
     PROMOTE_EXIT=$?
     set -e
     log "Promote exit: $PROMOTE_EXIT"
+    if [[ "$PROMOTE_EXIT" -eq 0 ]]; then
+        PROMOTION_SUCCEEDED=1
+        PROMOTED_AT=$(python -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))')
+    fi
 
     # Promote visualization sample (non-fatal)
     if [[ -d "$VIZ_DIR" && "$(ls -A "$VIZ_DIR" 2>/dev/null)" ]]; then
@@ -174,6 +233,31 @@ mkdir -p "$ARTIFACT_DEST"
 rsync -a "$RUN_DIR/" "$ARTIFACT_DEST/"
 log "Artifacts saved to $ARTIFACT_DEST"
 
+REGISTER_EXIT=0
+{% if result_sync_enabled %}
+    REGISTER_ARGS=(
+        --run-bundle "$ARTIFACT_DEST"
+        --outbox "$RESULT_SYNC_OUTBOX"
+        --src-endpoint "$RESULT_SYNC_SRC_ENDPOINT"
+        --dst-endpoint "$RESULT_SYNC_DST_ENDPOINT"
+        --dst-run-root "$RESULT_SYNC_DST_RUN_ROOT"
+    )
+    if [[ "$PROMOTION_SUCCEEDED" == "1" ]]; then
+        REGISTER_ARGS+=(
+            --promotion-succeeded
+            --promoted-at "$PROMOTED_AT"
+        )
+    fi
+
+    set +e
+    python "$AGIR_DIR/scripts/job/register_result_sync.py" "${REGISTER_ARGS[@]}"
+    REGISTER_EXIT=$?
+    set -e
+    if [[ "$REGISTER_EXIT" -ne 0 ]]; then
+        log "[ERROR] Result-sync registration failed for $ARTIFACT_DEST"
+    fi
+{% endif %}
+
 RELEASE_REASON="stage_exit_${STAGE_EXIT}_promote_exit_${PROMOTE_EXIT}"
 python "$AGIR_DIR/scripts/job/ingest_and_release.py" \
     --db "$DB_PATH" \
@@ -181,5 +265,9 @@ python "$AGIR_DIR/scripts/job/ingest_and_release.py" \
     --lease-id "$LEASE_ID" \
     --orchestrator-id "$ORCHESTRATOR_ID" \
     --release-reason "$RELEASE_REASON"
+
+if [[ "$REGISTER_EXIT" -ne 0 ]]; then
+    exit "$REGISTER_EXIT"
+fi
 
 log "DONE — stage={{ stage_name }} batch=$BATCH_ID stage_exit=$STAGE_EXIT promote_exit=$PROMOTE_EXIT"

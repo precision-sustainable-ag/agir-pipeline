@@ -46,7 +46,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 BATCH_PATTERN = re.compile(r"^([A-Z]{2})_(\d{4}-\d{2}-\d{2})$")
 VALID_SITES = {"JUNO", "NCSU", "CERES", "ATLAS"}
 VALID_STORAGE_DOMAINS = {"screberg", "dash_agir", "national_plant_image_repository"}
-VALID_DATA_STATES = {"semifield-upload", "semifield-developed-images", "semifield-cutouts", "semifield-utils", "semifield-tools", "semifield-asfm"}
+VALID_DATA_STATES = {"semifield-upload", "semifield-developed-images", "semifield-cutouts", "semifield-utils", "semifield-tools", "semifield-asfm", "result_sync"}
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schemas" / "sqlite" / "pipeline.sql"
 # Original globus_file_index columns from the PostgreSQL overview.
 BASE_GFI_COLUMNS = [
@@ -1009,6 +1009,33 @@ def run_one_config(
         logger.exception("Inventory run_id=%d failed", run_id)
         finish_inventory_run(conn, run_id, "failed", stats, total_marked_stale, error_summary=str(exc)[:1000])
         return run_id, "failed"
+
+
+def refresh_inventory_scope(
+    *,
+    db_path: str | Path,
+    config: EndpointConfig,
+    batch_size: int = 10_000,
+    max_workers: int = 8,
+    logger: logging.Logger,
+) -> Tuple[int, str]:
+    """Refresh one complete inventory scope using the standard scanner."""
+    validate_endpoint_config(config)
+    conn = init_db(str(db_path), logger)
+    try:
+        return run_one_config(
+            conn=conn,
+            cfg=config,
+            batch_size=batch_size,
+            max_workers=max_workers,
+            clean_slate=False,
+            mark_stale=True,
+            build_summaries=True,
+            vacuum_after_clean=False,
+            logger=logger,
+        )
+    finally:
+        conn.close()
 
 
 # ============================================================
