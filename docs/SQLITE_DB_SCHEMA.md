@@ -782,7 +782,7 @@ They do not use the reporting summary tables and are not restricted to one
 inventory run. This allows current inventory from multiple endpoints and scan
 times to participate in one readiness decision.
 
-Both views exclude a batch when:
+Readiness views exclude a batch when:
 
 - the expected output files already exist;
 - an unexpired lease exists for the batch and stage; or
@@ -835,6 +835,12 @@ Returns batches that have current detection files, current developed-image
 files, AND current pixel-to-world NPZ grids (`semifield-asfm`,
 `pixel_world_grids` parent dir) — anywhere, any site — with no current
 georeferenced output yet.
+### `v_batches_needing_det_to_seg`
+
+Returns batches with a complete logical pair of current developed JPG inputs
+and per-image detection TXT inputs. The inputs may be independently available
+on JUNO or ATLAS. Replicated files are counted once by case-insensitive
+filename.
 
 Output columns:
 

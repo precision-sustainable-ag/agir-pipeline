@@ -23,6 +23,7 @@ get_result_syncs(conn, ...)  → list[dict]
 reopen_result_sync(conn, run_id)  → dict
 ingest_run_report(conn, run_report_path)  → dict
 get_batches_needing_raw_to_jpg(conn, *, site=None, limit=200)  → list[dict]
+get_batches_needing_det_to_seg(conn, *, limit=200)  → list[dict]
 resolve_season_for_batch(conn, *, site, batch_date)  → dict | None
 resolve_file_path_with_priority(conn, rel_path, *, priority=...)  → str | None
 
@@ -130,6 +131,45 @@ def get_batches_needing_jpg_to_det(
             (*filter_params, limit),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_batches_needing_det_to_seg(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 200,
+    batch_ids: Optional[Sequence[str]] = None,
+) -> List[Dict]:
+    """
+    Return logically ready detection-to-segmentation batches.
+
+    The readiness view considers current JPG and detection inventories across
+    JUNO and ATLAS together. Input-location precedence and materialization are
+    intentionally handled later by the input-staging workflow.
+    """
+    batch_filter_sql = ""
+    filter_params: List = []
+    if batch_ids:
+        placeholders = ",".join("?" for _ in batch_ids)
+        batch_filter_sql = f"WHERE v.batch_id IN ({placeholders})"
+        filter_params = list(batch_ids)
+
+    rows = conn.execute(
+        f"""
+        SELECT
+            v.batch_id,
+            v.batch_date,
+            v.jpg_count,
+            v.det_count,
+            v.mask_count
+        FROM v_batches_needing_det_to_seg v
+        {batch_filter_sql}
+        ORDER BY v.batch_date ASC, v.batch_id ASC
+        LIMIT ?
+        """,
+        (*filter_params, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
 
 
 def get_batches_needing_det_to_world(
