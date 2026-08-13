@@ -25,6 +25,13 @@ Works for any stage — behaviour is controlled by --mode:
                renders all of it rather than sampling a second time.
                Output: overlay JPGs downscaled to --max-width.
 
+  det_to_seg   Overlay a red mask (at --alpha opacity) from --masks on a
+               random sample of JPGs, optionally also drawing the YOLO
+               detection boxes it was segmented from (--detections, same
+               style as jpg_to_det above) so a missing/misaligned mask is
+               visible against its source box.
+               Output: overlay JPGs downscaled to --max-width.
+
 Output always goes to --output and is promoted to:
   <final_dest_root>/<batch_id>/<stage>/sample/
 
@@ -56,6 +63,16 @@ python scripts/job/visualize.py \\
     --output /path/to/sample \\
     --max-width 1800
 
+# det_to_seg overlay sample (--detections is optional):
+python scripts/job/visualize.py \\
+    --mode det_to_seg \\
+    --images /path/to/batch/images \\
+    --masks /path/to/run/artifacts/masks \\
+    --detections /path/to/detections/artifacts \\
+    --output /path/to/sample \\
+    --sample-size 24 \\
+    --max-width 1800
+
 Exit codes:
   0  Success
   1  Hard failure (bad args, unreadable directories)
@@ -73,6 +90,7 @@ from tqdm import tqdm
 
 import cv2
 import geopandas as gpd
+import numpy as np
 from shapely.geometry import Polygon
 
 logger = logging.getLogger(__name__)
@@ -102,6 +120,10 @@ _DET_TO_WORLD_LABEL_Y_MIN    = 20
 # rather than show a wildly wrong number.
 _DEGREE_CRS_CODES = {"4326"}
 
+# det_to_seg mask overlay style
+_MASK_OVERLAY_COLOR = (0, 0, 255)  # red (BGR), for segmented pixels
+_MASK_OVERLAY_ALPHA_DEFAULT = 0.4
+
 
 # ---------------------------------------------------------------------------
 # Per-mode render functions
@@ -129,6 +151,38 @@ def _render_raw_to_jpg(image_path: Path, out_path: Path, scale: float) -> bool:
     return ok
 
 
+def _draw_yolo_boxes(im, det_path: Path, w: int, h: int) -> None:
+    """
+    Draw YOLO detection boxes (with class/confidence labels) from a per-image
+    .txt file onto `im` in place. Shared by jpg_to_det's and det_to_seg's
+    overlays — both draw the same box style over their respective detection
+    file, det_to_seg optionally so a missing/misaligned mask is still visible
+    against the box it was segmented from.
+    """
+    if not det_path.exists():
+        return
+    for line in det_path.read_text().strip().splitlines():
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        try:
+            cls_id, xc, yc, bw, bh, conf = parts[:6]
+            xc, yc, bw, bh, conf = map(float, (xc, yc, bw, bh, conf))
+        except ValueError:
+            continue
+        x1 = int((xc - bw / 2) * w)
+        y1 = int((yc - bh / 2) * h)
+        x2 = int((xc + bw / 2) * w)
+        y2 = int((yc + bh / 2) * h)
+        cv2.rectangle(im, (x1, y1), (x2, y2), _BOX_COLOR, _BOX_THICKNESS)
+        cv2.putText(
+            im,
+            f"{int(float(cls_id))} {conf:.2f}",
+            (x1, max(_LABEL_Y_MIN, y1 - 10)),
+            _FONT, _FONT_SCALE, _FONT_COLOR, _FONT_THICKNESS, cv2.LINE_AA,
+        )
+
+
 def _render_jpg_to_det(
     image_path: Path,
     det_path: Path,
@@ -142,28 +196,54 @@ def _render_jpg_to_det(
         return False
 
     h, w = im.shape[:2]
+    _draw_yolo_boxes(im, det_path, w, h)
 
-    if det_path.exists():
-        for line in det_path.read_text().strip().splitlines():
-            parts = line.split()
-            if len(parts) < 6:
-                continue
-            try:
-                cls_id, xc, yc, bw, bh, conf = parts[:6]
-                xc, yc, bw, bh, conf = map(float, (xc, yc, bw, bh, conf))
-            except ValueError:
-                continue
-            x1 = int((xc - bw / 2) * w)
-            y1 = int((yc - bh / 2) * h)
-            x2 = int((xc + bw / 2) * w)
-            y2 = int((yc + bh / 2) * h)
-            cv2.rectangle(im, (x1, y1), (x2, y2), _BOX_COLOR, _BOX_THICKNESS)
-            cv2.putText(
-                im,
-                f"{int(float(cls_id))} {conf:.2f}",
-                (x1, max(_LABEL_Y_MIN, y1 - 10)),
-                _FONT, _FONT_SCALE, _FONT_COLOR, _FONT_THICKNESS, cv2.LINE_AA,
-            )
+    if im.shape[1] > max_width:
+        scale = max_width / im.shape[1]
+        im = cv2.resize(im, (int(im.shape[1] * scale), int(im.shape[0] * scale)))
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    ok = cv2.imwrite(str(out_path), im)
+    if not ok:
+        logger.warning("cv2.imwrite failed for %s", out_path)
+    return ok
+
+
+def _render_det_to_seg(
+    image_path: Path,
+    mask_path: Path,
+    det_path: Path | None,
+    out_path: Path,
+    max_width: int,
+    alpha: float,
+) -> bool:
+    """
+    Overlay a det_to_seg mask (red, at `alpha` opacity) on one JPG, then
+    optionally draw the YOLO detection boxes it was segmented from. Boxes are
+    drawn after the mask so they stay visible on top of it.
+    """
+    im = cv2.imread(str(image_path))
+    if im is None:
+        logger.warning("Could not read: %s", image_path)
+        return False
+
+    h, w = im.shape[:2]
+
+    if mask_path.exists():
+        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        if mask is None:
+            logger.warning("Could not read mask: %s", mask_path)
+        else:
+            if mask.shape[:2] != (h, w):
+                mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+            color_layer = np.zeros_like(im)
+            color_layer[mask > 127] = _MASK_OVERLAY_COLOR
+            im = cv2.addWeighted(color_layer, alpha, im, 1.0, 0)
+    else:
+        logger.warning("No mask found for %s: %s", image_path.name, mask_path)
+
+    if det_path is not None:
+        _draw_yolo_boxes(im, det_path, w, h)
 
     if im.shape[1] > max_width:
         scale = max_width / im.shape[1]
@@ -388,7 +468,8 @@ def main() -> int:
         description="Generate a downscaled random sample of stage outputs for QC."
     )
     parser.add_argument(
-        "--mode", required=True, choices=["raw_to_jpg", "jpg_to_det", "det_to_world"],
+        "--mode", required=True,
+        choices=["raw_to_jpg", "jpg_to_det", "det_to_world", "det_to_seg"],
         help="Stage to visualize.",
     )
     parser.add_argument(
@@ -398,8 +479,20 @@ def main() -> int:
     parser.add_argument(
         "--detections", type=Path, default=None,
         help=(
-            "Directory of .txt detection files (jpg_to_det mode), or the "
-            "single *_georeferenced.csv file (det_to_world mode)."
+            "Directory of .txt detection files (jpg_to_det mode, or "
+            "optionally det_to_seg mode), or the single *_georeferenced.csv "
+            "file (det_to_world mode)."
+        ),
+    )
+    parser.add_argument(
+        "--masks", type=Path, default=None,
+        help="Directory of *_mask.png files (det_to_seg mode only).",
+    )
+    parser.add_argument(
+        "--alpha", type=float, default=_MASK_OVERLAY_ALPHA_DEFAULT,
+        help=(
+            "Mask overlay opacity for det_to_seg mode, 0=transparent, "
+            f"1=opaque (default: {_MASK_OVERLAY_ALPHA_DEFAULT})."
         ),
     )
     parser.add_argument(
@@ -454,6 +547,10 @@ def main() -> int:
         logger.error("--detections must be a valid *_georeferenced.csv file for det_to_world mode")
         return 1
 
+    if args.mode == "det_to_seg" and (args.masks is None or not args.masks.is_dir()):
+        logger.error("--masks must be a valid directory for det_to_seg mode")
+        return 1
+
     images = sorted(
         list(args.images.glob("*.jpg")) +
         list(args.images.glob("*.JPG")) +
@@ -499,6 +596,11 @@ def main() -> int:
         elif args.mode == "det_to_world":
             image_rows = rows_by_image.get(image_path.stem, [])
             ok = _render_det_to_world(image_path, image_rows, out_path, args.max_width)
+
+        elif args.mode == "det_to_seg":
+            mask_path = args.masks / f"{image_path.stem}_mask.png"
+            det_path = args.detections / f"{image_path.stem}.txt" if args.detections else None
+            ok = _render_det_to_seg(image_path, mask_path, det_path, out_path, args.max_width, args.alpha)
 
         else:
             det_path = args.detections / f"{image_path.stem}.txt"

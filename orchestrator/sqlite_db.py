@@ -235,23 +235,25 @@ def get_batches_needing_det_to_world(
 def get_det_to_world_staged_batch_ids(
     conn: sqlite3.Connection,
     *,
+    stage: str,
     expected_dst_paths: Dict[str, Sequence[str]],
 ) -> set[str]:
     """
     Return the subset of batch_ids (keys of ``expected_dst_paths``) for which
     every expected ``staged_inputs`` dst_path has ``status='completed'``.
 
-    det_to_world needs independent pieces of data (images + detections +
-    grids), each with its own dst_path (see
-    ``orchestrator.input_staging_planner.det_to_world_expected_dst_paths``).
-    Unlike ``get_completed_input_staging_batch_ids`` (which only checks "any
-    row completed" — correct for raw_to_jpg/jpg_to_det's single fixed
-    route), this requires ALL of a batch's expected pieces to show
-    completed. Pieces already resident at the destination when planned are
-    recorded as immediately-completed rows too (see
-    ``StagingRequest.already_satisfied``), so this reflects readiness the
-    moment ``poll_stage_inputs.py``/``stage_inputs.py`` mark them —
-    no fresh ``globus_file_index`` inventory scan required.
+    Multi-piece stages (det_to_world: images + detections + grids;
+    det_to_seg: images + detections) each have independent dst_paths per
+    piece (see ``orchestrator.input_staging_planner.det_to_world_expected_dst_paths``
+    / ``det_to_seg_expected_dst_paths``). Unlike
+    ``get_completed_input_staging_batch_ids`` (which only checks "any row
+    completed" — correct for raw_to_jpg/jpg_to_det's single fixed route),
+    this requires ALL of a batch's expected pieces to show completed. Pieces
+    already resident at the destination when planned are recorded as
+    immediately-completed rows too (see ``StagingRequest.already_satisfied``),
+    so this reflects readiness the moment
+    ``poll_stage_inputs.py``/``stage_inputs.py`` mark them — no fresh
+    ``globus_file_index`` inventory scan required.
     """
     ready: set[str] = set()
     for batch_id, dst_paths in expected_dst_paths.items():
@@ -263,12 +265,12 @@ def get_det_to_world_staged_batch_ids(
             f"""
             SELECT COUNT(DISTINCT dst_path) AS n
             FROM staged_inputs
-            WHERE stage = 'det_to_world'
+            WHERE stage = ?
               AND status = 'completed'
               AND batch_id = ?
               AND dst_path IN ({placeholders})
             """,
-            (batch_id, *dst_paths),
+            (stage, batch_id, *dst_paths),
         ).fetchone()
         if row and row["n"] == len(dst_paths):
             ready.add(batch_id)

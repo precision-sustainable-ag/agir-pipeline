@@ -1,0 +1,136 @@
+# configs/config.det_to_seg.atlas.example.yaml
+# ============================================================
+# Stage configuration for det_to_seg (YOLO-detection-guided plant
+# segmentation) on Atlas (GPU cluster).
+# Copy to configs/config.det_to_seg.yaml and fill in values.
+#
+# det_to_seg is wired into scripts/job/submit.py (SUPPORTED_STAGES) and
+# orchestrator/input_staging_planner.py (STAGE_INPUT_SPECS), with its own
+# v_batches_needing_det_to_seg SQLite readiness view. Like det_to_world, it
+# needs two independent inputs — images and detections — resolved
+# independently (destination site first, then the same CERES -> JUNO
+# fallback chain jpg_to_det/det_to_world use — see
+# orchestrator/input_staging_planner.py's _plan_multi_site_requests()).
+# Unlike det_to_world, det_to_seg's images/ subdir is NOT sampled — the
+# segmentor reads every pixel, so the whole directory is transferred (same
+# as jpg_to_det's single images/ route).
+# ============================================================
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+paths:
+  db: /project/dash_agir/globus_index/globus_file_index.sqlite3
+  db_read_mode: direct  # direct | snapshot
+  db_temp_dir: /90daydata/dash_agir/tmp/db
+  uv_env: /project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/activate
+  locks_root: /90daydata/dash_agir/locks
+
+  agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
+
+  # Segmentation YAML config passed to det_to_seg --c
+  stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/stages/det_to_seg/configs/default.yaml
+
+  # Both images/ and detections/ subdirs for a batch are staged here (see
+  # transfer.routes.det_to_seg below), then rsynced together into
+  # $TMPDIR/input by the generated job script:
+  #   <input_staging_root>/<batch_id>/images/
+  #   <input_staging_root>/<batch_id>/detections/
+  input_staging_root: /90daydata/dash_agir/semifield-developed-images
+
+  # Per-run artifacts saved here after job completes
+  output_stage_runs: /90daydata/dash_agir/tmp/stage_runs
+
+  # Promote writes to: <final_dest_root>/<batch_id>/segmentations/
+  final_dest_root: /90daydata/dash_agir/semifield-developed-images
+
+  # Slurm job stdout/stderr logs
+  log_dir: /project/dash_agir/logs/det_to_seg
+
+# ── Globus transfer settings ──────────────────────────────────────────────────
+# Used by scripts/job/stage_inputs.py to fetch a batch's images/detections if
+# they aren't already indexed at destination_site. Each subdir is resolved
+# independently (see orchestrator/input_staging_planner.py):
+#   destination_site (ATLAS) already has it -> nothing staged
+#   else CERES has it                       -> transfer CERES -> ATLAS
+#   else                                     -> fall back to JUNO LTS
+transfer:
+  juno_endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
+  atlas_endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+  ceres_endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+
+  dry_run: false
+  poll_interval_seconds: 30
+  poll_timeout_seconds: 7200
+
+  # Same priority chain as configs/config.det_to_world.example.yaml and
+  # configs/config.jpg_to_det.atlas.example.yaml — see
+  # orchestrator/sqlite_db.py's resolve_file_path_with_priority(). Not
+  # currently exercised by det_to_seg's cli_args (no $SHAPEFILE_PATH /
+  # $BBOT_VERSION reference below), kept here for consistency with the other
+  # two stage configs and in case a future det_to_seg config needs it.
+  file_source_priority:
+    - [CERES, 90daydata]
+    - [CERES, project]
+
+  routes:
+    det_to_seg:
+      # destination_site drives both which cluster's presence skips staging
+      # AND which *_endpoint above is used as the Globus destination — keep
+      # in sync with slurm.partition below (GPU-A100, ATLAS), same as
+      # jpg_to_det.
+      destination_site: ATLAS
+
+      # Checked in this order (see _INTERMEDIATE_FALLBACK_SITES in
+      # orchestrator/input_staging_planner.py): destination (ATLAS) first
+      # (implicit), then CERES, then JUNO LTS. No explicit `priority:`
+      # override here — same as det_to_world/jpg_to_det, both of which rely
+      # on StageInputSpec.default_priority (100) rather than setting one.
+      source_root_atlas: /90daydata/dash_agir/semifield-developed-images
+      source_root_ceres: /90daydata/dash_agir/semifield-developed-images
+      source_root_juno: /LTS/project/dash_agir/semifield-developed-images
+
+# ── Slurm job parameters ──────────────────────────────────────────────────────
+# GPU stage (segmentation inference) — same partition/gres as jpg_to_det.
+slurm:
+  account: dash_agir
+  partition: gpu-a100
+  gres: gpu:1
+  cpus_per_task: 16
+  mem: 128G
+  time: "2:00:00"
+
+# ── Stage identity ────────────────────────────────────────────────────────────
+stage:
+  name: det_to_seg
+  cli_module: stages.det_to_seg.cli
+  cli_args: >-
+    --i $TMPDIR/input/detections
+    --j $TMPDIR/input/images
+    --c $CONFIG_PATH
+    --o $TMPDIR/output
+    --t $CPUS
+    --batch-id $BATCH_ID
+    --device cuda
+  output_subdir: det_to_seg
+  final_dest_suffix: segmentations
+
+# ── Visualization sample ─────────────────────────────────────────────────────
+# Overlays a random sample's masks (red, see scripts/job/visualize.py's
+# det_to_seg mode) on their source JPGs, and the detection boxes each mask
+# was segmented from. images/detections point at the staged inputs
+# ($TMPINPUT), not stage output — those are the exact per-image files
+# det_to_seg's cli_args above ran against. masks points at this run's own
+# output artifacts.
+visualization:
+  enabled: true
+  mode: det_to_seg
+  args:
+    images: '"$TMPINPUT/images"'
+    detections: '"$TMPINPUT/detections"'
+    masks: '"$RUN_DIR/artifacts/masks"'
+    output: '"$VIZ_DIR"'
+    sample_size: 100
+    max_width: 1800
+
+# ── Render template ───────────────────────────────────────────────────────────
+render:
+  template: slurm_job.sh.j2

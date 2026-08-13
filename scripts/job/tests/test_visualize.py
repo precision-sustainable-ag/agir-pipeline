@@ -249,3 +249,81 @@ def test_render_det_to_world_draws_box_without_label_when_area_unavailable(
     assert ok is True
     im = cv2.imread(str(out_path))
     assert (im[:, :, 1] == 255).any()
+
+
+def _write_mask(path: Path, *, width: int, height: int, box=None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mask = np.zeros((height, width), dtype="uint8")
+    if box is not None:
+        x1, y1, x2, y2 = box
+        mask[y1:y2, x1:x2] = 255
+    cv2.imwrite(str(path), mask)
+
+
+def test_render_det_to_seg_overlays_mask_pixels(tmp_path: Path) -> None:
+    image_path = tmp_path / "img_001.jpg"
+    _write_image(image_path, width=100, height=80)
+    mask_path = tmp_path / "img_001_mask.png"
+    _write_mask(mask_path, width=100, height=80, box=(10, 10, 50, 50))
+    out_path = tmp_path / "out" / "img_001.jpg"
+
+    ok = visualize._render_det_to_seg(
+        image_path, mask_path, None, out_path, max_width=1800, alpha=0.4
+    )
+
+    assert ok is True
+    im = cv2.imread(str(out_path))
+    # Masked region should have picked up red (channel 2) from the overlay;
+    # the source image was pure black, so any red at all confirms blending.
+    assert im[20, 20, 2] > 0
+    # Outside the mask, the pixel should remain unaffected (still black).
+    assert tuple(im[70, 90]) == (0, 0, 0)
+
+
+def test_render_det_to_seg_handles_missing_mask(tmp_path: Path) -> None:
+    image_path = tmp_path / "img_002.jpg"
+    _write_image(image_path, width=100, height=80)
+    out_path = tmp_path / "out" / "img_002.jpg"
+
+    ok = visualize._render_det_to_seg(
+        image_path, tmp_path / "does_not_exist_mask.png", None, out_path,
+        max_width=1800, alpha=0.4,
+    )
+
+    assert ok is True
+    assert out_path.exists()
+
+
+def test_render_det_to_seg_draws_optional_detection_box(tmp_path: Path) -> None:
+    image_path = tmp_path / "img_003.jpg"
+    _write_image(image_path, width=200, height=200)
+    mask_path = tmp_path / "img_003_mask.png"
+    _write_mask(mask_path, width=200, height=200)
+    det_path = tmp_path / "img_003.txt"
+    det_path.write_text("0 0.5 0.5 0.4 0.4 0.9\n")
+    out_path = tmp_path / "out" / "img_003.jpg"
+
+    ok = visualize._render_det_to_seg(
+        image_path, mask_path, det_path, out_path, max_width=1800, alpha=0.4
+    )
+
+    assert ok is True
+    im = cv2.imread(str(out_path))
+    # The rectangle's green border should be present somewhere in the image.
+    assert (im[:, :, 1] == 255).any()
+
+
+def test_render_det_to_seg_downscales_to_max_width(tmp_path: Path) -> None:
+    image_path = tmp_path / "img_004.jpg"
+    _write_image(image_path, width=2000, height=1000)
+    mask_path = tmp_path / "img_004_mask.png"
+    _write_mask(mask_path, width=2000, height=1000)
+    out_path = tmp_path / "out" / "img_004.jpg"
+
+    ok = visualize._render_det_to_seg(
+        image_path, mask_path, None, out_path, max_width=500, alpha=0.4
+    )
+
+    assert ok is True
+    im = cv2.imread(str(out_path))
+    assert im.shape[1] == 500

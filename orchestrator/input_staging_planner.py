@@ -15,6 +15,7 @@ from pathlib import PurePosixPath
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 from orchestrator.sqlite_db import (
+    get_batches_needing_det_to_seg,
     get_batches_needing_det_to_world,
     get_batches_needing_jpg_to_det,
     get_batches_needing_raw_to_jpg,
@@ -86,6 +87,11 @@ STAGE_INPUT_SPECS: Dict[str, StageInputSpec] = {
         readiness_view="v_batches_needing_det_to_world",
         subdirs=("images", "detections"),
     ),
+    "det_to_seg": StageInputSpec(
+        stage_name="det_to_seg",
+        readiness_view="v_batches_needing_det_to_seg",
+        subdirs=("images", "detections"),
+    ),
 }
 
 # data_state/parent_dir matched when checking whether a site already has a
@@ -139,6 +145,11 @@ def _rows_for_stage(
         # so scoping readiness to one --site would wrongly exclude batches
         # whose data landed somewhere else.
         return get_batches_needing_det_to_world(conn, site=None, limit=limit, batch_ids=batch_ids)
+    if spec.readiness_view == "v_batches_needing_det_to_seg":
+        # site-agnostic, same reasoning as det_to_world above — det_to_seg's
+        # images/detections subdirs are each resolved independently via
+        # _plan_multi_site_requests.
+        return get_batches_needing_det_to_seg(conn, limit=limit, batch_ids=batch_ids)
     raise ValueError(f"Unsupported readiness view: {spec.readiness_view!r}")
 
 
@@ -553,4 +564,26 @@ def det_to_world_expected_dst_paths(cfg: Dict, batch_id: str) -> List[str]:
         _join_posix(input_root, batch_id, "images"),
         _join_posix(input_root, batch_id, "detections"),
         _join_posix(grid_root, batch_id),
+    ]
+
+
+def det_to_seg_expected_dst_paths(cfg: Dict, batch_id: str) -> List[str]:
+    """
+    The staged_inputs dst_paths that must all be status='completed' before
+    det_to_seg can run for a batch — images and detections (no grids; unlike
+    det_to_world, det_to_seg doesn't remap into world coordinates).
+
+    Mirrors the exact path construction in _plan_multi_site_requests so the
+    readiness gate (scripts/job/submit.py's filter_det_to_seg_staged_ready)
+    always checks the same paths the planner actually plans against.
+    """
+    paths = cfg["paths"]
+    transfer = cfg["transfer"]
+    route = transfer.get("routes", {}).get("det_to_seg", {})
+
+    input_root = route.get("destination_root") or paths["input_staging_root"]
+
+    return [
+        _join_posix(input_root, batch_id, "images"),
+        _join_posix(input_root, batch_id, "detections"),
     ]

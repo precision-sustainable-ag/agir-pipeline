@@ -6,11 +6,13 @@ from pathlib import Path
 from orchestrator.input_staging_planner import (
     DEFAULT_IMAGE_SAMPLE_SIZE,
     STAGE_INPUT_SPECS,
+    det_to_seg_expected_dst_paths,
     det_to_world_expected_dst_paths,
     plan_input_staging,
     requests_as_dicts,
 )
 from orchestrator.sqlite_db import (
+    get_batches_needing_det_to_seg,
     get_batches_needing_det_to_world,
     get_det_to_world_staged_batch_ids,
     get_input_staging_requests,
@@ -104,6 +106,44 @@ def insert_indexed_images(
     conn.commit()
 
 
+def insert_indexed_detections(
+    conn: sqlite3.Connection,
+    *,
+    batch_id: str,
+    site: str,
+    storage_root: str,
+    file_names: list[str],
+) -> None:
+    """Insert one detection .txt file per name in ``file_names`` (stems only,
+    extension is added here) — used alongside insert_indexed_images to
+    satisfy v_batches_needing_det_to_seg's jpg_count == det_count
+    requirement."""
+    for file_name in file_names:
+        rel_path = f"semifield-developed-images/{batch_id}/detections/{file_name}"
+        conn.execute(
+            """
+            INSERT INTO globus_file_index (
+                endpoint, site, storage_domain, namespace, storage_root,
+                rel_path, full_path, parent_dir, file_name,
+                entry_type, file_ext, size_bytes, permissions, checksum,
+                batch_id, batch_state, batch_date, data_state, is_current
+            )
+            VALUES (?, ?, 'dash_agir', 'LTS', ?, ?, ?, 'detections', ?, 'file', 'txt', 12, '644',
+                    NULL, ?, 'NC', '2025-01-01', 'semifield-developed-images', 1)
+            """,
+            (
+                f"{site.lower()}-endpoint",
+                site,
+                storage_root,
+                rel_path,
+                f"{storage_root}/{rel_path}",
+                file_name,
+                batch_id,
+            ),
+        )
+    conn.commit()
+
+
 def test_plan_input_staging_for_raw_to_jpg(tmp_path: Path) -> None:
     conn = make_conn(tmp_path)
     insert_indexed_file(
@@ -154,6 +194,9 @@ def test_stage_input_specs_define_current_stages() -> None:
 
     assert STAGE_INPUT_SPECS["det_to_world"].readiness_view == "v_batches_needing_det_to_world"
     assert STAGE_INPUT_SPECS["det_to_world"].subdirs == ("images", "detections")
+
+    assert STAGE_INPUT_SPECS["det_to_seg"].readiness_view == "v_batches_needing_det_to_seg"
+    assert STAGE_INPUT_SPECS["det_to_seg"].subdirs == ("images", "detections")
 
 
 def _jpg_to_det_cfg() -> dict:
@@ -339,7 +382,7 @@ def test_get_det_to_world_staged_batch_ids_requires_all_pieces_completed(tmp_pat
         ]
     }
 
-    assert get_det_to_world_staged_batch_ids(conn, expected_dst_paths=expected) == set()
+    assert get_det_to_world_staged_batch_ids(conn, stage="det_to_world", expected_dst_paths=expected) == set()
 
     for dst_path in expected["NC_2025-06-02"][:2]:
         created = request_input_staging(
@@ -354,7 +397,7 @@ def test_get_det_to_world_staged_batch_ids_requires_all_pieces_completed(tmp_pat
         mark_input_staging_status(conn, staging_id=created["staging_id"], status="completed")
 
     # Only 2 of 3 expected pieces completed -> not ready yet.
-    assert get_det_to_world_staged_batch_ids(conn, expected_dst_paths=expected) == set()
+    assert get_det_to_world_staged_batch_ids(conn, stage="det_to_world", expected_dst_paths=expected) == set()
 
     grids_path = expected["NC_2025-06-02"][2]
     created = request_input_staging(
@@ -368,7 +411,7 @@ def test_get_det_to_world_staged_batch_ids_requires_all_pieces_completed(tmp_pat
     )
     mark_input_staging_status(conn, staging_id=created["staging_id"], status="completed")
 
-    assert get_det_to_world_staged_batch_ids(conn, expected_dst_paths=expected) == {"NC_2025-06-02"}
+    assert get_det_to_world_staged_batch_ids(conn, stage="det_to_world", expected_dst_paths=expected) == {"NC_2025-06-02"}
 
 
 def test_plan_input_staging_for_det_to_world_falls_back_to_juno(tmp_path: Path) -> None:
@@ -629,6 +672,184 @@ def test_plan_input_staging_for_det_to_world_respects_configured_sample_size(
     requests = plan_input_staging(conn, cfg, stage="det_to_world", site=None)
     by_key = {r.dst_path.rsplit("/", 1)[-1]: r for r in requests}
     assert len(by_key["images"].file_names) == 3
+
+
+def _det_to_seg_cfg() -> dict:
+    return {
+        "paths": {
+            "input_staging_root": "/90daydata/dash_agir/semifield-developed-images",
+        },
+        "transfer": {
+            "juno_endpoint": "juno-uuid",
+            "atlas_endpoint": "atlas-uuid",
+            "ceres_endpoint": "ceres-uuid",
+            "routes": {
+                "det_to_seg": {
+                    "destination_site": "ATLAS",
+                    "source_root_atlas": "/90daydata/dash_agir/semifield-developed-images",
+                    "source_root_ceres": "/90daydata/dash_agir/semifield-developed-images",
+                    "source_root_juno": "/LTS/project/dash_agir/semifield-developed-images",
+                }
+            },
+        },
+    }
+
+
+def test_readiness_view_requires_images_and_detections_for_det_to_seg(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    insert_indexed_file(
+        conn, batch_id="NC_2025-07-01", data_state="semifield-developed-images",
+        file_ext="jpg", parent_dir="images",
+    )
+
+    # No detections yet: batch should not appear.
+    assert get_batches_needing_det_to_seg(conn, batch_ids=["NC_2025-07-01"]) == []
+
+    insert_indexed_file(
+        conn, batch_id="NC_2025-07-01", data_state="semifield-developed-images",
+        file_ext="txt", parent_dir="detections",
+    )
+    rows = get_batches_needing_det_to_seg(conn, batch_ids=["NC_2025-07-01"])
+    assert len(rows) == 1
+    assert rows[0]["jpg_count"] == 1
+    assert rows[0]["det_count"] == 1
+    assert rows[0]["mask_count"] == 0
+
+
+def test_det_to_seg_expected_dst_paths() -> None:
+    cfg = _det_to_seg_cfg()
+    assert det_to_seg_expected_dst_paths(cfg, "NC_2025-07-02") == [
+        "/90daydata/dash_agir/semifield-developed-images/NC_2025-07-02/images",
+        "/90daydata/dash_agir/semifield-developed-images/NC_2025-07-02/detections",
+    ]
+
+
+def test_get_det_to_world_staged_batch_ids_requires_all_pieces_for_det_to_seg(
+    tmp_path: Path,
+) -> None:
+    # get_det_to_world_staged_batch_ids is stage-agnostic despite the name —
+    # scripts/job/submit.py's filter_det_to_seg_staged_ready() reuses it
+    # directly with det_to_seg_expected_dst_paths().
+    conn = make_conn(tmp_path)
+    expected = {
+        "NC_2025-07-02": [
+            "/90daydata/dash_agir/semifield-developed-images/NC_2025-07-02/images",
+            "/90daydata/dash_agir/semifield-developed-images/NC_2025-07-02/detections",
+        ]
+    }
+
+    assert get_det_to_world_staged_batch_ids(conn, stage="det_to_seg", expected_dst_paths=expected) == set()
+
+    images_path = expected["NC_2025-07-02"][0]
+    created = request_input_staging(
+        conn,
+        batch_id="NC_2025-07-02",
+        stage="det_to_seg",
+        src_endpoint="atlas-uuid",
+        dst_endpoint="atlas-uuid",
+        src_path=images_path,
+        dst_path=images_path,
+    )
+    mark_input_staging_status(conn, staging_id=created["staging_id"], status="completed")
+
+    # Only 1 of 2 expected pieces completed -> not ready yet.
+    assert get_det_to_world_staged_batch_ids(conn, stage="det_to_seg", expected_dst_paths=expected) == set()
+
+    detections_path = expected["NC_2025-07-02"][1]
+    created = request_input_staging(
+        conn,
+        batch_id="NC_2025-07-02",
+        stage="det_to_seg",
+        src_endpoint="atlas-uuid",
+        dst_endpoint="atlas-uuid",
+        src_path=detections_path,
+        dst_path=detections_path,
+    )
+    mark_input_staging_status(conn, staging_id=created["staging_id"], status="completed")
+
+    assert get_det_to_world_staged_batch_ids(
+        conn, stage="det_to_seg", expected_dst_paths=expected
+    ) == {
+        "NC_2025-07-02"
+    }
+
+
+def test_plan_input_staging_for_det_to_seg_falls_back_to_juno(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    insert_indexed_file(
+        conn, batch_id="NC_2025-07-03", data_state="semifield-developed-images",
+        file_ext="jpg", parent_dir="images", site="JUNO",
+    )
+    insert_indexed_file(
+        conn, batch_id="NC_2025-07-03", data_state="semifield-developed-images",
+        file_ext="txt", parent_dir="detections", site="JUNO",
+    )
+
+    requests = requests_as_dicts(
+        plan_input_staging(conn, _det_to_seg_cfg(), stage="det_to_seg", site=None)
+    )
+
+    assert {r["dst_path"] for r in requests} == {
+        "/90daydata/dash_agir/semifield-developed-images/NC_2025-07-03/images",
+        "/90daydata/dash_agir/semifield-developed-images/NC_2025-07-03/detections",
+    }
+    assert all(r["src_endpoint"] == "juno-uuid" for r in requests)
+
+
+def test_plan_input_staging_for_det_to_seg_transfers_full_images_directory_not_sampled(
+    tmp_path: Path,
+) -> None:
+    # Regression guard: unlike det_to_world's "images" subdir (sampled for
+    # visualization only), det_to_seg's segmentor reads every pixel, so its
+    # images subdir must always be a full recursive transfer (file_names
+    # stays None) even though the subdir has the same name.
+    conn = make_conn(tmp_path)
+    n_source_images = DEFAULT_IMAGE_SAMPLE_SIZE + 12
+    insert_indexed_images(
+        conn,
+        batch_id="NC_2025-07-04",
+        site="JUNO",
+        storage_root="/LTS/project/dash_agir",
+        file_names=[f"img_{i:03d}.jpg" for i in range(n_source_images)],
+    )
+    # v_batches_needing_det_to_seg requires jpg_count == det_count, so one
+    # detection file per image is needed here (unlike det_to_world's
+    # readiness view, which only checks presence).
+    insert_indexed_detections(
+        conn,
+        batch_id="NC_2025-07-04",
+        site="JUNO",
+        storage_root="/LTS/project/dash_agir",
+        file_names=[f"img_{i:03d}.txt" for i in range(n_source_images)],
+    )
+
+    requests = plan_input_staging(conn, _det_to_seg_cfg(), stage="det_to_seg", site=None)
+    by_key = {r.dst_path.rsplit("/", 1)[-1]: r for r in requests}
+
+    assert by_key["images"].file_names is None
+    assert by_key["detections"].file_names is None
+
+
+def test_plan_input_staging_for_det_to_seg_marks_already_local_pieces_satisfied(
+    tmp_path: Path,
+) -> None:
+    conn = make_conn(tmp_path)
+    insert_indexed_file(
+        conn, batch_id="NC_2025-07-05", data_state="semifield-developed-images",
+        file_ext="jpg", parent_dir="images", site="ATLAS",
+        storage_root="/90daydata/dash_agir",
+    )
+    insert_indexed_file(
+        conn, batch_id="NC_2025-07-05", data_state="semifield-developed-images",
+        file_ext="txt", parent_dir="detections", site="ATLAS",
+        storage_root="/90daydata/dash_agir",
+    )
+
+    requests = plan_input_staging(conn, _det_to_seg_cfg(), stage="det_to_seg", site=None)
+
+    assert len(requests) == 2
+    assert all(r.already_satisfied for r in requests)
+    assert all(r.src_path == r.dst_path for r in requests)
 
 
 def test_request_input_staging_is_idempotent_and_reopenable(tmp_path: Path) -> None:
