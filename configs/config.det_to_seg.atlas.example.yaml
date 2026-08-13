@@ -99,6 +99,10 @@ slurm:
   time: "2:00:00"
 
 # ── Stage identity ────────────────────────────────────────────────────────────
+# No --t/worker-count flag — det_to_seg batches detection crops into forward
+# passes in one process (see segmentor.py) rather than spreading across workers.
+# ProcessPoolExecutor was tried and dropped: single-GPU allocation (gres: gpu:1)
+# bought no parallelism and crashed under CUDA (torch.cuda can't survive fork()).
 stage:
   name: det_to_seg
   cli_module: stages.det_to_seg.cli
@@ -107,7 +111,6 @@ stage:
     --j $TMPDIR/input/images
     --c $CONFIG_PATH
     --o $TMPDIR/output
-    --t $CPUS
     --batch-id $BATCH_ID
     --device cuda
   output_subdir: det_to_seg

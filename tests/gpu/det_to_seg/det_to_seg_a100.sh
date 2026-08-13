@@ -54,7 +54,6 @@ VIZ_SCRIPT="${VIZ_SCRIPT:-$REPO_DIR/tests/gpu/det_to_seg/visualize_segmentation.
 
 VIZ_SAMPLE_SIZE="${VIZ_SAMPLE_SIZE:-24}"
 VIZ_MAX_WIDTH="${VIZ_MAX_WIDTH:-1800}"
-SEG_THREADS="${SEG_THREADS:-1}"
 SEG_DEVICE="${SEG_DEVICE:-cuda:0}"
 
 # Directory setup
@@ -137,7 +136,6 @@ python3 -m stages.det_to_seg.cli \
   --j "$JPG_INPUT_DIR" \
   --c "$SEG_CFG_PATH" \
   --o "$FINAL_SEG_DIR" \
-  --t "$SEG_THREADS" \
   --fs \
   --batch-id "$BATCH_ID" \
   --device "$SEG_DEVICE"

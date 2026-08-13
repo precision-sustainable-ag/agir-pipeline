@@ -1,8 +1,8 @@
-weights: /path/to/unet_mit_b4.pth
+weights: /90daydata/dash_agir/semifield-tools/models/plant_segmentor/PSA_15164_393_unets/train_2025-10-10_08_36_13/checkpoints/epoch=47-step=37200-val_loss=0.00.ckpt
 arch: Unet
 encoder: mit_b4
 threshold: 0.5
 pad_divisor: 32
 tile_size: 1024
-overlap: 128
+overlap: 256
 tiling: true

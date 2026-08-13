@@ -74,19 +74,23 @@ Splits a large crop into a set of overlapping tiles, runs segmentation inference
 
 ### Function: `predict_mask(...) -> np.ndarray`
 
-Chooses between single-pass and tiled inference based on crop size and config flags.
+Chooses between single-pass and tiled inference for one crop, based on crop size and config flags. Not used by `composite_bbox_masks` for the common (non-tiled) case anymore — kept as a general-purpose single-crop utility; see `predict_masks_batch` below for the batched path `composite_bbox_masks` actually uses.
+
+---
+
+### Function: `predict_masks_batch(model, crops_rgb, thr, divisor, device) -> list[np.ndarray]`
+
+Runs one forward pass for multiple same-pass (non-tiled) crops instead of one pass per crop. Crops may differ in size — each is padded to `divisor` individually, then all are further zero-padded up to the batch's max padded height/width so they can be stacked into one tensor. Callers should group similarly sized crops together first (see `composite_bbox_masks`) to keep that extra padding small.
 
 ---
 
 ### Function: `composite_bbox_masks(model, image_rgb, boxes_xyxy, config, device) -> np.ndarray`
 
-Creates a full-image binary mask by combining individual masks. For each bounding box:
-- clip bbox to valid image bounds
-- extract RGB crop
-- run segmentation on that crop
-- composite the crop mask into the full-image mask with logical OR
+Creates a full-image binary mask by combining individual per-box masks. For each bounding box, the box is clipped to valid image bounds and its RGB crop extracted. From there:
+- **Large crops** (bigger than 1024px on a side, or over ~1MP — same threshold `predict_mask` uses) still run individually through `predict_mask_tiled`, which does its own tile-by-tile work.
+- **Everything else** is grouped, sorted by crop size, and chunked into groups of up to `batch_size` (config key, default 16) — each chunk runs through `predict_masks_batch` as a single forward pass, instead of one model call per box. Sorting by size before chunking keeps crops of similar dimensions together, so the batch-level padding `predict_masks_batch` adds doesn't waste compute pairing a tiny box with a near-tile-sized one.
 
-Returns a `uint8` mask with values `0` or `1`.
+Each box's resulting mask is composited into the full-image mask with logical OR. Returns a `uint8` mask with values `0` or `1`.
 
 ---
 
@@ -136,6 +140,9 @@ Validates that config has all required keys and basic value constraints.
 - `pad_divisor` and `tile_size` are `> 0`
 - `overlap` is `>= 0`
 
+**Optional keys:**
+- `batch_size` (int, default 16) — max number of non-tiled crops grouped into one forward pass by `composite_bbox_masks`/`predict_masks_batch`. Not validated here; unset falls back to `segmentor.DEFAULT_INFERENCE_BATCH_SIZE`.
+
 ---
 
 ### Function: `load_config(config_path: Path) -> dict`
@@ -180,8 +187,8 @@ High-level interface for detection-to-segmentation processing.
 
 Each stage is wrapped in its own `try/except`, so failure type maps to a stable stage error code.
 
-**Method: `process_batch(self, image_pairs, output_dir, fail_stop=True, max_workers=0) -> list[SegmentationResult]`**
-Processes image batch either in parrallel or sequentially
+**Method: `process_batch(self, image_pairs, output_dir, fail_stop=True) -> list[SegmentationResult]`**
+Processes the image batch sequentially in one process — each image's own detection boxes are already batched into a handful of model forward passes internally (see `composite_bbox_masks`), so there's no separate multi-worker path. An earlier `ProcessPoolExecutor`-based worker-pool mode was removed: on a single-GPU job it added no real parallelism (N processes sharing one GPU) and crashed under CUDA, since `torch.cuda` cannot survive `fork()` (Python multiprocessing's default start method on Linux).
 
 ---
 
@@ -197,7 +204,6 @@ Command-line entry point for the `det_to_seg` stage. Outputs `run_report.json` a
 | `--j` | Path | Yes | — | Directory containing original JPG images |
 | `--c` | Path | Yes | — | Path to segmentation YAML config file |
 | `--o` | Path | Yes | — | Output directory |
-| `--t` | int | No | 0 | Number of worker processes (`0/1` = sequential) |
 | `--fs` | flag | No | false | Stop on first failure |
 | `--batch-id` | str | No | auto | Batch ID. Auto-inferred from input paths if omitted |
 | `--device` | str | No | cpu | Torch device (`cpu`, `cuda`, `cuda:0`, etc.) |
@@ -250,6 +256,7 @@ pad_divisor: 32
 tile_size: 1024
 overlap: 128
 tiling: true
+batch_size: 16  # optional, see validate_config's "Optional keys" above
 ```
 
 
@@ -263,7 +270,6 @@ python3 -m stages.det_to_seg.cli \
   --j /path/to/jpgs \
   --c stages/det_to_seg/configs/default.yaml \
   --o /path/to/output \
-  --t 0 \
   --batch-id TX_2025-08-18 \
   --device cpu
 ```

@@ -181,6 +181,10 @@ def predict_mask_tiled(
 
 
 
+def _should_tile(h: int, w: int, use_tiling: bool, tile_trigger_side: int, tile_trigger_area: int) -> bool:
+    return use_tiling and (max(h, w) > tile_trigger_side or (h * w) > tile_trigger_area)
+
+
 def predict_mask(
     model: torch.nn.Module,
     crop_rgb: np.ndarray,
@@ -195,9 +199,8 @@ def predict_mask(
     tile_trigger_area: int = 1024 * 1024,
 ) -> np.ndarray:
     h, w = crop_rgb.shape[:2]
-    should_tile = use_tiling and (max(h, w) > tile_trigger_side or (h * w) > tile_trigger_area)
 
-    if should_tile:
+    if _should_tile(h, w, use_tiling, tile_trigger_side, tile_trigger_area):
         return predict_mask_tiled(
             model=model,
             crop_rgb=crop_rgb,
@@ -217,9 +220,80 @@ def predict_mask(
     )
 
 
+def predict_masks_batch(
+    model: torch.nn.Module,
+    crops_rgb: list[np.ndarray],
+    thr: float,
+    divisor: Optional[int],
+    device: str,
+) -> list[np.ndarray]:
+    """
+    Run one forward pass for multiple same-pass (non-tiled) crops instead of
+    one pass per crop — the dominant cost for images with many small
+    detection boxes.
+
+    Crops may differ in size — each is first padded to `divisor` individually
+    (same as predict_mask_single), then all are further zero-padded up to the
+    batch's max padded height/width so they can be stacked into one tensor.
+    Callers should group similarly sized crops together (see
+    composite_bbox_masks) to keep that extra padding small.
+    """
+    if not crops_rgb:
+        return []
+
+    padded_tensors: list[torch.Tensor] = []
+    pads_list = []
+    orig_shapes = []
+    for crop in crops_rgb:
+        t = _to_tensor01(crop)
+        tpad, pads = _pad_to_divisor(t, divisor)
+        padded_tensors.append(tpad)
+        pads_list.append(pads)
+        orig_shapes.append(crop.shape[:2])
+
+    max_h = max(t.shape[2] for t in padded_tensors)
+    max_w = max(t.shape[3] for t in padded_tensors)
+
+    stack_ready = []
+    for t in padded_tensors:
+        _, _, ph, pw = t.shape
+        extra_h, extra_w = max_h - ph, max_w - pw
+        if extra_h or extra_w:
+            t = torch.nn.functional.pad(t, (0, extra_w, 0, extra_h), mode="constant", value=0)
+        stack_ready.append(t)
+    batch = torch.cat(stack_ready, dim=0)
+
+    with torch.inference_mode():
+        if str(device).startswith("cuda"):
+            with torch.amp.autocast(device_type="cuda"):
+                prob = torch.sigmoid(model(batch.to(device)))
+        else:
+            prob = torch.sigmoid(model(batch.to(device)))
+
+    masks = []
+    for i in range(len(crops_rgb)):
+        # Slice off the batch-level max-size padding first, using this
+        # crop's own divisor-padded size (padded_tensors[i]), then unpad the
+        # divisor padding itself with this crop's own `pads`.
+        _, _, ph, pw = padded_tensors[i].shape
+        mask = (prob[i, 0, :ph, :pw] > thr).float().cpu().numpy().astype(np.uint8)
+        if divisor:
+            mask = _unpad(mask, pads_list[i])
+        ch, cw = orig_shapes[i]
+        if mask.shape != (ch, cw):
+            mask = cv2.resize(mask, (cw, ch), interpolation=cv2.INTER_NEAREST)
+        masks.append(mask)
+    return masks
+
+
 # ---------------------------------------------------------------------------
 # BBox compositing
 # ---------------------------------------------------------------------------
+
+_TILE_TRIGGER_SIDE = 1024
+_TILE_TRIGGER_AREA = 1024 * 1024
+DEFAULT_INFERENCE_BATCH_SIZE = 16
+
 
 def composite_bbox_masks(
     model: torch.nn.Module,
@@ -228,8 +302,28 @@ def composite_bbox_masks(
     config: dict,
     device: str,
 ) -> np.ndarray:
+    """
+    Build a full-image mask from per-box crops.
+
+    Boxes small enough for a single forward pass (see _should_tile) are
+    grouped and run through the model together via predict_masks_batch — one
+    (or a few, if there are many boxes; see `batch_size`) forward passes per
+    image instead of one per box. Boxes that need internal tiling (crops
+    larger than _TILE_TRIGGER_SIDE/_TILE_TRIGGER_AREA) still run individually
+    through predict_mask_tiled, which already does its own tile-by-tile work.
+    """
     h, w = image_rgb.shape[:2]
     full_mask = np.zeros((h, w), dtype=np.uint8)
+
+    thr = float(config["threshold"])
+    divisor = int(config["pad_divisor"]) if int(config["pad_divisor"]) > 0 else None
+    use_tiling = bool(config["tiling"])
+    tile_size = int(config["tile_size"])
+    overlap = int(config["overlap"])
+    batch_size = int(config.get("batch_size", DEFAULT_INFERENCE_BATCH_SIZE))
+
+    batchable_boxes: list[tuple[int, int, int, int]] = []
+    batchable_crops: list[np.ndarray] = []
 
     for x1, y1, x2, y2 in boxes_xyxy:
         x1 = max(0, min(x1, w - 1))
@@ -241,17 +335,29 @@ def composite_bbox_masks(
         if crop_rgb.size == 0:
             continue
 
-        mask_crop = predict_mask(
-            model,
-            crop_rgb,
-            thr=float(config["threshold"]),
-            divisor=int(config["pad_divisor"]) if int(config["pad_divisor"]) > 0 else None,
-            device=device,
-            use_tiling=bool(config["tiling"]),
-            tile_size=int(config["tile_size"]),
-            overlap=int(config["overlap"]),
-        )
-        full_mask[y1:y2, x1:x2] |= mask_crop
+        ch, cw = crop_rgb.shape[:2]
+        if _should_tile(ch, cw, use_tiling, _TILE_TRIGGER_SIDE, _TILE_TRIGGER_AREA):
+            mask_crop = predict_mask_tiled(
+                model, crop_rgb, thr=thr, divisor=divisor, device=device,
+                tile_size=tile_size, overlap=overlap,
+            )
+            full_mask[y1:y2, x1:x2] |= mask_crop
+        else:
+            batchable_boxes.append((x1, y1, x2, y2))
+            batchable_crops.append(crop_rgb)
+
+    # Group similarly sized crops together before chunking, so padding every
+    # crop in a chunk up to the chunk's max size (see predict_masks_batch)
+    # doesn't waste compute pairing a tiny box with a near-tile-sized one.
+    order = sorted(range(len(batchable_crops)), key=lambda i: batchable_crops[i].size)
+
+    for start in range(0, len(order), batch_size):
+        chunk_idx = order[start : start + batch_size]
+        chunk_crops = [batchable_crops[i] for i in chunk_idx]
+        chunk_masks = predict_masks_batch(model, chunk_crops, thr=thr, divisor=divisor, device=device)
+        for i, mask_crop in zip(chunk_idx, chunk_masks):
+            x1, y1, x2, y2 = batchable_boxes[i]
+            full_mask[y1:y2, x1:x2] |= mask_crop
 
     return full_mask
 
