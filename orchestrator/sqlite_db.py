@@ -23,6 +23,8 @@ get_result_syncs(conn, ...)  → list[dict]
 reopen_result_sync(conn, run_id)  → dict
 ingest_run_report(conn, run_report_path)  → dict
 get_batches_needing_raw_to_jpg(conn, *, site=None, limit=200)  → list[dict]
+resolve_season_for_batch(conn, *, site, batch_date)  → dict | None
+resolve_file_path_with_priority(conn, rel_path, *, priority=...)  → str | None
 
 Lease semantics
 ---------------
@@ -113,9 +115,13 @@ def get_batches_needing_jpg_to_det(
             (site, *filter_params, limit),
         ).fetchall()
     else:
+        # v_batches_needing_jpg_to_det now has one row per (batch_id, site,
+        # storage_domain, namespace) location holding the batch's JPGs;
+        # jpg_count/det_count are identical across those rows, so DISTINCT
+        # on this projection collapses back to one row per batch.
         rows = conn.execute(
             f"""
-            SELECT v.batch_id, v.batch_date, v.jpg_count, v.det_count
+            SELECT DISTINCT v.batch_id, v.batch_date, v.jpg_count, v.det_count
             FROM   v_batches_needing_jpg_to_det v
             WHERE  1=1 {batch_filter_sql}
             ORDER  BY v.batch_date ASC, v.batch_id ASC
@@ -124,6 +130,110 @@ def get_batches_needing_jpg_to_det(
             (*filter_params, limit),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_batches_needing_det_to_world(
+    conn: sqlite3.Connection,
+    *,
+    site: Optional[str] = None,
+    limit: int = 200,
+    batch_ids: Optional[Sequence[str]] = None,
+) -> List[Dict]:
+    """
+    Return rows from ``v_batches_needing_det_to_world``.
+
+    The view already requires that a batch has current detection files,
+    developed-image files, and pixel-to-world NPZ grids (at any site) and no
+    current georeferenced output. Passing ``site`` additionally restricts to
+    batches whose detection files are currently indexed at that site (mirrors
+    ``get_batches_needing_jpg_to_det``'s use of ``site`` for its images join).
+    """
+    batch_filter_sql = ""
+    filter_params: List = []
+    if batch_ids:
+        placeholders = ",".join("?" for _ in batch_ids)
+        batch_filter_sql = f"AND v.batch_id IN ({placeholders})"
+        filter_params = list(batch_ids)
+
+    if site:
+        rows = conn.execute(
+            f"""
+            SELECT
+                v.batch_id, v.batch_date, v.img_count, v.det_count,
+                v.grid_count, v.georef_count,
+                g.site, g.storage_domain, g.storage_root
+            FROM v_batches_needing_det_to_world v
+            JOIN globus_file_index g
+              ON  g.batch_id   = v.batch_id
+             AND  g.data_state = 'semifield-developed-images'
+             AND  g.entry_type = 'file'
+             AND  g.is_current = 1
+             AND  g.parent_dir IN ('detections', 'plant-detections', 'metadata')
+             AND  g.site       = ?
+            WHERE 1=1 {batch_filter_sql}
+            GROUP BY v.batch_id
+            ORDER BY v.batch_date ASC, v.batch_id ASC
+            LIMIT ?
+            """,
+            (site, *filter_params, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"""
+            SELECT v.batch_id, v.batch_date, v.img_count, v.det_count,
+                   v.grid_count, v.georef_count
+            FROM   v_batches_needing_det_to_world v
+            WHERE  1=1 {batch_filter_sql}
+            ORDER  BY v.batch_date ASC, v.batch_id ASC
+            LIMIT  ?
+            """,
+            (*filter_params, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_det_to_world_staged_batch_ids(
+    conn: sqlite3.Connection,
+    *,
+    expected_dst_paths: Dict[str, Sequence[str]],
+) -> set[str]:
+    """
+    Return the subset of batch_ids (keys of ``expected_dst_paths``) for which
+    every expected ``staged_inputs`` dst_path has ``status='completed'``.
+
+    det_to_world needs independent pieces of data (images + detections +
+    grids), each with its own dst_path (see
+    ``orchestrator.input_staging_planner.det_to_world_expected_dst_paths``).
+    Unlike ``get_completed_input_staging_batch_ids`` (which only checks "any
+    row completed" — correct for raw_to_jpg/jpg_to_det's single fixed
+    route), this requires ALL of a batch's expected pieces to show
+    completed. Pieces already resident at the destination when planned are
+    recorded as immediately-completed rows too (see
+    ``StagingRequest.already_satisfied``), so this reflects readiness the
+    moment ``poll_stage_inputs.py``/``stage_inputs.py`` mark them —
+    no fresh ``globus_file_index`` inventory scan required.
+    """
+    ready: set[str] = set()
+    for batch_id, dst_paths in expected_dst_paths.items():
+        dst_paths = list(dst_paths)
+        if not dst_paths:
+            continue
+        placeholders = ",".join("?" for _ in dst_paths)
+        row = conn.execute(
+            f"""
+            SELECT COUNT(DISTINCT dst_path) AS n
+            FROM staged_inputs
+            WHERE stage = 'det_to_world'
+              AND status = 'completed'
+              AND batch_id = ?
+              AND dst_path IN ({placeholders})
+            """,
+            (batch_id, *dst_paths),
+        ).fetchone()
+        if row and row["n"] == len(dst_paths):
+            ready.add(batch_id)
+    return ready
+
 
 class _TempConnection:
     """
@@ -1215,6 +1325,89 @@ def ingest_run_report(conn: sqlite3.Connection, run_report_path: str | Path) -> 
         "stage":    report["stage"],
         "status":   status,
     }
+
+
+# ---------------------------------------------------------------------------
+# Season / reference-data resolution
+# ---------------------------------------------------------------------------
+
+# Priority order for resolving a batch-independent reference file (e.g. a
+# species-zone shapefile) to an absolute path: both tiers are direct
+# filesystem reads on CERES (no Globus transfer needed, unlike JUNO LTS), so
+# this is a pure globus_file_index lookup — see resolve_file_path_with_priority.
+DEFAULT_FILE_SOURCE_PRIORITY: tuple[tuple[str, str], ...] = (
+    ("CERES", "90daydata"),
+    ("CERES", "project"),
+)
+
+
+def resolve_season_for_batch(
+    conn: sqlite3.Connection,
+    *,
+    site: str,
+    batch_date: str,
+) -> Optional[Dict]:
+    """
+    Resolve the ``season_date_ranges`` row covering ``batch_date`` for ``site``.
+
+    ``batch_date`` and the table's start_date/end_date are ISO-8601
+    'YYYY-MM-DD' strings, which compare correctly as TEXT. If a site's
+    configured windows overlap (shouldn't normally happen, but
+    configs/date_ranges.yaml is hand-maintained), the window with the latest
+    start_date wins.
+
+    Returns
+    -------
+    dict with season_name/start_date/end_date/bbot_version/crs/
+    pipeline_season/gh_reviewer, or None if no configured window in
+    configs/date_ranges.yaml covers this (site, batch_date) — the caller
+    should treat that as a config gap, not silently default anything.
+    """
+    row = conn.execute(
+        """
+        SELECT season_name, start_date, end_date, bbot_version, crs,
+               pipeline_season, gh_reviewer
+        FROM season_date_ranges
+        WHERE site = ?
+          AND ? BETWEEN start_date AND end_date
+        ORDER BY start_date DESC
+        LIMIT 1
+        """,
+        (site, batch_date),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def resolve_file_path_with_priority(
+    conn: sqlite3.Connection,
+    rel_path: str,
+    *,
+    priority: Sequence[tuple[str, str]] = DEFAULT_FILE_SOURCE_PRIORITY,
+) -> Optional[str]:
+    """
+    Resolve ``rel_path`` to an absolute path by checking ``globus_file_index``
+    for a current file row at each ``(site, namespace)`` in ``priority`` order.
+
+    Returns the ``full_path`` of the first match, or None if ``rel_path``
+    isn't currently indexed at any of the given locations.
+    """
+    for site, namespace in priority:
+        row = conn.execute(
+            """
+            SELECT full_path
+            FROM globus_file_index
+            WHERE rel_path   = ?
+              AND site       = ?
+              AND namespace  = ?
+              AND entry_type = 'file'
+              AND is_current = 1
+            LIMIT 1
+            """,
+            (rel_path, site, namespace),
+        ).fetchone()
+        if row:
+            return row["full_path"]
+    return None
 
 
 # ---------------------------------------------------------------------------

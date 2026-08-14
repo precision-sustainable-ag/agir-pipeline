@@ -70,15 +70,37 @@ from pathlib import Path
 from typing import List, NamedTuple, Optional
 
 from orchestrator.config import load_stage_config
+from orchestrator.input_staging_planner import DEFAULT_IMAGE_SAMPLE_SIZE
 from orchestrator.sqlite_db import (
+    DEFAULT_FILE_SOURCE_PRIORITY,
     open_db,
     claim_stage_lease,
+    resolve_file_path_with_priority,
+    resolve_season_for_batch,
     update_lease_slurm_job_id,
 )
 
 logger = logging.getLogger(__name__)
 
 ORCHESTRATOR_ID = f"orchestrator.{os.getpid()}"
+
+# Naming convention for a season's species-zone shapefile, relative to a
+# storage_root — e.g. semifield-utils/autosfm/ShapeFiles/cover_crops_2025_2026/
+# cover_crops_2025_2026.shp. Matches the layout ASFM already writes; not
+# every season has one (monoculture-only seasons don't), so callers must
+# treat resolve_file_path_with_priority returning None as "no shapefile
+# configured for this season", not necessarily an error on its own.
+_SHAPEFILE_REL_PATH_TEMPLATE = "semifield-utils/autosfm/ShapeFiles/{season}/{season}.shp"
+
+
+def _shapefile_rel_path(pipeline_season: str) -> str:
+    return _SHAPEFILE_REL_PATH_TEMPLATE.format(season=pipeline_season)
+
+
+def _split_batch_id(batch_id: str) -> tuple[str, str]:
+    """Split 'XX_YYYY-MM-DD' into ('XX', 'YYYY-MM-DD')."""
+    site, _, date = batch_id.partition("_")
+    return site, date
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +109,7 @@ ORCHESTRATOR_ID = f"orchestrator.{os.getpid()}"
 
 class JobResult(NamedTuple):
     batch_id: str
-    status: str       # submitted | lease_conflict | sbatch_failed | dry_run
+    status: str       # submitted | lease_conflict | sbatch_failed | dry_run | config_error
     slurm_job_id: Optional[str]
     lease_id: Optional[str]
     error: Optional[str]
@@ -171,6 +193,9 @@ def _render_slurm_script(
     cpus: int,
     mem: str,
     time_limit: str,
+    image_sample_size: int,
+    bbot_version: str = "",
+    shapefile_path: str = "",
     template_name: str = DEFAULT_JOB_TEMPLATE,
 ) -> str:
     context = {
@@ -203,6 +228,9 @@ def _render_slurm_script(
         "cpus": cpus,
         "mem": mem,
         "time_limit": time_limit,
+        "image_sample_size": image_sample_size,
+        "bbot_version": bbot_version,
+        "shapefile_path": shapefile_path,
     }
     return _render_template(template_name, context)
 
@@ -261,12 +289,29 @@ def submit_jobs(
     transfer       = cfg["transfer"]
     src_endpoint   = transfer["juno_endpoint"]
     dst_endpoint   = transfer.get("atlas_endpoint") or transfer["ceres_endpoint"]
+    # Priority order for resolving a batch-independent reference file (e.g. a
+    # species-zone shapefile) to an absolute path via resolve_file_path_with_
+    # priority() — a deployment-topology fact (which storage roots exist and
+    # in what order to check them), so it belongs here alongside the
+    # endpoints/routes, not hardcoded in orchestrator/sqlite_db.py. Falls
+    # back to that module's DEFAULT_FILE_SOURCE_PRIORITY for configs written
+    # before this was configurable.
+    file_source_priority = tuple(
+        tuple(pair) for pair in transfer.get("file_source_priority", DEFAULT_FILE_SOURCE_PRIORITY)
+    )
     route          = transfer["routes"][stage_name]
     src_root       = route["source_root_juno"]
     # input_subdir: optional subdirectory appended to <input_staging_root>/<batch_id>
     # e.g. jpg_to_det reads from .../semifield-developed-images/<batch_id>/images/
     #      raw_to_jpg reads from .../semifield-upload/<batch_id>/  (no subdir)
     input_subdir   = route.get("input_subdir", "")
+    # Only meaningful for stages like det_to_world whose input_staging_dir is
+    # a batch root containing a nested images/ subdir that may hold every
+    # image in the batch (e.g. already resident at destination from an
+    # earlier stage) rather than just the sample staged_inputs normally
+    # fetches — see slurm_job.sh.j2 Step 2, which caps what's copied to
+    # TMPDIR at this count either way.
+    image_sample_size = int(route.get("image_sample_size", DEFAULT_IMAGE_SAMPLE_SIZE))
 
     # ── Atlas-to-Ceres result synchronization ────────────────────────────────
     result_sync = cfg.get("result_sync") or {}
@@ -324,10 +369,71 @@ def submit_jobs(
     script_dir.mkdir(parents=True, exist_ok=True)
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 
+    # Only resolve+require these when this specific config's cli_args
+    # actually references them. det_to_world's cli_args is one static
+    # string applied to every batch under this config file, and most real
+    # seasons are monoculture (no shapefile at all) — a config written for
+    # monoculture batches (--skip-remap --species ...) has no $SHAPEFILE_PATH
+    # in cli_args and must not be blocked by a missing shapefile. Keying off
+    # cli_args content, not stage_name, keeps that config's batches
+    # unaffected and generalizes to any future stage/config wanting these.
+    needs_bbot_version = "$BBOT_VERSION" in cli_args
+    needs_shapefile = "$SHAPEFILE_PATH" in cli_args
+
     results: List[JobResult] = []
     conn = open_db(db_path)
     try:
         for batch_id in batch_ids:
+            # Resolved from season_date_ranges + globus_file_index rather
+            # than hardcoded in the config, since both vary by which season
+            # this batch's date falls in — resolve before claiming a lease
+            # so a config gap (no season window, or shapefile not indexed
+            # on CERES) never burns a lease slot.
+            bbot_version = ""
+            shapefile_path = ""
+            if needs_bbot_version or needs_shapefile:
+                site, batch_date = _split_batch_id(batch_id)
+                season = resolve_season_for_batch(conn, site=site, batch_date=batch_date)
+                if season is None:
+                    error = (
+                        f"No season_date_ranges window covers {batch_id} "
+                        f"(site={site!r}, date={batch_date!r}) — add one to "
+                        f"configs/date_ranges.yaml."
+                    )
+                    logger.error("[%s] %s", batch_id, error)
+                    results.append(JobResult(batch_id, "config_error", None, None, error))
+                    continue
+
+                if needs_bbot_version:
+                    bbot_version = season["bbot_version"]
+
+                if needs_shapefile:
+                    pipeline_season = season.get("pipeline_season")
+                    if not pipeline_season:
+                        error = (
+                            f"season_date_ranges row for {batch_id} "
+                            f"(season_name={season['season_name']!r}) has no "
+                            f"pipeline_season set — cannot derive a shapefile path."
+                        )
+                        logger.error("[%s] %s", batch_id, error)
+                        results.append(JobResult(batch_id, "config_error", None, None, error))
+                        continue
+
+                    rel_path = _shapefile_rel_path(pipeline_season)
+                    shapefile_path = resolve_file_path_with_priority(
+                        conn, rel_path, priority=file_source_priority
+                    ) or ""
+                    if not shapefile_path:
+                        checked = ", ".join(f"{site}/{ns}" for site, ns in file_source_priority)
+                        error = (
+                            f"Shapefile {rel_path!r} for season {pipeline_season!r} "
+                            f"not found (checked {checked}) — re-run the indexer if "
+                            f"it was just placed there."
+                        )
+                        logger.error("[%s] %s", batch_id, error)
+                        results.append(JobResult(batch_id, "config_error", None, None, error))
+                        continue
+
             lease = claim_stage_lease(
                 conn,
                 batch_id=batch_id,
@@ -392,6 +498,9 @@ def submit_jobs(
                 cpus=cpus,
                 mem=mem,
                 time_limit=time_limit,
+                image_sample_size=image_sample_size,
+                bbot_version=bbot_version,
+                shapefile_path=shapefile_path,
                 template_name=template_name,
             )
 

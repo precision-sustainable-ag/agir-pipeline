@@ -13,7 +13,7 @@ The canonical schema is defined in:
 schemas/sqlite/pipeline.sql
 ```
 
-The current schema version is `4`.
+The current schema version is `10`.
 
 For the complete runtime flow, see
 [`SQLITE_ORCHESTRATOR_ARCHITECTURE.md`](SQLITE_ORCHESTRATOR_ARCHITECTURE.md).
@@ -21,14 +21,15 @@ For day-to-day commands, see [`OPERATOR_RUNBOOK.md`](OPERATOR_RUNBOOK.md).
 
 ## Schema Overview
 
-The database contains three groups of objects:
+The database contains four groups of objects:
 
 | Group | Objects | Purpose |
 | --- | --- | --- |
+| Reference | `season_date_ranges`, `season_aliases`, `species`, `species_aliases`, `species_multi_symbols`, `cultivars`, `cultivar_aliases`, `color_palette` | Canonical season windows and species/cultivar taxonomy + mask colors |
 | Inventory | `inventory_runs`, `globus_file_index` | Track storage scans and current file state |
 | Reporting | `batch_inventory_summary`, `storage_gap_summary` | Store per-scan aggregate counts |
-| Orchestration | `stage_runs`, `stage_leases`, `staged_inputs` | Track execution, concurrency, and prerequisite transfers |
-| Readiness | `v_batches_needing_raw_to_jpg`, `v_batches_needing_jpg_to_det` | Calculate batches eligible for pipeline stages |
+| Orchestration | `stage_runs`, `stage_leases`, `staged_inputs`, `result_syncs` | Track execution, concurrency, prerequisite transfers, and Atlas→Ceres result promotion |
+| Readiness | `v_batches_needing_raw_to_jpg`, `v_batches_needing_jpg_to_det`, `v_batches_needing_det_to_world` | Calculate batches eligible for pipeline stages |
 
 ## Logical Relationships
 
@@ -51,10 +52,26 @@ staged_inputs -- completed batch/stage --> compute-submission gate
 
 stage_leases -- lease_id --> generated Slurm job
 stage_runs   -- run_id   --> run_report.json
+result_syncs -- run_id   --> stage_runs.run_id (Atlas run) + Ceres promotion
+
+species
+    |
+    +--< species_aliases
+    |
+    +--< species_multi_symbols
+    |
+    +--< cultivars ---< cultivar_aliases
+
+season_date_ranges --< season_aliases
+
+color_palette -- assigned_class_id / assigned_cultivar_class_id --> species / cultivars
 ```
 
 The inventory summary tables have declared foreign keys to `inventory_runs`.
-The orchestration tables relate through `batch_id` and `stage`, but those
+The species/cultivar reference tables use declared foreign keys
+(`cultivars.parent_USDA_symbol`, the alias tables, `color_palette`'s
+`assigned_*` columns). The orchestration tables relate through `batch_id` and
+`stage` (and `result_syncs.run_id` to `stage_runs.run_id`), but those
 relationships are intentionally logical rather than foreign-key constrained.
 This allows inventory, staging, leases, and run history to be written at
 different points in the lifecycle without requiring a central batch table.
@@ -98,6 +115,199 @@ Columns using this convention have `CHECK` constraints restricting them to
 The complete stage run report is retained in `stage_runs.run_report_json` as
 serialized JSON text. Frequently queried fields are also stored in dedicated
 columns.
+
+## Reference Tables
+
+Reference tables hold static/slowly-changing lookup data: season date windows
+and the species/cultivar taxonomy used to enrich `det_to_world` output. They
+are populated by admin load scripts, not by the runtime pipeline.
+
+### `season_date_ranges`
+
+One row per `(site, season)` date window, sourced from
+`configs/date_ranges.yaml`. Resolves "what season/application was batch date
+X in for site Y" and the `bbot_version`/`crs`/`pipeline_season` used for that
+window.
+
+Primary key:
+
+```text
+(site, season_name)
+```
+
+Important columns:
+
+| Column | Meaning |
+| --- | --- |
+| `site` | `MD`, `NC`, or `TX` |
+| `season_name` | Human-readable season label, e.g. `weeds 2022` |
+| `start_date` / `end_date` | ISO-8601 date bounds of the window |
+| `bbot_version` | bbot version in effect for the window |
+| `crs` | `LOCAL` or an EPSG code |
+| `pipeline_season` | Canonical season slug used in pipeline configs, if any |
+| `gh_reviewer` | Default PR reviewer GitHub username for the season, if any |
+| `note` | Free-text note |
+| `updated_at_ts_iso` | Row update time |
+
+Write owner:
+
+```text
+scripts/admin/load_date_ranges.py
+```
+
+### `season_aliases`
+
+Alternate spellings/slugs that resolve to a canonical `pipeline_season`, from
+the `season_mappings` block in `configs/date_ranges.yaml`.
+
+Primary key:
+
+```text
+(pipeline_season, alias)
+```
+
+Write owner:
+
+```text
+scripts/admin/load_date_ranges.py
+```
+
+### `species`, `species_aliases`, `species_multi_symbols`, `cultivars`, `cultivar_aliases`, `color_palette`
+
+Canonical taxonomy and segmentation-mask color data for `det_to_world`
+enrichment. This DB is the source of truth, but stage code never opens a
+database connection to read it: `scripts/admin/load_species_reference.py`
+loads the source JSON/Python files into these tables and then calls
+`orchestrator/species_catalog.py`'s `export_catalog()` to regenerate a flat
+`species_catalog.generated.json` alongside the sources. `stages/det_to_world`
+reads that generated file, not this DB.
+
+Source files (owned outside this repo):
+
+```text
+/project/dash_agir/semifield-utils/species_information/species_info.json
+/project/dash_agir/semifield-utils/species_information/cultivars.json
+/project/dash_agir/semifield-utils/species_information/colors.py
+/project/dash_agir/semifield-utils/species_information/cultivar_colors.py
+```
+
+Column names that collide with SQL keywords in the source JSON (`class`,
+`group`, `order`, `species`) are renamed (`taxon_class`, `species_group`,
+`taxon_order`, `species_epithet`) so they don't need to be quoted.
+
+#### `species`
+
+One row per species/background/non-plant class. `class_id` doubles as the
+segmentation-mask class index; `(r, g, b)` is that class's mask color.
+
+Primary key:
+
+```text
+class_id
+```
+
+Unique constraints:
+
+```text
+species_key
+USDA_symbol   -- zone shapefile 'species' attribute join key
+```
+
+Important columns include `species_group`, `taxon_class`, `subclass`,
+`taxon_order`, `family`, `genus`, `species_epithet`, `common_name`,
+`authority`, `growth_habit`, `duration`, `collection_location`, `category`,
+`collection_timing`, `link`, `note`, `hex`, `r`, `g`, `b`, and
+`updated_at_ts_iso`.
+
+#### `species_aliases`
+
+Alternate common names/spellings for a species, from each `species_info.json`
+entry's `alias` list.
+
+Primary key:
+
+```text
+(class_id, alias)
+```
+
+`class_id` references `species (class_id)`.
+
+#### `species_multi_symbols`
+
+Component USDA symbols folded into a multi-species class (e.g. the Brassica
+complex), from `species_info.json`'s `multi_species_USDA_symbol`.
+
+Primary key:
+
+```text
+(class_id, component_usda_symbol)
+```
+
+`class_id` references `species (class_id)`.
+
+#### `cultivars`
+
+One row per registered cultivar or experimental line. `cultivar_class_id`
+doubles as the segmentation-mask class index for cultivar-season batches, the
+same role `class_id` plays for species; `(r, g, b)` is unique across species
+AND cultivars.
+
+Primary key:
+
+```text
+cultivar_class_id
+```
+
+Unique constraint:
+
+```text
+cultivar_key
+```
+
+`parent_USDA_symbol` references `species (USDA_symbol)`. `entity_type` is
+checked to be `cultivar` or `experimental_line`; `registered` is a `0`/`1`
+boolean. Other columns: `display_name`, `cultivar_name`, `line_name`,
+`collection_location`, `cultivar_category`, `link`, `note`, `hex`, `r`, `g`,
+`b`, `updated_at_ts_iso`.
+
+#### `cultivar_aliases`
+
+Alternate names for a cultivar, from each `cultivars.json` entry's `alias`
+list.
+
+Primary key:
+
+```text
+(cultivar_class_id, alias)
+```
+
+`cultivar_class_id` references `cultivars (cultivar_class_id)`.
+
+#### `color_palette`
+
+The full color pool species/cultivar `hex`/`rgb` values are drawn from
+(`colors.py` / `cultivar_colors.py`), including colors not yet assigned to
+any class (`assigned_class_id` and `assigned_cultivar_class_id` both `NULL`).
+Lets a future new species/cultivar pick an unused color while querying for
+collisions, instead of the manual set-intersection asserts `colors.py` /
+`cultivar_colors.py` used to run at import time.
+
+Primary key:
+
+```text
+(palette, seq_index)
+```
+
+`palette` is checked to be `species` or `cultivar`; `seq_index` is the
+position in the source `colors.py`/`cultivar_colors.py` list.
+`assigned_class_id` references `species (class_id)`;
+`assigned_cultivar_class_id` references `cultivars (cultivar_class_id)`.
+
+Write owner (all six species/cultivar tables):
+
+```text
+scripts/admin/load_species_reference.py
+```
 
 ## Inventory Tables
 
@@ -490,6 +700,81 @@ scripts/job/ingest_and_release.py
 orchestrator/sqlite_db.py
 ```
 
+### `result_syncs`
+
+Tracks Atlas-to-Ceres result synchronization: one row is the complete
+transfer, verification, and canonical-ingestion lifecycle for one stage run's
+output bundle. This table is authoritative on Ceres; Atlas receives a
+read-only copy in the nightly database snapshot (see
+`orchestrator/snapshot_publication.py`).
+
+Primary key:
+
+```text
+run_id   -- same run_id as the corresponding stage_runs row (the Atlas run)
+```
+
+Important columns:
+
+| Column | Meaning |
+| --- | --- |
+| `run_id` | Stage run being synced (matches `stage_runs.run_id`) |
+| `batch_id` | Batch the run processed |
+| `stage` | Stage the run executed |
+| `run_status` | Terminal status of the source stage run |
+| `promotion_succeeded` | Whether the bundle was promoted into canonical inventory on Ceres |
+| `source_site` / `destination_site` | Defaults `ATLAS` / `CERES` |
+| `src_endpoint` / `dst_endpoint` | Globus endpoints for the bundle transfer |
+| `src_path` / `dst_path` | Bundle paths; each sync transfers exactly one immutable run bundle |
+| `recursive` | Whether the transfer is recursive |
+| `globus_task_id` | Remote transfer task identifier |
+| `request_path` / `request_json` | Location and content of the persisted sync request |
+| `status` | Current lifecycle state |
+| `attempt_count` | Number of transfer attempts |
+| `error_summary` | Terminal error information |
+| `request_created_at` | When the sync request was created |
+| `registered_at` | When the row was written |
+| `transfer_started_at` / `transferred_at` / `verified_at` / `ingested_at` | Lifecycle timestamps |
+| `updated_at` | Most recent row update time |
+
+Valid statuses:
+
+```text
+requested
+transferring
+transferred
+verified
+ingested
+failed
+canceled
+```
+
+Normal successful lifecycle:
+
+```text
+requested -> transferring -> transferred -> verified -> ingested
+```
+
+A terminal `failed`/`canceled` row can be reopened via
+`reopen_terminal_result_syncs()`/`reopen_result_sync()` and retried.
+`require_result_sync_schema()` checks the Ceres database has the expected
+`result_syncs` columns before any sync work runs.
+
+Writers:
+
+```text
+orchestrator/result_sync.py
+orchestrator/result_sync_reconciliation.py
+orchestrator/snapshot_publication.py
+orchestrator/sqlite_db.py
+```
+
+Reader/CLI entry point:
+
+```text
+scripts/admin/sync_atlas_results.py
+```
+
 ## Readiness Views
 
 Readiness views calculate work directly from current `globus_file_index` rows.
@@ -524,8 +809,12 @@ The view excludes active `raw_to_jpg` leases and successful `raw_to_jpg` runs.
 
 ### `v_batches_needing_jpg_to_det`
 
-Returns batches that have current JPG inputs in an `images` directory but no
-current detection-related files.
+Returns batches that have current JPG inputs in an `images` directory —
+anywhere, any site — but no current detection-related files. `jpg_to_det`
+resolves the actual transfer source via the same destination/CERES/JUNO
+priority chain `det_to_world` uses (see
+`orchestrator/input_staging_planner.py`'s `_plan_multi_site_requests`), so
+this view isn't restricted to a fixed set of sites.
 
 Output columns:
 
@@ -540,7 +829,46 @@ Detection output is identified through the `detections`,
 `plant-detections`, and `metadata` parent directories. The view excludes active
 `jpg_to_det` leases and successful `jpg_to_det` runs.
 
+### `v_batches_needing_det_to_world`
+
+Returns batches that have current detection files, current developed-image
+files, AND current pixel-to-world NPZ grids (`semifield-asfm`,
+`pixel_world_grids` parent dir) — anywhere, any site — with no current
+georeferenced output yet.
+
+Output columns:
+
+| Column | Meaning |
+| --- | --- |
+| `batch_id` | Ready batch |
+| `batch_date` | Earliest batch date found in inventory |
+| `img_count` | Current developed-image inputs |
+| `det_count` | Current detection inputs |
+| `grid_count` | Current pixel-to-world NPZ grid inputs |
+| `georef_count` | Current georeferenced outputs; expected to be zero |
+
+Unlike the two views above, this does **not** gate on locality — it answers
+"does this batch's data exist somewhere so `det_to_world` could run", not
+"is it staged on the compute cluster". The actual submission/locality gate
+is `scripts/job/submit.py`'s `filter_det_to_world_staged_ready()`, which
+checks `staged_inputs` directly (see the `staged_inputs` table above and
+[`DET_TO_WORLD.md`](DET_TO_WORLD.md#readiness-and-staging-completion-gating))
+rather than re-querying this view's underlying inventory. The view excludes
+active `det_to_world` leases and successful `det_to_world` runs.
+
 ## Indexes
+
+### Reference indexes
+
+| Index | Columns | Supports |
+| --- | --- | --- |
+| `idx_sdr_site_dates` | `site, start_date, end_date` | `batch_date -> season` `BETWEEN` lookups |
+| `idx_sdr_pipeline_season` | `pipeline_season` | Resolve a row by canonical season |
+| `idx_sa_alias` | `alias` | Resolve a season alias to its canonical `pipeline_season` |
+| `idx_species_aliases_alias` | `alias` | Resolve a species alias to its `class_id` |
+| `idx_cultivar_aliases_alias` | `alias` | Resolve a cultivar alias to its `cultivar_class_id` |
+| `idx_cultivars_parent` | `parent_USDA_symbol` | Cultivar → parent species joins (`det_to_world` enrichment) |
+| `idx_color_palette_unassigned` | `palette, assigned_class_id, assigned_cultivar_class_id` | Find an unassigned reserve color in a palette |
 
 ### Inventory indexes
 
@@ -549,6 +877,7 @@ Detection output is identified through the `detections`,
 | `idx_gfi_batch_state_current` | `batch_id, data_state, site, is_current` | Readiness and gap queries |
 | `idx_gfi_storage_current` | `site, storage_domain, namespace, storage_root, data_state, is_current` | Storage-scope summaries |
 | `idx_gfi_ext_parent` | `data_state, file_ext, parent_dir` | File-type classification |
+| `idx_gfi_state_type_ext` | `data_state, entry_type, is_current, file_ext, parent_dir, batch_id, batch_date` | Covering index for the readiness views' `GROUP BY batch_id` CTEs |
 | `idx_gfi_run_current` | `last_seen_run_id, is_current` | Stale-row marking |
 | `idx_gfi_full_path` | `full_path` | Direct path lookup |
 | `idx_ir_scope_time` | Scope columns and descending start time | Recent scan lookup |
@@ -562,6 +891,9 @@ Detection output is identified through the `detections`,
 | `idx_sl_stage_expires` | `stage, expires_at, batch_id` | Active-lease exclusion |
 | `idx_si_batch_stage_status` | `batch_id, stage, status` | Compute input gate |
 | `idx_si_stage_status_priority` | `stage, status, priority, requested_at` | Transfer execution and polling order |
+| `idx_rs_status_updated` | `status, updated_at` | Sync polling by lifecycle state |
+| `idx_rs_batch_stage_status` | `batch_id, stage, status` | Lookup by batch/stage |
+| `idx_rs_globus_task` | `globus_task_id` | Lookup by remote transfer task |
 
 ### Reporting indexes
 
@@ -768,10 +1100,13 @@ Use the supported commands for state changes:
 | State change | Command or component |
 | --- | --- |
 | Refresh inventory | `scripts/admin/globus_index.py` |
+| Load season date ranges | `scripts/admin/load_date_ranges.py` |
+| Load species/cultivar reference tables | `scripts/admin/load_species_reference.py` |
 | Create and submit input staging | `scripts/job/stage_inputs.py` |
 | Refresh input-transfer status | `scripts/job/poll_stage_inputs.py` |
 | Claim leases and record Slurm IDs | `orchestrator/submit_jobs.py` through `scripts/job/submit.py` |
 | Ingest stage results and release leases | `scripts/job/ingest_and_release.py` |
+| Sync and promote Atlas run results to Ceres | `scripts/admin/sync_atlas_results.py` through `orchestrator/result_sync.py` |
 
 Avoid manually inserting, updating, or deleting orchestration rows during
 normal operation. The Python helpers enforce status validation, idempotency,
@@ -783,8 +1118,17 @@ can bypass.
 The schema uses:
 
 ```sql
-PRAGMA user_version = 4;
+PRAGMA user_version = 10;
 ```
+
+Recent version history (see the comment block at the end of
+`schemas/sqlite/pipeline.sql` for the authoritative log):
+
+| Version | Change |
+| --- | --- |
+| v8 | Add `v_batches_needing_det_to_world` for stage 3 (`det_to_world`) readiness |
+| v9 | Add `species`, `species_aliases`, `species_multi_symbols`, `cultivars`, `cultivar_aliases`, `color_palette` reference tables |
+| v10 | `v_batches_needing_jpg_to_det` no longer restricts JPG inputs to `site IN ('JUNO', 'CERES')` — it now resolves images via the same destination/CERES/JUNO priority chain as `det_to_world` |
 
 When changing the schema:
 
@@ -808,10 +1152,16 @@ mechanism for altering existing table columns or constraints.
 | --- | --- |
 | Canonical schema | `schemas/sqlite/pipeline.sql` |
 | Inventory writes and summary construction | `scripts/admin/globus_index.py` |
-| Connection, lease, staging, run, and readiness helpers | `orchestrator/sqlite_db.py` |
+| Season date range loading | `scripts/admin/load_date_ranges.py` |
+| Species/cultivar reference loading | `scripts/admin/load_species_reference.py` |
+| Flat species catalog export (reads the reference tables, writes `species_catalog.generated.json`) | `orchestrator/species_catalog.py` |
+| Connection, lease, staging, run, result-sync, and readiness helpers | `orchestrator/sqlite_db.py` |
 | Input-staging planning | `orchestrator/input_staging_planner.py` |
 | Input-transfer submission | `scripts/job/stage_inputs.py` |
 | Input-transfer status refresh | `scripts/job/poll_stage_inputs.py` |
 | Compute readiness and completed-input gate | `scripts/job/submit.py` |
 | Lease claim and Slurm ID update | `orchestrator/submit_jobs.py` |
 | Run ingestion and lease release | `scripts/job/ingest_and_release.py` |
+| Atlas→Ceres result-bundle sync/promotion | `orchestrator/result_sync.py`, `orchestrator/result_sync_reconciliation.py` |
+| Result-sync CLI entry point | `scripts/admin/sync_atlas_results.py` |
+| Ceres→Atlas nightly snapshot publication | `orchestrator/snapshot_publication.py` |

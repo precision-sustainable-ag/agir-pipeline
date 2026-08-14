@@ -20,12 +20,16 @@ class ArtifactValidationError(ValueError):
 
 @dataclass(frozen=True)
 class ValidatedRunBundle:
-    """Loaded run metadata and the verified artifact location."""
+    """Loaded run metadata and the verified artifact location.
+    ``items`` holds successfully-processed manifest items; failed items are
+    reported in ``skipped_items`` when ``allow_partial=True``.
+    """
 
     run_report: dict[str, Any]
     manifest: dict[str, Any]
     items: list[dict[str, Any]]
     artifacts_root: Path
+    skipped_items: tuple[dict[str, Any], ...] = ()
 
 
 _RUN_STATUS_MAP = {
@@ -112,6 +116,7 @@ def validate_promotable_run_bundle(
     run_dir: Path,
     *,
     artifacts_root: Path | None = None,
+    allow_partial: bool = False,
 ) -> ValidatedRunBundle:
     """
     Load and validate a successful, manifest-backed pipeline run.
@@ -119,6 +124,10 @@ def validate_promotable_run_bundle(
     ``artifacts_root`` overrides the location recorded in the manifest. This
     allows the same validation to be applied after artifacts are copied to a
     different storage endpoint.
+
+    ``allow_partial`` accepts runs with ``exit_code == 1`` and failed items,
+    promoting only successful ones. Per-item artifacts require all items to
+    succeed; batch-level artifacts can promote with some items missing.
     """
     run_report_path = run_dir / "run_report.json"
     if not run_report_path.exists():
@@ -126,9 +135,10 @@ def validate_promotable_run_bundle(
 
     run_report = json.loads(run_report_path.read_text())
     exit_code = run_report.get("exit_code")
-    if exit_code != 0:
+    ok_exit_codes = {0, 1} if allow_partial else {0}
+    if exit_code not in ok_exit_codes:
         raise ArtifactValidationError(
-            f"run_report exit_code={exit_code} (need 0)",
+            f"run_report exit_code={exit_code} (need {sorted(ok_exit_codes)})",
             outcome="skip",
         )
 
@@ -142,7 +152,9 @@ def validate_promotable_run_bundle(
         raise ArtifactValidationError("manifest has no items")
 
     failed_items = [item for item in items if item.get("status") != "ok"]
-    if failed_items:
+    ok_items = [item for item in items if item.get("status") == "ok"]
+
+    if failed_items and not allow_partial:
         details = [
             f"{len(failed_items)}/{len(items)} items failed — 100% success required"
         ]
@@ -153,13 +165,16 @@ def validate_promotable_run_bundle(
             )
         raise ArtifactValidationError("\n".join(details), outcome="skip")
 
+    if not ok_items:
+        raise ArtifactValidationError("no successful items to promote", outcome="skip")
+
     resolved_artifacts_root = (
         Path(artifacts_root)
         if artifacts_root is not None
         else Path(manifest.get("artifacts_root", run_dir / "artifacts"))
     )
 
-    for item in items:
+    for item in ok_items:
         image_id = item.get("image_id", "<unknown>")
         artifacts = item.get("artifacts") or {}
         checksums = item.get("checksum") or {}
@@ -194,8 +209,9 @@ def validate_promotable_run_bundle(
     return ValidatedRunBundle(
         run_report=run_report,
         manifest=manifest,
-        items=items,
+        items=ok_items,
         artifacts_root=resolved_artifacts_root,
+        skipped_items=tuple(failed_items),
     )
 
 

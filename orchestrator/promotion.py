@@ -10,6 +10,11 @@ from pathlib import Path
 
 from orchestrator.artifact_validation import validate_promotable_run_bundle
 
+# Stages whose artifact is a shared batch-level file (e.g. one CSV covering
+# every item) rather than a per-item file, so a run can still be promoted
+# with some failed items — see validate_promotable_run_bundle(allow_partial=).
+PARTIAL_PROMOTION_STAGES = frozenset({"det_to_world"})
+
 
 @dataclass(frozen=True)
 class PromotionResult:
@@ -17,6 +22,7 @@ class PromotionResult:
     destination: Path
     metadata_destination: Path
     promoted_paths: tuple[Path, ...]
+    skipped_items: tuple[dict, ...] = ()
 
 
 def _rewrite_run_report(report: dict, dest: Path, meta_dest: Path) -> dict:
@@ -68,11 +74,13 @@ def promote_run_bundle(
     dest: Path,
     *,
     artifacts_root: Path | None = None,
+    allow_partial: bool = False,
 ) -> PromotionResult:
-    """Validate and promote one successful run bundle."""
+    """Validate and promote one successful (or partially-successful) run bundle."""
     validated = validate_promotable_run_bundle(
         run_dir,
         artifacts_root=artifacts_root,
+        allow_partial=allow_partial,
     )
     report = validated.run_report
     manifest = validated.manifest
@@ -120,7 +128,9 @@ def promote_run_bundle(
         report.get("inputs", {}).get("inputs_manifest_path"),
         metadata_dest,
     )
-    return PromotionResult(promoted, dest, metadata_dest, tuple(promoted_paths))
+    return PromotionResult(
+        promoted, dest, metadata_dest, tuple(promoted_paths), validated.skipped_items
+    )
 
 
 def plan_promoted_paths(
@@ -128,11 +138,13 @@ def plan_promoted_paths(
     dest: Path,
     *,
     artifacts_root: Path | None = None,
+    allow_partial: bool = False,
 ) -> tuple[Path, ...]:
     """Return artifact paths a promotion would create without writing them."""
     validated = validate_promotable_run_bundle(
         run_dir,
         artifacts_root=artifacts_root,
+        allow_partial=allow_partial,
     )
     paths = [
         dest / Path(artifact_rel).name

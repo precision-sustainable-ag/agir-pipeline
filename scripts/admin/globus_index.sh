@@ -49,6 +49,7 @@ source /project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/a
 # ---- Paths ----
 REPO_DIR="/project/dash_agir/matthew.kutugata/repos/agir-pipeline"
 PYTHON_SCRIPT="${REPO_DIR}/scripts/admin/globus_index.py"
+SPECIES_REFERENCE_SCRIPT="${REPO_DIR}/scripts/admin/load_species_reference.py"
 ENDPOINT_CONFIG_YAML="${REPO_DIR}/configs/globus_endpoint_config.example.yaml"
 SQLITE_DB="/project/dash_agir/globus_index/globus_file_index.sqlite3"
 
@@ -107,6 +108,29 @@ echo "========================================"
 echo "SQLite Globus Indexing Complete"
 echo "Timestamp: $(date)"
 echo "SQLite DB: ${SQLITE_DB}"
+echo "========================================"
+
+# species/cultivar reference data
+echo "========================================"
+echo "Species Reference Reload Started"
+echo "Timestamp: $(date)"
+echo "========================================"
+
+if [ -f "${SPECIES_REFERENCE_SCRIPT}" ]; then
+    python3 "${SPECIES_REFERENCE_SCRIPT}" --db "${SQLITE_DB}"
+
+    if command -v sqlite3 >/dev/null 2>&1; then
+        echo "[INFO] Current reference-table counts:"
+        sqlite3 -header -column "${SQLITE_DB}" \
+            "SELECT (SELECT COUNT(*) FROM species) AS species, (SELECT COUNT(*) FROM cultivars) AS cultivars, (SELECT COUNT(*) FROM color_palette) AS color_palette;"
+    fi
+else
+    echo "[WARN] Species reference script not found: ${SPECIES_REFERENCE_SCRIPT}. Skipping."
+fi
+
+echo "========================================"
+echo "Species Reference Reload Complete"
+echo "Timestamp: $(date)"
 echo "========================================"
 
 find "${LOG_DIR}" -name "*.log" -type f -mtime +30 -delete

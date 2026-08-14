@@ -57,21 +57,50 @@ def build_transfer_command(
     sync_level: Optional[str] = "mtime",
     label: Optional[str] = None,
 ) -> list[str]:
-    """Build a ``globus transfer`` command for a generic transfer request."""
-    cmd = [
-        "globus",
-        "transfer",
-        f"{request.src_endpoint}:{request.src_path}",
-        f"{request.dst_endpoint}:{request.dst_path}",
-    ]
-    if recursive:
-        cmd.append("--recursive")
+    """
+    Build a ``globus transfer`` command for a staging request.
+
+    When ``request.file_names`` is set (e.g. det_to_world's sampled images/
+    subdir), this builds a batch-mode command instead of one recursive
+    directory sync — endpoints only, reading individual src/dst path pairs
+    from stdin (see build_batch_stdin) so just the sampled files move.
+    """
+    if request.file_names:
+        cmd = [
+            "globus",
+            "transfer",
+            request.src_endpoint,
+            request.dst_endpoint,
+            "--batch",
+            "-",
+        ]
+    else:
+        cmd = [
+            "globus",
+            "transfer",
+            f"{request.src_endpoint}:{request.src_path}",
+            f"{request.dst_endpoint}:{request.dst_path}",
+        ]
+        if recursive:
+            cmd.append("--recursive")
     if sync_level:
         cmd += ["--sync-level", sync_level]
     resolved_label = label if label is not None else request.label
     if resolved_label:
         cmd += ["--label", resolved_label]
     return cmd
+
+
+def build_batch_stdin(request: StagingRequest) -> str:
+    """
+    Build the stdin payload for a batch-mode (individual-file) transfer:
+    one ``SRC_PATH DST_PATH`` pair per line, joining each sampled file name
+    onto request.src_path/dst_path.
+    """
+    src_root = request.src_path.rstrip("/")
+    dst_root = request.dst_path.rstrip("/")
+    lines = [f"{src_root}/{name} {dst_root}/{name}" for name in request.file_names or ()]
+    return "\n".join(lines) + "\n"
 
 
 def parse_globus_task_id(output: str) -> Optional[str]:
@@ -157,10 +186,14 @@ def submit_transfer(
         recursive=recursive,
         sync_level=sync_level,
     )
+    stdin_input = build_batch_stdin(request) if request.file_names else None
 
     if dry_run:
         task_id = f"dry-run-{uuid.uuid4()}"
-        return TransferSubmitResult("submitted", task_id, "[DRY-RUN] " + " ".join(command), command)
+        details = "[DRY-RUN] " + " ".join(command)
+        if stdin_input:
+            details += f" <<< {stdin_input.strip()!r}"
+        return TransferSubmitResult("submitted", task_id, details, command)
 
     try:
         proc = runner(
@@ -168,6 +201,7 @@ def submit_transfer(
             check=True,
             capture_output=True,
             text=True,
+            input=stdin_input,
         )
     except subprocess.CalledProcessError as exc:
         return TransferSubmitResult("failed", None, _combined_output(exc), command)

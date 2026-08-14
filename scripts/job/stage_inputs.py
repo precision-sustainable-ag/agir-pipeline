@@ -80,26 +80,29 @@ def process_requests(
 
     for req in requests:
         logger.info(
-            "Attempting input staging batch_id=%s stage=%s src=%s:%s dst=%s:%s dry_run=%s",
+            "Attempting input staging batch_id=%s stage=%s src=%s:%s dst=%s:%s "
+            "already_satisfied=%s dry_run=%s",
             req.batch_id,
             req.stage,
             req.src_endpoint,
             req.src_path,
             req.dst_endpoint,
             req.dst_path,
+            req.already_satisfied,
             dry_run,
         )
         if dry_run:
             logger.info(
-                "Dry-run input staging planned batch_id=%s stage=%s",
+                "Dry-run input staging planned batch_id=%s stage=%s already_satisfied=%s",
                 req.batch_id,
                 req.stage,
+                req.already_satisfied,
             )
             results.append(
                 StageInputResult(
                     batch_id=req.batch_id,
                     stage=req.stage,
-                    status="planned",
+                    status="already_satisfied" if req.already_satisfied else "planned",
                     staging_id=None,
                     globus_task_id=None,
                     message=f"{req.src_endpoint}:{req.src_path} -> {req.dst_endpoint}:{req.dst_path}",
@@ -145,6 +148,32 @@ def process_requests(
                     staging_id=staging_id,
                     globus_task_id=request_result.get("globus_task_id"),
                     message=request_result["status"],
+                )
+            )
+            continue
+
+        if req.already_satisfied:
+            logger.info(
+                "Data already resident at destination for batch_id=%s stage=%s staging_id=%s "
+                "dst_path=%s — recording as completed without a Globus transfer",
+                req.batch_id,
+                req.stage,
+                staging_id,
+                req.dst_path,
+            )
+            updated = mark_input_staging_status(
+                conn,
+                staging_id=staging_id,
+                status="completed",
+            )
+            results.append(
+                StageInputResult(
+                    batch_id=req.batch_id,
+                    stage=req.stage,
+                    status=updated["status"],
+                    staging_id=staging_id,
+                    globus_task_id=None,
+                    message="already resident at destination",
                 )
             )
             continue

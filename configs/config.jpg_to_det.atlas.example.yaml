@@ -14,7 +14,7 @@ paths:
   agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
 
   # Detection YAML config passed to jpg_to_det --c
-  stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/configs/jpg_to_det.yaml
+  stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/stages/jpg_to_det/configs/default.yaml
 
   # Detection model weights passed to jpg_to_det --m
   det_model_path: /90daydata/dash_agir/semifield-tools/models/plant_detector/With_Synthetic_Train_Data/weights/last.pt
@@ -32,9 +32,20 @@ paths:
   log_dir: /project/dash_agir/logs/jpg_to_det
 
 # ── Globus transfer settings ──────────────────────────────────────────────────
+# Used by scripts/job/stage_inputs.py to fetch a batch's images if they
+# aren't already indexed at destination_site. Resolved via the same
+# destination -> CERES -> JUNO priority chain det_to_world uses (see
+# orchestrator/input_staging_planner.py's _plan_multi_site_requests):
+#   destination_site (ATLAS) already has it -> nothing staged
+#   else CERES has it (raw_to_jpg writes JPGs there)  -> transfer CERES -> ATLAS
+#   else                                               -> fall back to JUNO LTS
+# Unlike det_to_world's images subdir (a small visualization sample), the
+# whole images/ directory is transferred here — jpg_to_det's detector reads
+# every image.
 transfer:
   juno_endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
   atlas_endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+  ceres_endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
 
   dry_run: false
   poll_interval_seconds: 30
@@ -42,7 +53,15 @@ transfer:
 
   routes:
     jpg_to_det:
-      # Source on Juno: <source_root_juno>/<batch_id>/images/
+      # destination_site drives both which cluster's presence skips staging
+      # AND which *_endpoint above is used as the Globus destination — keep
+      # in sync with slurm.partition below (GPU-A100, ATLAS).
+      destination_site: ATLAS
+
+      # Checked in this order (see _INTERMEDIATE_FALLBACK_SITES in
+      # orchestrator/input_staging_planner.py): destination (ATLAS) first
+      # (implicit), then CERES (raw_to_jpg's final_dest_root), then JUNO LTS.
+      source_root_ceres: /90daydata/dash_agir/semifield-developed-images
       source_root_juno: /LTS/project/dash_agir/semifield-developed-images
       # Subdirectory under <input_staging_root>/<batch_id>/ where JPGs live
       input_subdir: images
@@ -56,13 +75,14 @@ result_sync:
   source_endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
   destination_endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
   destination_run_root: /90daydata/dash_agir/tmp/stage_runs
+  input_subdir: images
 
 # ── Slurm job parameters ──────────────────────────────────────────────────────
 slurm:
   account: dash_agir
   partition: gpu-a100
   gres: gpu:1
-  cpus_per_task: 16
+  cpus_per_task: 8
   mem: 128G
   time: "4:00:00"
 
@@ -89,7 +109,7 @@ visualization:
     images: '"$TMPINPUT"'
     detections: '"$RUN_DIR/artifacts"'
     output: '"$VIZ_DIR"'
-    sample_size: 50
+    sample_size: 100
     max_width: 1800
 
 # ── Render template ───────────────────────────────────────────────────────────

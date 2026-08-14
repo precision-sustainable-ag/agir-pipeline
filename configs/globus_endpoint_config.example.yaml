@@ -28,7 +28,7 @@ endpoints:
     storage_root: "/rsstu/users/s/screberg/longterm_images"
     data_state: "semifield-developed-images"
 
-  - enabled: false
+  - enabled: true
     endpoint: "2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
     site: "NCSU"
     storage_domain: "screberg"
@@ -79,7 +79,7 @@ endpoints:
     storage_root: "/rsstu/users/s/screberg/longterm_images2"
     data_state: "semifield-developed-images"
 
-  - enabled: false
+  - enabled: true
     endpoint: "2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
     site: "NCSU"
     storage_domain: "screberg"
@@ -113,6 +113,22 @@ endpoints:
 
   
 
+  - enabled: true
+    endpoint: "2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
+    site: "NCSU"
+    storage_domain: "screberg"
+    namespace: "longterm_images2"
+    storage_root: "/rsstu/users/s/screberg/longterm_images2"
+    data_state: "semifield-utils"
+
+  - enabled: true
+    endpoint: "2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
+    site: "NCSU"
+    storage_domain: "screberg"
+    namespace: "longterm_images2"
+    storage_root: "/rsstu/users/s/screberg/longterm_images2"
+    data_state: "semifield-asfm"
+
   # ============================================================
   # NCSU / screberg / GROW_DATA
   # ============================================================
@@ -132,7 +148,7 @@ endpoints:
     storage_root: "/rsstu/users/s/screberg/GROW_DATA"
     data_state: "semifield-developed-images"
 
-  - enabled: false
+  - enabled: true
     endpoint: "2f7f6170-8d5c-11e9-8e6a-029d279f7e24"
     site: "NCSU"
     storage_domain: "screberg"
@@ -159,7 +175,7 @@ endpoints:
     storage_root: "/LTS/project/dash_agir"
     data_state: "semifield-developed-images"
 
-  - enabled: false
+  - enabled: true
     endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
     site: "JUNO"
     storage_domain: "dash_agir"
@@ -191,10 +207,26 @@ endpoints:
     storage_root: "/LTS/project/dash_agir"
     data_state: "semifield-asfm"
 
+  - enabled: true
+    endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
+    site: "JUNO"
+    storage_domain: "dash_agir"
+    namespace: "LTS"
+    storage_root: "/LTS/project/dash_agir"
+    data_state: "semifield-utils"
+
+  - enabled: true
+    endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
+    site: "JUNO"
+    storage_domain: "dash_agir"
+    namespace: "LTS"
+    storage_root: "/LTS/project/dash_agir"
+    data_state: "semifield-asfm"
+
   # ============================================================
   # JUNO / national_plant_image_repository / LTS
   # ============================================================
-  - enabled: false
+  - enabled: true
     endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
     site: "JUNO"
     storage_domain: "national_plant_image_repository"
@@ -202,7 +234,7 @@ endpoints:
     storage_root: "/LTS/project/national_plant_image_repository"
     data_state: "semifield-upload"
 
-  - enabled: false
+  - enabled: true
     endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
     site: "JUNO"
     storage_domain: "national_plant_image_repository"
@@ -210,7 +242,7 @@ endpoints:
     storage_root: "/LTS/project/national_plant_image_repository"
     data_state: "semifield-developed-images"
 
-  - enabled: false
+  - enabled: true
     endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
     site: "JUNO"
     storage_domain: "national_plant_image_repository"
@@ -218,7 +250,7 @@ endpoints:
     storage_root: "/LTS/project/national_plant_image_repository"
     data_state: "semifield-cutouts"
   
-  - enabled: true
+  - enabled: false
     endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
     site: "JUNO"
     storage_domain: "national_plant_image_repository"
@@ -226,7 +258,7 @@ endpoints:
     storage_root: "/LTS/project/national_plant_image_repository"
     data_state: "semifield-utils"
   
-  - enabled: true
+  - enabled: false
     endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
     site: "JUNO"
     storage_domain: "national_plant_image_repository"
@@ -255,7 +287,7 @@ endpoints:
     storage_root: "/90daydata/dash_agir"
     data_state: "semifield-developed-images"
 
-  - enabled: false
+  - enabled: true
     endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
     site: "CERES"
     storage_domain: "dash_agir"
@@ -287,6 +319,22 @@ endpoints:
     storage_root: "/90daydata/dash_agir"
     data_state: "semifield-asfm"
 
+  - enabled: true
+    endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+    site: "CERES"
+    storage_domain: "dash_agir"
+    namespace: "90daydata"
+    storage_root: "/90daydata/dash_agir"
+    data_state: "semifield-utils"
+
+  - enabled: true
+    endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+    site: "CERES"
+    storage_domain: "dash_agir"
+    namespace: "90daydata"
+    storage_root: "/90daydata/dash_agir"
+    data_state: "semifield-asfm"
+
   # ============================================================
   # CERES / dash_agir / project
   # Enabled in original wrapper
@@ -307,7 +355,7 @@ endpoints:
     storage_root: "/project/dash_agir"
     data_state: "semifield-developed-images"
 
-  - enabled: false
+  - enabled: true
     endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
     site: "CERES"
     storage_domain: "dash_agir"
@@ -342,7 +390,7 @@ endpoints:
   # ============================================================
   # CERES / national_plant_image_repository / 90daydata
   # ============================================================
-  - enabled: false
+  - enabled: true
     endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
     site: "CERES"
     storage_domain: "national_plant_image_repository"
@@ -350,7 +398,7 @@ endpoints:
     storage_root: "/90daydata/national_plant_image_repository"
     data_state: "semifield-upload"
 
-  - enabled: false
+  - enabled: true
     endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
     site: "CERES"
     storage_domain: "national_plant_image_repository"
@@ -358,7 +406,7 @@ endpoints:
     storage_root: "/90daydata/national_plant_image_repository"
     data_state: "semifield-developed-images"
 
-  - enabled: false
+  - enabled: true
     endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
     site: "CERES"
     storage_domain: "national_plant_image_repository"
@@ -369,7 +417,7 @@ endpoints:
   # ============================================================
   # CERES / national_plant_image_repository / project
   # ============================================================
-  - enabled: false
+  - enabled: true
     endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
     site: "CERES"
     storage_domain: "national_plant_image_repository"
@@ -377,7 +425,7 @@ endpoints:
     storage_root: "/project/national_plant_image_repository"
     data_state: "semifield-upload"
 
-  - enabled: false
+  - enabled: true
     endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
     site: "CERES"
     storage_domain: "national_plant_image_repository"
@@ -385,7 +433,7 @@ endpoints:
     storage_root: "/project/national_plant_image_repository"
     data_state: "semifield-developed-images"
 
-  - enabled: false
+  - enabled: true
     endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
     site: "CERES"
     storage_domain: "national_plant_image_repository"
@@ -412,7 +460,7 @@ endpoints:
     storage_root: "/90daydata/dash_agir"
     data_state: "semifield-developed-images"
 
-  - enabled: false
+  - enabled: true
     endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
     site: "ATLAS"
     storage_domain: "dash_agir"
@@ -471,7 +519,7 @@ endpoints:
     storage_root: "/project/dash_agir"
     data_state: "semifield-developed-images"
 
-  - enabled: false
+  - enabled: true
     endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
     site: "ATLAS"
     storage_domain: "dash_agir"
@@ -514,7 +562,7 @@ endpoints:
   # ============================================================
   # ATLAS / national_plant_image_repository / 90daydata
   # ============================================================
-  - enabled: false
+  - enabled: true
     endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
     site: "ATLAS"
     storage_domain: "national_plant_image_repository"
@@ -522,7 +570,7 @@ endpoints:
     storage_root: "/90daydata/national_plant_image_repository"
     data_state: "semifield-upload"
 
-  - enabled: false
+  - enabled: true
     endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
     site: "ATLAS"
     storage_domain: "national_plant_image_repository"
@@ -530,7 +578,7 @@ endpoints:
     storage_root: "/90daydata/national_plant_image_repository"
     data_state: "semifield-developed-images"
 
-  - enabled: false
+  - enabled: true
     endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
     site: "ATLAS"
     storage_domain: "national_plant_image_repository"
@@ -541,7 +589,7 @@ endpoints:
   # ============================================================
   # ATLAS / national_plant_image_repository / project
   # ============================================================
-  - enabled: false
+  - enabled: true
     endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
     site: "ATLAS"
     storage_domain: "national_plant_image_repository"
@@ -549,7 +597,7 @@ endpoints:
     storage_root: "/project/national_plant_image_repository"
     data_state: "semifield-upload"
 
-  - enabled: false
+  - enabled: true
     endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
     site: "ATLAS"
     storage_domain: "national_plant_image_repository"
@@ -557,7 +605,7 @@ endpoints:
     storage_root: "/project/national_plant_image_repository"
     data_state: "semifield-developed-images"
     
-  - enabled: false
+  - enabled: true
     endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
     site: "ATLAS"
     storage_domain: "national_plant_image_repository"
