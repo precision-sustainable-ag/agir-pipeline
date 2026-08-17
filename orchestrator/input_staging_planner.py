@@ -35,6 +35,9 @@ class StageInputSpec:
     it (destination cluster, then CERES, then JUNO) rather than a single
     fixed Juno route. When set, ``source_subdir``/``destination_subdir`` are
     unused.
+
+    ``require_all_staged_inputs`` selects the submission gate for stages
+    whose independently planned pieces must all be completed before compute.
     """
     stage_name: str
     readiness_view: str
@@ -42,6 +45,7 @@ class StageInputSpec:
     destination_subdir: str = ""
     default_priority: int = 100
     subdirs: Optional[Sequence[str]] = None
+    require_all_staged_inputs: bool = False
 
 
 @dataclass(frozen=True)
@@ -85,6 +89,7 @@ STAGE_INPUT_SPECS: Dict[str, StageInputSpec] = {
         stage_name="det_to_world",
         readiness_view="v_batches_needing_det_to_world",
         subdirs=("images", "detections"),
+        require_all_staged_inputs=True,
     ),
 }
 
@@ -530,27 +535,41 @@ def requests_as_dicts(requests: Iterable[StagingRequest]) -> List[Dict]:
     ]
 
 
-def det_to_world_expected_dst_paths(cfg: Dict, batch_id: str) -> List[str]:
+def expected_staged_input_dst_paths(cfg: Dict, stage: str, batch_id: str) -> List[str]:
     """
-    The staged_inputs dst_paths that must all be status='completed' before
-    det_to_world can run for a batch — images, detections, and grids.
+    Return the ``staged_inputs.dst_path`` values planned for one stage/batch.
 
-    Mirrors the exact path construction in _plan_multi_site_requests /
-    _plan_grid_request so the readiness gate (scripts/job/submit.py's
-    filter_det_to_world_staged_ready) always checks the same paths the
-    planner actually plans against.
+    This mirrors the path construction in ``plan_input_staging`` so a
+    submission gate can check the exact destinations the planner records.
+    ``det_to_world`` retains its separate grids destination in addition to
+    its developed-images subdirectories.
     """
+    if stage not in STAGE_INPUT_SPECS:
+        raise ValueError(f"Unsupported stage for input staging: {stage!r}")
+
+    spec = STAGE_INPUT_SPECS[stage]
     paths = cfg["paths"]
     transfer = cfg["transfer"]
-    route = transfer.get("routes", {}).get("det_to_world", {})
+    route = transfer.get("routes", {}).get(stage)
+    if route is None:
+        raise ValueError(f"No transfer route configured for stage {stage!r}")
 
     input_root = route.get("destination_root") or paths["input_staging_root"]
-    grid_root = route.get("grid_destination_root") or paths.get("grid_root")
-    if not grid_root:
-        raise ValueError("Config paths block must define grid_root for det_to_world")
+    if spec.subdirs:
+        expected = [_join_posix(input_root, batch_id, subdir) for subdir in spec.subdirs]
+    else:
+        input_subdir = route.get("input_subdir", spec.destination_subdir)
+        expected = [_join_posix(input_root, batch_id, input_subdir)]
 
-    return [
-        _join_posix(input_root, batch_id, "images"),
-        _join_posix(input_root, batch_id, "detections"),
-        _join_posix(grid_root, batch_id),
-    ]
+    if stage == "det_to_world":
+        grid_root = route.get("grid_destination_root") or paths.get("grid_root")
+        if not grid_root:
+            raise ValueError("Config paths block must define grid_root for det_to_world")
+        expected.append(_join_posix(grid_root, batch_id))
+
+    return expected
+
+
+def det_to_world_expected_dst_paths(cfg: Dict, batch_id: str) -> List[str]:
+    """Compatibility wrapper for the stage-aware expected-path helper."""
+    return expected_staged_input_dst_paths(cfg, "det_to_world", batch_id)
