@@ -29,7 +29,7 @@ The database contains four groups of objects:
 | Inventory | `inventory_runs`, `globus_file_index` | Track storage scans and current file state |
 | Reporting | `batch_inventory_summary`, `storage_gap_summary` | Store per-scan aggregate counts |
 | Orchestration | `stage_runs`, `stage_leases`, `staged_inputs`, `result_syncs` | Track execution, concurrency, prerequisite transfers, and Atlas→Ceres result promotion |
-| Readiness | `v_batches_needing_raw_to_jpg`, `v_batches_needing_jpg_to_det`, `v_batches_needing_det_to_world` | Calculate batches eligible for pipeline stages |
+| Readiness | `v_batches_needing_raw_to_jpg`, `v_batches_needing_jpg_to_det`, `v_batches_needing_det_to_world`, `v_batches_needing_det_to_seg` | Calculate batches eligible for pipeline stages |
 
 ## Logical Relationships
 
@@ -850,11 +850,34 @@ Output columns:
 Unlike the two views above, this does **not** gate on locality — it answers
 "does this batch's data exist somewhere so `det_to_world` could run", not
 "is it staged on the compute cluster". The actual submission/locality gate
-is `scripts/job/submit.py`'s `filter_det_to_world_staged_ready()`, which
-checks `staged_inputs` directly (see the `staged_inputs` table above and
+is `scripts/job/submit.py`'s metadata-selected all-inputs gate, which checks
+`staged_inputs` directly (see the `staged_inputs` table above and
 [`DET_TO_WORLD.md`](DET_TO_WORLD.md#readiness-and-staging-completion-gating))
 rather than re-querying this view's underlying inventory. The view excludes
 active `det_to_world` leases and successful `det_to_world` runs.
+
+### `v_batches_needing_det_to_seg`
+
+Returns batches that have current developed-image JPGs, current per-image
+detection TXT files, and the exact batch-level
+`<batch_id>_georeferenced.csv` produced by `det_to_world`, with no current
+segmentation PNG output yet.
+
+Output columns:
+
+| Column | Meaning |
+| --- | --- |
+| `batch_id` | Ready batch |
+| `batch_date` | Earliest batch date found in inventory |
+| `img_count` | Current developed-image inputs |
+| `det_count` | Current per-image detection TXT inputs |
+| `georef_count` | Current matching georeferenced CSV inputs |
+| `seg_count` | Current segmentation PNG outputs; expected to be zero |
+
+The view is site-agnostic. It establishes the inventory-level dependency on
+both `jpg_to_det` and `det_to_world`; the staging workflow separately resolves
+images, detections, and georeferenced data to the ATLAS destination. The view
+excludes active `det_to_seg` leases and successful `det_to_seg` runs.
 
 ## Indexes
 
@@ -1029,6 +1052,14 @@ LIMIT 20;
 SELECT *
 FROM v_batches_needing_jpg_to_det
 LIMIT 20;
+
+SELECT *
+FROM v_batches_needing_det_to_world
+LIMIT 20;
+
+SELECT *
+FROM v_batches_needing_det_to_seg
+LIMIT 20;
 ```
 
 ### Input-staging state
@@ -1118,7 +1149,7 @@ can bypass.
 The schema uses:
 
 ```sql
-PRAGMA user_version = 10;
+PRAGMA user_version = 11;
 ```
 
 Recent version history (see the comment block at the end of
@@ -1129,6 +1160,7 @@ Recent version history (see the comment block at the end of
 | v8 | Add `v_batches_needing_det_to_world` for stage 3 (`det_to_world`) readiness |
 | v9 | Add `species`, `species_aliases`, `species_multi_symbols`, `cultivars`, `cultivar_aliases`, `color_palette` reference tables |
 | v10 | `v_batches_needing_jpg_to_det` no longer restricts JPG inputs to `site IN ('JUNO', 'CERES')` — it now resolves images via the same destination/CERES/JUNO priority chain as `det_to_world` |
+| v11 | Add `v_batches_needing_det_to_seg` for batches with JPGs, detection TXT files, and `det_to_world` georeferenced output but no segmentation PNGs |
 
 When changing the schema:
 

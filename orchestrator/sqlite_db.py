@@ -23,6 +23,9 @@ get_result_syncs(conn, ...)  → list[dict]
 reopen_result_sync(conn, run_id)  → dict
 ingest_run_report(conn, run_report_path)  → dict
 get_batches_needing_raw_to_jpg(conn, *, site=None, limit=200)  → list[dict]
+get_batches_needing_jpg_to_det(conn, *, site=None, limit=200)  → list[dict]
+get_batches_needing_det_to_world(conn, *, site=None, limit=200)  → list[dict]
+get_batches_needing_det_to_seg(conn, *, site=None, limit=200)  → list[dict]
 resolve_season_for_batch(conn, *, site, batch_date)  → dict | None
 resolve_file_path_with_priority(conn, rel_path, *, priority=...)  → str | None
 
@@ -183,6 +186,66 @@ def get_batches_needing_det_to_world(
             SELECT v.batch_id, v.batch_date, v.img_count, v.det_count,
                    v.grid_count, v.georef_count
             FROM   v_batches_needing_det_to_world v
+            WHERE  1=1 {batch_filter_sql}
+            ORDER  BY v.batch_date ASC, v.batch_id ASC
+            LIMIT  ?
+            """,
+            (*filter_params, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_batches_needing_det_to_seg(
+    conn: sqlite3.Connection,
+    *,
+    site: Optional[str] = None,
+    limit: int = 200,
+    batch_ids: Optional[Sequence[str]] = None,
+) -> List[Dict]:
+    """Return rows from ``v_batches_needing_det_to_seg``.
+
+    The view requires current JPGs, per-image detection TXT files, and the
+    batch's exact ``<batch_id>_georeferenced.csv`` file, and excludes batches
+    with segmentation PNGs or completed runs. Passing ``site`` additionally
+    requires the detection TXT inputs to be indexed at that site; callers
+    using multi-site input staging should leave it unset.
+    """
+    batch_filter_sql = ""
+    filter_params: List = []
+    if batch_ids:
+        placeholders = ",".join("?" for _ in batch_ids)
+        batch_filter_sql = f"AND v.batch_id IN ({placeholders})"
+        filter_params = list(batch_ids)
+
+    if site:
+        rows = conn.execute(
+            f"""
+            SELECT
+                v.batch_id, v.batch_date, v.img_count, v.det_count,
+                v.georef_count, v.seg_count,
+                g.site, g.storage_domain, g.storage_root
+            FROM v_batches_needing_det_to_seg v
+            JOIN globus_file_index g
+              ON  g.batch_id   = v.batch_id
+             AND  g.data_state = 'semifield-developed-images'
+             AND  g.entry_type = 'file'
+             AND  g.is_current = 1
+             AND  g.file_ext   = 'txt'
+             AND  g.parent_dir IN ('detections', 'plant-detections', 'metadata')
+             AND  g.site       = ?
+            WHERE 1=1 {batch_filter_sql}
+            GROUP BY v.batch_id
+            ORDER BY v.batch_date ASC, v.batch_id ASC
+            LIMIT ?
+            """,
+            (site, *filter_params, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"""
+            SELECT v.batch_id, v.batch_date, v.img_count, v.det_count,
+                   v.georef_count, v.seg_count
+            FROM   v_batches_needing_det_to_seg v
             WHERE  1=1 {batch_filter_sql}
             ORDER  BY v.batch_date ASC, v.batch_id ASC
             LIMIT  ?
