@@ -15,6 +15,7 @@ from pathlib import PurePosixPath
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 from orchestrator.sqlite_db import (
+    get_batches_needing_det_to_seg,
     get_batches_needing_det_to_world,
     get_batches_needing_jpg_to_det,
     get_batches_needing_raw_to_jpg,
@@ -91,16 +92,25 @@ STAGE_INPUT_SPECS: Dict[str, StageInputSpec] = {
         subdirs=("images", "detections"),
         require_all_staged_inputs=True,
     ),
+    "det_to_seg": StageInputSpec(
+        stage_name="det_to_seg",
+        readiness_view="v_batches_needing_det_to_seg",
+        subdirs=("images", "detections", "georeferenced"),
+        require_all_staged_inputs=True,
+    ),
 }
 
 # data_state/parent_dir matched when checking whether a site already has a
-# given input subdir indexed (see _site_has_subdir). Shared by det_to_world
-# (images + detections) and jpg_to_det (images only) — both stages' inputs
-# live under the same semifield-developed-images convention.
+# given input subdir indexed (see _site_has_subdir). Shared by stages whose
+# inputs live under the semifield-developed-images batch convention.
 _DEVELOPED_IMAGES_DATA_STATE = "semifield-developed-images"
-_DET_TO_WORLD_PARENT_DIRS = {
+_DEVELOPED_IMAGES_PARENT_DIRS = {
     "images": "parent_dir = 'images'",
     "detections": "parent_dir IN ('detections', 'plant-detections', 'metadata')",
+    "georeferenced": (
+        "parent_dir = 'georeferenced' AND file_ext = 'csv' "
+        "AND file_name = batch_id || '_georeferenced.csv'"
+    ),
 }
 
 # ASFM pixel-to-world NPZ grids live under a separate data_state/root from
@@ -144,6 +154,11 @@ def _rows_for_stage(
         # so scoping readiness to one --site would wrongly exclude batches
         # whose data landed somewhere else.
         return get_batches_needing_det_to_world(conn, site=None, limit=limit, batch_ids=batch_ids)
+    if spec.readiness_view == "v_batches_needing_det_to_seg":
+        # det_to_seg resolves images, detections, and georeferenced output
+        # independently across destination/CERES/JUNO, so readiness must not
+        # be restricted to whichever site the operator passed on the CLI.
+        return get_batches_needing_det_to_seg(conn, site=None, limit=limit, batch_ids=batch_ids)
     raise ValueError(f"Unsupported readiness view: {spec.readiness_view!r}")
 
 
@@ -189,13 +204,22 @@ def _site_has_files(
     return row is not None
 
 
-def _site_has_subdir(conn: sqlite3.Connection, batch_id: str, subdir: str, site: str) -> bool:
-    """Check whether ``site`` currently has ``subdir`` (images|detections, used by
-    det_to_world and jpg_to_det) indexed for a batch."""
+def _site_has_subdir(
+    conn: sqlite3.Connection,
+    batch_id: str,
+    subdir: str,
+    site: str,
+    *,
+    stage: str,
+) -> bool:
+    """Check whether ``site`` has a developed-images input subdirectory."""
+    parent_dir_sql = _DEVELOPED_IMAGES_PARENT_DIRS[subdir]
+    if stage == "det_to_seg" and subdir == "detections":
+        parent_dir_sql += " AND file_ext = 'txt'"
     return _site_has_files(
         conn, batch_id, site,
         data_state=_DEVELOPED_IMAGES_DATA_STATE,
-        parent_dir_sql=_DET_TO_WORLD_PARENT_DIRS[subdir],
+        parent_dir_sql=parent_dir_sql,
     )
 
 
@@ -357,7 +381,7 @@ def _plan_multi_site_requests(
     Plan requests for a stage whose inputs may already be resident on the
     destination cluster, or may need pulling from another site before
     falling back to JUNO. Used by stages with ``StageInputSpec.subdirs`` set
-    (currently only det_to_world).
+    (jpg_to_det, det_to_world, and det_to_seg).
 
     Each subdir is resolved independently: if the destination site already
     has it, an already_satisfied request is planned (see
@@ -377,7 +401,7 @@ def _plan_multi_site_requests(
     for subdir in subdirs:
         dst_path = _join_posix(dst_root, batch_id, subdir)
 
-        if _site_has_subdir(conn, batch_id, subdir, dst_site):
+        if _site_has_subdir(conn, batch_id, subdir, dst_site, stage=stage):
             requests.append(
                 StagingRequest(
                     batch_id=batch_id,
@@ -398,7 +422,13 @@ def _plan_multi_site_requests(
             dst_site=dst_site,
             root_key_prefix="source_root",
             juno_root_key="source_root_juno",
-            site_has_data=lambda site, subdir=subdir: _site_has_subdir(conn, batch_id, subdir, site),
+            site_has_data=lambda site, subdir=subdir: _site_has_subdir(
+                conn,
+                batch_id,
+                subdir,
+                site,
+                stage=stage,
+            ),
         )
 
         file_names: Optional[Sequence[str]] = None
@@ -446,7 +476,7 @@ def plan_input_staging(
     ``transfer.routes.<stage>.input_subdir`` is optionally appended to both
     paths for single-route stages (e.g. raw_to_jpg). Use ``source_subdir``
     when the source subdirectory differs from the destination. Stages with
-    ``StageInputSpec.subdirs`` set (jpg_to_det, det_to_world) instead resolve
+    ``StageInputSpec.subdirs`` set (jpg_to_det, det_to_world, det_to_seg) instead resolve
     each subdir independently via ``_plan_multi_site_requests`` — see there
     for that config shape (``destination_site``, ``source_root_<site>``).
     """

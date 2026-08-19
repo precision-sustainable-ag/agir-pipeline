@@ -196,6 +196,7 @@ def _render_slurm_script(
     image_sample_size: int,
     bbot_version: str = "",
     shapefile_path: str = "",
+    species_catalog_path: str = "",
     template_name: str = DEFAULT_JOB_TEMPLATE,
 ) -> str:
     context = {
@@ -231,6 +232,7 @@ def _render_slurm_script(
         "image_sample_size": image_sample_size,
         "bbot_version": bbot_version,
         "shapefile_path": shapefile_path,
+        "species_catalog_path": species_catalog_path,
     }
     return _render_template(template_name, context)
 
@@ -277,6 +279,7 @@ def submit_jobs(
     agir_dir       = paths["agir_pipeline_dir"]
     stage_config   = paths["stage_config"]
     model_path     = paths.get("det_model_path", paths.get("model_path", ""))
+    species_catalog_path = str(paths.get("species_catalog", ""))
     uv_env         = paths["uv_env"]
     db_path        = paths["db"]
     input_root     = paths["input_staging_root"]
@@ -501,6 +504,7 @@ def submit_jobs(
                 image_sample_size=image_sample_size,
                 bbot_version=bbot_version,
                 shapefile_path=shapefile_path,
+                species_catalog_path=species_catalog_path,
                 template_name=template_name,
             )
 
