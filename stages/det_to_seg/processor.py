@@ -18,6 +18,7 @@ from . import (
     ERROR_INFERENCE_FAILED,
     ERROR_MODEL_LOAD_FAILED,
 )
+from .class_ids import DetectionBox
 from .segmentor import build_seg_model, composite_bbox_masks, write_mask_png
 from stages.common import resolve_path
 from stages import ITEM_FAILED, ITEM_OK
@@ -85,27 +86,31 @@ def load_config(config_path: Path) -> dict:
     return config
 
 
-def parse_yolo_detections(txt_path: Path, width: int, height: int) -> list[tuple[int, int, int, int]]:
+def parse_yolo_detections(txt_path: Path, width: int, height: int) -> list[DetectionBox]:
     """
     Parse YOLO txt lines as: cls xc yc w h conf (normalized).
 
-    Returns clamped absolute xyxy integer boxes.
+    Returns boxes with clamped absolute xyxy coordinates and the original
+    zero-based TXT row ID used by det_to_world's georeferenced CSV.
     """
     txt_path = Path(txt_path)
     if not txt_path.exists():
         raise FileNotFoundError(f"Detection txt not found: {txt_path}")
 
-    boxes: list[tuple[int, int, int, int]] = []
+    boxes: list[DetectionBox] = []
     try:
         with open(txt_path) as f:
             lines = [line.strip() for line in f if line.strip()]
     except Exception as e:
         raise RuntimeError(f"Failed reading detection txt: {txt_path}") from e
 
-    for idx, line in enumerate(lines, start=1):
+    for bounding_box_id, line in enumerate(lines):
+        row_number = bounding_box_id + 1
         parts = line.split()
         if len(parts) < 5:
-            raise ValueError(f"Malformed detection row {idx} in {txt_path.name}: '{line}'")
+            raise ValueError(
+                f"Malformed detection row {row_number} in {txt_path.name}: '{line}'"
+            )
 
         try:
             # cls and conf are accepted but not used.
@@ -117,7 +122,9 @@ def parse_yolo_detections(txt_path: Path, width: int, height: int) -> list[tuple
             if len(parts) >= 6:
                 _conf = float(parts[5])
         except Exception as e:
-            raise ValueError(f"Non-numeric detection row {idx} in {txt_path.name}: '{line}'") from e
+            raise ValueError(
+                f"Non-numeric detection row {row_number} in {txt_path.name}: '{line}'"
+            ) from e
 
         x1 = (xc - bw / 2.0) * width
         y1 = (yc - bh / 2.0) * height
@@ -132,7 +139,12 @@ def parse_yolo_detections(txt_path: Path, width: int, height: int) -> list[tuple
         if x2_i <= x1_i or y2_i <= y1_i:
             continue
 
-        boxes.append((x1_i, y1_i, x2_i, y2_i))
+        boxes.append(
+            DetectionBox(
+                bounding_box_id=bounding_box_id,
+                xyxy=(x1_i, y1_i, x2_i, y2_i),
+            )
+        )
 
     return boxes
 
@@ -200,7 +212,7 @@ def _process_image_worker(txt_path: str, jpg_path: str, output_dir: str) -> Segm
 
     # parse detections and format
     try:
-        boxes = parse_yolo_detections(txt_path, width=width, height=height)
+        detections = parse_yolo_detections(txt_path, width=width, height=height)
     except Exception as e:
         return SegmentationResult(
             image_id=image_id,
@@ -215,7 +227,7 @@ def _process_image_worker(txt_path: str, jpg_path: str, output_dir: str) -> Segm
         mask01 = composite_bbox_masks(
             model=_WORKER_MODEL,
             image_rgb=im_rgb,
-            boxes_xyxy=boxes,
+            boxes_xyxy=[detection.xyxy for detection in detections],
             config=_WORKER_CONFIG,
             device=_WORKER_DEVICE,
         )
@@ -245,7 +257,7 @@ def _process_image_worker(txt_path: str, jpg_path: str, output_dir: str) -> Segm
         image_id=image_id,
         status=ITEM_OK,
         mask_path=mask_path,
-        n_detections=len(boxes),
+        n_detections=len(detections),
     )
 
 
@@ -290,7 +302,7 @@ class Processor:
             )
 
         try:
-            boxes = parse_yolo_detections(txt_path, width=width, height=height)
+            detections = parse_yolo_detections(txt_path, width=width, height=height)
         except Exception as e:
             return SegmentationResult(
                 image_id=image_id,
@@ -304,7 +316,7 @@ class Processor:
             mask01 = composite_bbox_masks(
                 model=self.model,
                 image_rgb=im_rgb,
-                boxes_xyxy=boxes,
+                boxes_xyxy=[detection.xyxy for detection in detections],
                 config=self.config,
                 device=self.device,
             )
@@ -332,7 +344,7 @@ class Processor:
             image_id=image_id,
             status=ITEM_OK,
             mask_path=mask_path,
-            n_detections=len(boxes),
+            n_detections=len(detections),
         )
 
     def process_batch(
