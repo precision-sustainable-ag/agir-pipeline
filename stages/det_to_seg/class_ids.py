@@ -98,9 +98,10 @@ def _parse_class_id(value: Any, *, field: str, context: str) -> int:
     except ClassIdResolutionError as exc:
         raise InvalidClassIdError(str(exc)) from exc
 
-    if not 0 <= class_id <= UINT8_MAX:
+    if not 1 <= class_id <= UINT8_MAX:
         raise InvalidClassIdError(
-            f"{context}: {field} must be in uint8 range 0..{UINT8_MAX}, got {class_id}"
+            f"{context}: {field} must be in uint8 foreground range 1..{UINT8_MAX} "
+            f"because 0 is background, got {class_id}"
         )
     return class_id
 

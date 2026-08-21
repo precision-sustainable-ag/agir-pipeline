@@ -78,12 +78,21 @@ def main() -> int:
     parser.add_argument("--j", type=Path, required=True, help="Directory containing original JPG images.")
     parser.add_argument("--c", type=Path, required=True, help="Path to segmentation YAML config file.")
     parser.add_argument("--o", type=Path, required=True, help="Output directory.")
-    parser.add_argument("--t", type=int, default=0, help="Number of worker processes. Default 0 = sequential.")
+    parser.add_argument(
+        "--t",
+        type=int,
+        default=0,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--fs", action="store_true", help="Stop processing on first failure.")
     parser.add_argument("--batch-id", type=str, default=None, help="Batch ID. Auto-inferred from input path if omitted.")
     parser.add_argument("--device", type=str, default="cpu", help="Torch device (e.g. cpu, cuda:0).")
 
     args = parser.parse_args()
+
+    if args.t not in (0, 1):
+        logger.error("det_to_seg is single-process; --t must be 0 or 1")
+        return EXIT_CONFIG_ERROR
 
     # validate input/output paths
     if not args.i.exists():
@@ -195,7 +204,6 @@ def main() -> int:
                 image_pairs=image_pairs,
                 output_dir=masks_dir,
                 fail_stop=args.fs,
-                max_workers=args.t,
             )
         except Exception as e:
             logger.error("Batch processing failed: %s", e)

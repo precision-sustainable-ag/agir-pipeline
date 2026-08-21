@@ -6,3 +6,4 @@ pad_divisor: 32
 tile_size: 1024
 overlap: 128
 tiling: true
+batch_size: 16

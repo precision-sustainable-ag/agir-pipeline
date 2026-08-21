@@ -15,9 +15,9 @@
 stage:
   name: det_to_seg
   cli_module: stages.det_to_seg.cli
-  # Commit 3 keeps the existing binary-mask CLI runnable. The georeferenced
-  # CSV and $SPECIES_CATALOG_PATH are staged/exposed now, but their CLI flags
-  # are added with class-ID integration in a later commit.
+  # The processor can emit class-ID masks. The georeferenced CSV and
+  # $SPECIES_CATALOG_PATH are staged/exposed now, but their CLI flags are added
+  # with class-input integration in a later commit.
   cli_args: >-
     --i $TMPDIR/input/detections
     --j $TMPDIR/input/images
@@ -25,6 +25,8 @@ stage:
     --o $TMPDIR/output
     --batch-id $BATCH_ID
     --device cuda
+  # No worker-count argument: det_to_seg owns one GPU model and processes
+  # images sequentially, batching ordinary detection crops within each image.
   output_subdir: det_to_seg
   final_dest_suffix: segmentations
 
