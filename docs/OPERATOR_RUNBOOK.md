@@ -13,6 +13,8 @@ The supported stages are:
 
 - `raw_to_jpg`
 - `jpg_to_det`
+- `det_to_world`
+- `det_to_seg`
 
 Run commands from the repository root unless a command says otherwise.
 
@@ -40,7 +42,7 @@ Examples use the following placeholders:
 
 | Placeholder | Meaning |
 | --- | --- |
-| `<stage>` | `raw_to_jpg` or `jpg_to_det` |
+| `<stage>` | `raw_to_jpg`, `jpg_to_det`, `det_to_world`, or `det_to_seg` |
 | `<stage-config.yaml>` | Cluster-specific stage configuration |
 | `<result-sync-config.yaml>` | Ceres result-sync configuration |
 | `<endpoint-config.yaml>` | Inventory scanner endpoint configuration |
@@ -114,6 +116,58 @@ Start with a small limit when validating a new configuration or environment:
 Increase the limit only after the dry-run output, transfer paths, rendered job
 script, and final destinations have been checked.
 
+## `det_to_seg` Operational Requirements
+
+`det_to_seg` runs on Atlas after both detection and georeferencing data are
+available. Use a cluster-local configuration based on
+`configs/config.det_to_seg.atlas.example.yaml` and confirm that the following
+three batch inputs can be staged beneath the same batch root:
+
+```text
+<batch-id>/images/
+<batch-id>/detections/
+<batch-id>/georeferenced/<batch-id>_georeferenced.csv
+```
+
+The stage also requires two shared files that are not interchangeable:
+
+- `paths.stage_config` is the segmentation model YAML. Its `weights` setting
+  identifies the model checkpoint.
+- `paths.species_catalog` is `species_catalog.generated.json`, used to map the
+  georeferenced CSV's USDA species symbols to numeric mask class IDs.
+
+The rendered command must pass both class-assignment inputs explicitly:
+
+```bash
+--georeferenced-csv "$TMPDIR/input/georeferenced/${BATCH_ID}_georeferenced.csv" \
+--species-catalog "$SPECIES_CATALOG_PATH"
+```
+
+Class-assignment inputs are validated before the GPU model is loaded. A
+missing or malformed CSV/catalog, an unknown referenced species, conflicting
+duplicate keys, or a class ID outside the `uint8` range ends the stage with
+exit code `3`. The failed run still writes diagnostic `run_report.json` and
+`manifest.json` files.
+
+Each output is a single-channel `uint8` PNG named `<image-id>.png`. Pixel value
+`0` is background; foreground pixels contain the detection's resolved species
+or cultivar class ID. A detection without a matching georeferenced row uses
+class `27`, the generic `PLANT` fallback. The total number of fallback
+detections is recorded as `fallback_detection_count` in `run_report.json`.
+
+Confirm the Atlas job requests the supported single-GPU shape:
+
+```text
+partition: gpu-a100
+gres: gpu:1
+cpus_per_task: 16
+mem: 128G
+time: 2:00:00
+```
+
+Do not add a worker-count argument. One process owns the GPU model, processes
+images sequentially, and batches compatible crops within each image.
+
 ## One-Time Database Setup
 
 Apply the schema when creating a database or updating its schema and readiness
@@ -129,7 +183,7 @@ Verify the installed schema version:
 sqlite3 <database.sqlite3> 'PRAGMA user_version;'
 ```
 
-The current schema declares version `7`.
+The current schema declares version `11`.
 
 Schema application changes database objects. Coordinate it with other
 operators and do not run it during active inventory, staging, polling, or
@@ -198,6 +252,11 @@ Review every planned request for:
 - the correct source endpoint and path;
 - the correct destination endpoint and path; and
 - the expected stage.
+
+For `det_to_seg`, the preview must contain separate `images`, `detections`, and
+`georeferenced` destinations. Submission remains gated until all three exact
+destination paths have completed `staged_inputs` rows. Images are staged in
+full; the visualization sampling used by `det_to_world` does not apply.
 
 For a targeted set of batches, create a file containing one batch ID per line:
 
@@ -396,6 +455,14 @@ If `paths.script_dir` is not configured, it is written under:
 Check the Slurm directives, input and output paths, stage command, model path,
 environment activation, and final destination.
 
+For `det_to_seg`, also verify that the script:
+
+- copies all three staged input directories into `$TMPDIR/input`;
+- exports the configured species-catalog path;
+- passes `--georeferenced-csv` and `--species-catalog` to the CLI;
+- requests one A100 GPU, 16 CPUs, 128 GB of memory, and two hours; and
+- promotes masks to `<paths.final_dest_root>/<batch-id>/segmentations/`.
+
 Current behavior claims a stage lease before rendering a dry-run script. Do
 not use repeated dry runs as a harmless preview mechanism; use `--find-only`
 for batch discovery and reserve `--dry-run` for deliberate render validation.
@@ -554,6 +621,66 @@ The next inventory refresh provides the final end-to-end confirmation. Once
 the promoted outputs are indexed as current, the corresponding readiness view
 should no longer return the successfully completed batch.
 
+### Verify a `det_to_seg` run
+
+A successful `det_to_seg` run directory must contain:
+
+```text
+run_report.json
+manifest.json
+run.log
+artifacts/masks/<image-id>.png
+```
+
+Inspect the run contract before accepting it:
+
+```bash
+python - "<det-to-seg-run-directory>/run_report.json" <<'PY'
+import json
+import sys
+
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+assert report["stage"] == "det_to_seg"
+assert report["exit_code"] == 0
+assert report["georeferenced_csv_path"]
+assert report["species_catalog_path"]
+assert isinstance(report["fallback_detection_count"], int)
+print("fallback detections:", report["fallback_detection_count"])
+PY
+```
+
+Validate at least one mask against its source JPG. This check requires OpenCV
+in the active stage environment:
+
+```bash
+python - "<source.jpg>" "<mask.png>" <<'PY'
+import sys
+import cv2
+import numpy as np
+
+image = cv2.imread(sys.argv[1], cv2.IMREAD_COLOR)
+mask = cv2.imread(sys.argv[2], cv2.IMREAD_UNCHANGED)
+assert image is not None and mask is not None
+assert mask.ndim == 2
+assert mask.dtype == np.uint8
+assert mask.shape == image.shape[:2]
+print("mask values:", np.unique(mask).tolist())
+PY
+```
+
+Review the printed values against the expected species/cultivar class IDs for
+the batch. `0` and, when fallback assignment occurred, `27` are valid. Values
+must not be interpreted as a binary `0`/`255` mask.
+
+Successful runs are promoted through the generic manifest-backed promotion
+path. Partial runs (exit code `1`) are retained for diagnosis but are not
+promoted for `det_to_seg`; rerun the failed items or batch after correcting the
+cause. Finally, confirm the promoted masks exist at:
+
+```text
+<paths.final_dest_root>/<batch-id>/segmentations/<image-id>.png
+```
+
 ## Step 10: Synchronize Atlas Results to Ceres
 
 Run this step on Ceres after Atlas GPU jobs have written result-sync request
@@ -588,7 +715,7 @@ Review these values before running:
 - `result_sync.inventory` Ceres developed-images scope and worker settings
 - polling interval and timeout
 
-Confirm that schema version `7` and the `result_syncs` table are installed,
+Confirm that schema version `11` and the `result_syncs` table are installed,
 and that Globus authentication is available:
 
 ```bash
