@@ -252,6 +252,8 @@ class Processor:
             return SegmentationResult(
                 image_id=image_id,
                 status=ITEM_FAILED,
+                n_detections=len(detections),
+                n_fallback_detections=n_fallback_detections,
                 error_code=ERROR_INFERENCE_FAILED,
                 error_type=type(e).__name__,
                 error_message=str(e),
@@ -263,6 +265,8 @@ class Processor:
             return SegmentationResult(
                 image_id=image_id,
                 status=ITEM_FAILED,
+                n_detections=len(detections),
+                n_fallback_detections=n_fallback_detections,
                 error_code=ERROR_EXPORT_FAILED,
                 error_type=type(e).__name__,
                 error_message=str(e),

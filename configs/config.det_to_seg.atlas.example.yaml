@@ -15,12 +15,14 @@
 stage:
   name: det_to_seg
   cli_module: stages.det_to_seg.cli
-  # The processor can emit class-ID masks. The georeferenced CSV and
-  # $SPECIES_CATALOG_PATH are staged/exposed now, but their CLI flags are added
-  # with class-input integration in a later commit.
+  # Resolve every detection to its det_to_world species/cultivar class before
+  # segmentation. The batch CSV is staged with the batch; the generated
+  # catalog remains a shared reference-data input.
   cli_args: >-
     --i $TMPDIR/input/detections
     --j $TMPDIR/input/images
+    --georeferenced-csv $TMPDIR/input/georeferenced/${BATCH_ID}_georeferenced.csv
+    --species-catalog $SPECIES_CATALOG_PATH
     --c $CONFIG_PATH
     --o $TMPDIR/output
     --batch-id $BATCH_ID
