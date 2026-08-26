@@ -27,7 +27,7 @@ def draw_overlay(
             if mask.shape[:2] != (h, w):
                 mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
             color_layer = np.zeros_like(im)
-            color_layer[mask > 127] = (0, 0, 255)  # red for masked pixels
+            color_layer[mask > 0] = (0, 0, 255)  # red for any resolved class
             im = cv2.addWeighted(color_layer, alpha, im, 1.0, 0)
 
     if det_path is not None and det_path.exists():
@@ -67,15 +67,42 @@ def draw_overlay(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Overlay segmentation masks (and optionally detections) on JPGs.")
+    parser = argparse.ArgumentParser(
+        description="Overlay segmentation masks (and optionally detections) on JPGs."
+    )
     parser.add_argument("--images", required=True, type=Path, help="Directory of source JPGs.")
-    parser.add_argument("--masks", required=True, type=Path, help="Directory of *_mask.png outputs from det_to_seg.")
-    parser.add_argument("--detections", type=Path, default=None, help="Directory of .txt detection outputs (optional).")
+    parser.add_argument(
+        "--masks",
+        required=True,
+        type=Path,
+        help="Directory of class-mask PNGs from det_to_seg.",
+    )
+    parser.add_argument(
+        "--detections",
+        type=Path,
+        default=None,
+        help="Directory of .txt detection outputs (optional).",
+    )
     parser.add_argument("--output", required=True, type=Path, help="Directory for overlay JPGs.")
-    parser.add_argument("--sample-size", type=int, default=12, help="Number of random images to visualize.")
+    parser.add_argument(
+        "--sample-size",
+        type=int,
+        default=12,
+        help="Number of random images to visualize.",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for repeatable sampling.")
-    parser.add_argument("--max-width", type=int, default=1800, help="Downscale overlays to this max width.")
-    parser.add_argument("--alpha", type=float, default=0.4, help="Mask overlay opacity (0=transparent, 1=opaque).")
+    parser.add_argument(
+        "--max-width",
+        type=int,
+        default=1800,
+        help="Downscale overlays to this max width.",
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=0.4,
+        help="Mask overlay opacity (0=transparent, 1=opaque).",
+    )
     args = parser.parse_args()
 
     images = sorted(list(args.images.glob("*.jpg")) + list(args.images.glob("*.JPG")))
@@ -87,7 +114,7 @@ def main() -> None:
 
     written = 0
     for image_path in sample:
-        mask_path = args.masks / f"{image_path.stem}_mask.png"
+        mask_path = args.masks / f"{image_path.stem}.png"
         det_path = args.detections / f"{image_path.stem}.txt" if args.detections else None
         out_path = args.output / image_path.name
         if draw_overlay(image_path, mask_path, det_path, out_path, args.max_width, args.alpha):

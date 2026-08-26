@@ -44,28 +44,24 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from orchestrator.input_staging_planner import det_to_world_expected_dst_paths
+from orchestrator.input_staging_planner import (
+    STAGE_INPUT_SPECS,
+    expected_staged_input_dst_paths,
+)
 from orchestrator.sqlite_db import (
     open_db,
     get_batches_needing_raw_to_jpg,
     get_batches_needing_jpg_to_det,
+    get_batches_needing_det_to_seg,
     get_batches_needing_det_to_world,
     get_completed_input_staging_batch_ids,
-    get_det_to_world_staged_batch_ids,
+    get_fully_staged_batch_ids,
 )
 from orchestrator.submit_jobs import submit_jobs, JobResult
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_STAGES = ("raw_to_jpg", "jpg_to_det", "det_to_world")
-
-# det_to_world needs multiple independent inputs (images + detections +
-# grids), each with its own staged_inputs dst_path, so readiness requires
-# ALL of them to show completed rather than the "any row completed" check
-# filter_completed_staged_inputs uses for raw_to_jpg/jpg_to_det's single
-# fixed route — see filter_det_to_world_staged_ready().
-_MULTI_PIECE_STAGED_GATE_STAGES = ("det_to_world",)
-
+SUPPORTED_STAGES = ("raw_to_jpg", "jpg_to_det", "det_to_world", "det_to_seg")
 
 # ---------------------------------------------------------------------------
 # Batch discovery
@@ -114,6 +110,10 @@ def find_batches(cfg: dict, stage: str, *, site: str, limit: int) -> List[str]:
             # readiness query to --site here would just wrongly exclude
             # batches whose data landed somewhere other than that one site.
             rows = get_batches_needing_det_to_world(conn, site=None, limit=limit * 2)
+        elif stage == "det_to_seg":
+            # Site-agnostic because the input planner independently resolves
+            # images, detections, and georeferenced output to ATLAS.
+            rows = get_batches_needing_det_to_seg(conn, site=None, limit=limit * 2)
         else:
             raise ValueError(f"Unsupported stage: {stage!r}")
     finally:
@@ -182,32 +182,30 @@ def filter_completed_staged_inputs(cfg: dict, stage: str, batch_ids: List[str]) 
     return staged
 
 
-def filter_det_to_world_staged_ready(cfg: dict, batch_ids: List[str]) -> List[str]:
+def filter_all_staged_inputs(cfg: dict, stage: str, batch_ids: List[str]) -> List[str]:
     """
-    Keep only batches where every expected staged_inputs piece (images,
-    detections, grids) has status='completed'.
+    Keep only batches where every expected staged-input piece is completed.
 
     Unlike filter_completed_staged_inputs (which only requires ANY row
-    completed — correct for raw_to_jpg/jpg_to_det's single fixed route),
-    det_to_world has multiple independent pieces, each with its own
-    staged_inputs dst_path (see
-    orchestrator.input_staging_planner.det_to_world_expected_dst_paths), so
-    readiness requires ALL of them to show completed. Pieces already
-    resident at the destination when planned are recorded as
-    immediately-completed rows too (StagingRequest.already_satisfied), so
-    this reflects readiness the moment stage_inputs.py/poll_stage_inputs.py
-    mark them — no fresh globus_file_index inventory scan required.
+    completed), this checks the exact destination paths produced by the
+    stage-aware input planner. It is selected through StageInputSpec metadata
+    for stages composed from independently staged inputs.
     """
     if not batch_ids:
         return []
 
     expected = {
-        batch_id: det_to_world_expected_dst_paths(cfg, batch_id) for batch_id in batch_ids
+        batch_id: expected_staged_input_dst_paths(cfg, stage, batch_id)
+        for batch_id in batch_ids
     }
 
     conn = open_submission_read_db(cfg)
     try:
-        ready = get_det_to_world_staged_batch_ids(conn, expected_dst_paths=expected)
+        ready = get_fully_staged_batch_ids(
+            conn,
+            stage=stage,
+            expected_dst_paths=expected,
+        )
     finally:
         conn.close()
 
@@ -215,16 +213,33 @@ def filter_det_to_world_staged_ready(cfg: dict, batch_ids: List[str]) -> List[st
     skipped = [batch_id for batch_id in batch_ids if batch_id not in ready]
     if skipped:
         logger.info(
-            "Skipping %d batch(es) not fully staged (images/detections/grids) for det_to_world: %s",
+            "Skipping %d batch(es) without every staged input for %s: %s",
             len(skipped),
+            stage,
             ", ".join(skipped[:10]) + (" ..." if len(skipped) > 10 else ""),
         )
     logger.info(
-        "Staged-inputs gate kept %d/%d batch(es) for det_to_world",
+        "All-inputs staging gate kept %d/%d batch(es) for %s",
         len(staged),
         len(batch_ids),
+        stage,
     )
     return staged
+
+
+def filter_det_to_world_staged_ready(cfg: dict, batch_ids: List[str]) -> List[str]:
+    """Compatibility wrapper for the generic all-pieces staging gate."""
+    return filter_all_staged_inputs(cfg, "det_to_world", batch_ids)
+
+
+def filter_staged_inputs(cfg: dict, stage: str, batch_ids: List[str]) -> List[str]:
+    """Apply the staging-completion policy declared for ``stage``."""
+    spec = STAGE_INPUT_SPECS.get(stage)
+    if spec is None:
+        raise ValueError(f"Unsupported stage: {stage!r}")
+    if spec.require_all_staged_inputs:
+        return filter_all_staged_inputs(cfg, stage, batch_ids)
+    return filter_completed_staged_inputs(cfg, stage, batch_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -311,10 +326,7 @@ def main() -> int:
     else:
         batch_ids = find_batches(cfg, args.stage, site=args.site, limit=args.limit)
 
-    if args.stage in _MULTI_PIECE_STAGED_GATE_STAGES:
-        batch_ids = filter_det_to_world_staged_ready(cfg, batch_ids)
-    else:
-        batch_ids = filter_completed_staged_inputs(cfg, args.stage, batch_ids)
+    batch_ids = filter_staged_inputs(cfg, args.stage, batch_ids)
 
     if not batch_ids:
         logger.info("No batches to process.")

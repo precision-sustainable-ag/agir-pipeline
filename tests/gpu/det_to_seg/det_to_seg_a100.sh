@@ -44,6 +44,9 @@ BATCH_ROOT="${BATCH_ROOT:-/90daydata/dash_agir/tmp/semifield-developed-images/$B
 JPG_INPUT_DIR="${JPG_INPUT_DIR:-$BATCH_ROOT/images}"
 FINAL_DET_DIR="${FINAL_DET_DIR:-$BATCH_ROOT/a100/detections}"
 FINAL_SEG_DIR="${FINAL_SEG_DIR:-$BATCH_ROOT/a100/segmentations}"
+GEOREFERENCED_CSV="${GEOREFERENCED_CSV:-$BATCH_ROOT/georeferenced/${BATCH_ID}_georeferenced.csv}"
+DEFAULT_SPECIES_CATALOG="$AGIR_PROJECT_ROOT/semifield-utils/species_information/species_catalog.generated.json"
+SPECIES_CATALOG_PATH="${SPECIES_CATALOG_PATH:-$DEFAULT_SPECIES_CATALOG}"
 
 # Config and script paths
 
@@ -54,7 +57,6 @@ VIZ_SCRIPT="${VIZ_SCRIPT:-$REPO_DIR/tests/gpu/det_to_seg/visualize_segmentation.
 
 VIZ_SAMPLE_SIZE="${VIZ_SAMPLE_SIZE:-24}"
 VIZ_MAX_WIDTH="${VIZ_MAX_WIDTH:-1800}"
-SEG_THREADS="${SEG_THREADS:-1}"
 SEG_DEVICE="${SEG_DEVICE:-cuda:0}"
 
 # Directory setup
@@ -77,6 +79,8 @@ echo "Batch ID:                 $BATCH_ID"
 echo "JPG input dir:            $JPG_INPUT_DIR"
 echo "Detection output dir:     $FINAL_DET_DIR"
 echo "Segmentation output dir:  $FINAL_SEG_DIR"
+echo "Georeferenced CSV:        $GEOREFERENCED_CSV"
+echo "Species catalog:          $SPECIES_CATALOG_PATH"
 echo "Shared log dir:           $AGIR_LOG_DIR"
 
 # Validation
@@ -103,6 +107,16 @@ fi
 
 if [[ ! -f "$SEG_CFG_PATH" ]]; then
   echo "Segmentation config does not exist: $SEG_CFG_PATH" >&2
+  exit 1
+fi
+
+if [[ ! -f "$GEOREFERENCED_CSV" ]]; then
+  echo "Georeferenced CSV does not exist: $GEOREFERENCED_CSV" >&2
+  exit 1
+fi
+
+if [[ ! -f "$SPECIES_CATALOG_PATH" ]]; then
+  echo "Species catalog does not exist: $SPECIES_CATALOG_PATH" >&2
   exit 1
 fi
 
@@ -135,9 +149,10 @@ echo "Running DET -> SEG from detections in $DET_ARTIFACT_DIR..."
 python3 -m stages.det_to_seg.cli \
   --i "$DET_ARTIFACT_DIR" \
   --j "$JPG_INPUT_DIR" \
+  --georeferenced-csv "$GEOREFERENCED_CSV" \
+  --species-catalog "$SPECIES_CATALOG_PATH" \
   --c "$SEG_CFG_PATH" \
   --o "$FINAL_SEG_DIR" \
-  --t "$SEG_THREADS" \
   --fs \
   --batch-id "$BATCH_ID" \
   --device "$SEG_DEVICE"

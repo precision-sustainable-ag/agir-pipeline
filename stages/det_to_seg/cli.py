@@ -11,7 +11,6 @@ from pathlib import Path
 
 from stages import EXIT_CONFIG_ERROR, EXIT_FAILURE, EXIT_PARTIAL, EXIT_SUCCESS, ITEM_OK
 from stages.common import ManifestBuilder, RunReportBuilder, parse_batch_id, setup_logging
-from .processor import Processor
 
 from . import (
     ERROR_CFG_VALIDATION_FAILED,
@@ -20,9 +19,10 @@ from . import (
     STAGE,
     STAGE_VERSION,
 )
+from .class_ids import ClassIdResolutionError, load_class_id_index
+from .processor import Processor
 
 logger = logging.getLogger(__name__)
-
 
 
 def calculate_sha256(file_path: Path) -> str:
@@ -31,7 +31,6 @@ def calculate_sha256(file_path: Path) -> str:
         for byte_block in iter(lambda: f.read(4096), b""):
             sha256_hash.update(byte_block)
     return "sha256:" + sha256_hash.hexdigest()
-
 
 
 def get_git_commit() -> str | None:
@@ -47,7 +46,6 @@ def get_git_commit() -> str | None:
     except (subprocess.CalledProcessError, FileNotFoundError):
         logger.warning("Could not determine git commit hash")
         return None
-
 
 
 def _build_jpg_index(jpg_dir: Path) -> dict[str, Path]:
@@ -68,24 +66,104 @@ def _build_jpg_index(jpg_dir: Path) -> dict[str, Path]:
     return jpg_index
 
 
+def _write_early_failure(
+    *,
+    report: RunReportBuilder,
+    manifest: ManifestBuilder,
+    run_dir: Path,
+    artifacts_dir: Path,
+    log_path: Path,
+    output_root: Path,
+    message: str,
+    error: Exception,
+    n_failed: int,
+) -> int:
+    """Finish an input/configuration failure with a diagnostic run bundle."""
+
+    report.set_stage_error(message)
+    report.add_error(
+        unit_id="__stage__",
+        code=ERROR_CFG_VALIDATION_FAILED,
+        error_type=type(error).__name__,
+        message=str(error),
+    )
+    report.stop(EXIT_CONFIG_ERROR)
+    report.set_outputs(
+        output_root=str(output_root),
+        run_root=str(run_dir),
+        artifacts_dir=str(artifacts_dir),
+        n_succeeded=0,
+        n_failed=n_failed,
+        n_skipped=0,
+    )
+    report.set_pointers(logs_path=str(log_path))
+    report.write(run_dir / "run_report.json")
+    manifest.write(run_dir / "manifest.json")
+    return EXIT_CONFIG_ERROR
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run segmentation within YOLO detection boxes and composite full-image masks."
     )
-    # Parse arguements
-    parser.add_argument("--i", type=Path, required=True, help="Det artifacts dir containing per-image .txt files.")
-    parser.add_argument("--j", type=Path, required=True, help="Directory containing original JPG images.")
-    parser.add_argument("--c", type=Path, required=True, help="Path to segmentation YAML config file.")
+    parser.add_argument(
+        "--i",
+        type=Path,
+        required=True,
+        help="Det artifacts dir containing per-image .txt files.",
+    )
+    parser.add_argument(
+        "--j",
+        type=Path,
+        required=True,
+        help="Directory containing original JPG images.",
+    )
+    parser.add_argument(
+        "--c",
+        type=Path,
+        required=True,
+        help="Path to segmentation YAML config file.",
+    )
     parser.add_argument("--o", type=Path, required=True, help="Output directory.")
-    parser.add_argument("--t", type=int, default=0, help="Number of worker processes. Default 0 = sequential.")
+    parser.add_argument(
+        "--georeferenced-csv",
+        type=Path,
+        required=True,
+        help="det_to_world CSV containing species/cultivar assignments per detection.",
+    )
+    parser.add_argument(
+        "--species-catalog",
+        type=Path,
+        required=True,
+        help="Generated species catalog JSON used to resolve USDA symbols.",
+    )
+    parser.add_argument(
+        "--t",
+        type=int,
+        default=0,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--fs", action="store_true", help="Stop processing on first failure.")
-    parser.add_argument("--batch-id", type=str, default=None, help="Batch ID. Auto-inferred from input path if omitted.")
-    parser.add_argument("--device", type=str, default="cpu", help="Torch device (e.g. cpu, cuda:0).")
+    parser.add_argument(
+        "--batch-id",
+        type=str,
+        default=None,
+        help="Batch ID. Auto-inferred from input path if omitted.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        help="Torch device (e.g. cpu, cuda:0).",
+    )
 
     args = parser.parse_args()
 
-    # validate input/output paths
+    if args.t not in (0, 1):
+        logger.error("det_to_seg is single-process; --t must be 0 or 1")
+        return EXIT_CONFIG_ERROR
+
+    # Validate input/output paths.
     if not args.i.exists():
         logger.error("Detection input directory does not exist: %s", args.i)
         return EXIT_CONFIG_ERROR
@@ -93,15 +171,14 @@ def main() -> int:
         logger.error("JPG input directory does not exist: %s", args.j)
         return EXIT_CONFIG_ERROR
     args.o.mkdir(parents=True, exist_ok=True)
-
-
     # See if batch id was passed, or if it exists in input directories
     batch_id = args.batch_id or parse_batch_id(str(args.i)) or parse_batch_id(str(args.j))
     if not batch_id:
-        logger.error("Could not determine batch_id. Pass --batch-id or use a path containing XX_YYYY-MM-DD.")
+        logger.error(
+            "Could not determine batch_id. Pass --batch-id or use a path "
+            "containing XX_YYYY-MM-DD."
+        )
         return EXIT_CONFIG_ERROR
-
-
     report = RunReportBuilder(stage=STAGE, stage_version=STAGE_VERSION, batch_id=batch_id)
     report.start()
 
@@ -122,31 +199,69 @@ def main() -> int:
         batch_id=batch_id,
     )
 
-    try:
-        processor = Processor(args.c, device=args.device)
-    except Exception as e:
-        logger.error("Failed to initialize processor: %s", e)
-        report.set_stage_error(f"Processor init failed: {e}")
-        report.add_error(
-            unit_id="__stage__",
-            code=ERROR_CFG_VALIDATION_FAILED,
-            error_type=type(e).__name__,
-            message=str(e),
-        )
-        report.stop(EXIT_CONFIG_ERROR)
-        report.set_pointers(logs_path=str(log_path))
-        report.write(run_dir / "run_report.json")
-        return EXIT_CONFIG_ERROR
+    report.set_extra(
+        georeferenced_csv_path=str(args.georeferenced_csv),
+        species_catalog_path=str(args.species_catalog),
+        fallback_detection_count=0,
+    )
 
     # sort text files for reproducibility/consistency
     txt_files = sorted(list(args.i.glob("*.txt")) + list(args.i.glob("*.TXT")))
+    report.set_inputs(input_root=str(args.i), n_units_discovered=len(txt_files))
     if not txt_files:
-        logger.error("No detection txt files found in %s", args.i)
-        report.set_stage_error(f"No detection txt files found in {args.i}")
-        report.stop(EXIT_CONFIG_ERROR)
-        report.set_pointers(logs_path=str(log_path))
-        report.write(run_dir / "run_report.json")
-        return EXIT_CONFIG_ERROR
+        error = FileNotFoundError(f"No detection txt files found in {args.i}")
+        logger.error("%s", error)
+        return _write_early_failure(
+            report=report,
+            manifest=manifest,
+            run_dir=run_dir,
+            artifacts_dir=artifacts_dir,
+            log_path=log_path,
+            output_root=args.o,
+            message=str(error),
+            error=error,
+            n_failed=0,
+        )
+
+    # Validate auxiliary class inputs before loading the GPU model.
+    try:
+        class_id_index = load_class_id_index(
+            args.georeferenced_csv,
+            args.species_catalog,
+        )
+    except ClassIdResolutionError as e:
+        logger.error("Invalid class-assignment inputs: %s", e)
+        return _write_early_failure(
+            report=report,
+            manifest=manifest,
+            run_dir=run_dir,
+            artifacts_dir=artifacts_dir,
+            log_path=log_path,
+            output_root=args.o,
+            message=f"Class-assignment input validation failed: {e}",
+            error=e,
+            n_failed=len(txt_files),
+        )
+
+    try:
+        processor = Processor(
+            args.c,
+            device=args.device,
+            class_id_index=class_id_index,
+        )
+    except Exception as e:
+        logger.error("Failed to initialize processor: %s", e)
+        return _write_early_failure(
+            report=report,
+            manifest=manifest,
+            run_dir=run_dir,
+            artifacts_dir=artifacts_dir,
+            log_path=log_path,
+            output_root=args.o,
+            message=f"Processor init failed: {e}",
+            error=e,
+            n_failed=len(txt_files),
+        )
 
     # Build dict of jpg name (stem) to path
     jpg_index = _build_jpg_index(args.j)
@@ -185,7 +300,6 @@ def main() -> int:
         code_commit=get_git_commit(),
         model_id=str(processor.config.get("weights")),
     )
-    report.set_inputs(input_root=str(args.i), n_units_discovered=len(txt_files))
 
     results = []
     if image_pairs:
@@ -195,7 +309,6 @@ def main() -> int:
                 image_pairs=image_pairs,
                 output_dir=masks_dir,
                 fail_stop=args.fs,
-                max_workers=args.t,
             )
         except Exception as e:
             logger.error("Batch processing failed: %s", e)
@@ -209,9 +322,11 @@ def main() -> int:
 
     num_succeeded = 0
     num_failed = num_missing_jpg
+    fallback_detection_count = 0
 
     # record results in manifest and report
     for r in results:
+        fallback_detection_count += r.n_fallback_detections
         if r.status == ITEM_OK:
             num_succeeded += 1
             mask_rel = str(r.mask_path.relative_to(artifacts_dir)) if r.mask_path else None
@@ -253,7 +368,12 @@ def main() -> int:
         exit_code = EXIT_FAILURE
 
     logger.info("Finished: %d/%d files processed successfully", num_succeeded, num_total)
+    logger.info(
+        "Class assignment: %d detection(s) used fallback class 27",
+        fallback_detection_count,
+    )
 
+    report.set_extra(fallback_detection_count=fallback_detection_count)
     report.stop(exit_code)
     report.set_outputs(
         output_root=str(args.o),

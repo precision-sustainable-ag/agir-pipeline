@@ -20,6 +20,7 @@ ORCHESTRATOR_ID="{{ orchestrator_id }}"
 AGIR_DIR="{{ agir_pipeline_dir }}"
 CONFIG_PATH="{{ stage_config }}"
 MODEL_PATH="{{ model_path }}"
+SPECIES_CATALOG_PATH="{{ species_catalog_path }}"
 CPUS={{ cpus }}
 DB_PATH="{{ db_path }}"
 
@@ -37,7 +38,8 @@ RESULT_SYNC_DST_RUN_ROOT="{{ result_sync_dst_run_root }}"
 # Resolved per-batch from season_date_ranges/globus_file_index by
 # orchestrator/submit_jobs.py (see resolve_season_for_batch,
 # resolve_file_path_with_priority) when this stage's cli_args references
-# them — empty for stages/configs that don't, same as MODEL_PATH above.
+# them — empty for stages/configs that don't, same as MODEL_PATH and
+# SPECIES_CATALOG_PATH above.
 BBOT_VERSION="{{ bbot_version }}"
 SHAPEFILE_PATH="{{ shapefile_path }}"
 

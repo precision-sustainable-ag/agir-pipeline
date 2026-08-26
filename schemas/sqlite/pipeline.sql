@@ -17,6 +17,7 @@
 --   v_batches_needing_raw_to_jpg   What to run next for stage 1
 --   v_batches_needing_jpg_to_det   What to run next for stage 2
 --   v_batches_needing_det_to_world What to run next for stage 3 (det_to_world)
+--   v_batches_needing_det_to_seg   What to run next for stage 4 (det_to_seg)
 --
 -- Views query globus_file_index WHERE is_current = 1 across ALL indexed
 -- endpoints simultaneously, so cross-site inventory gaps resolve correctly
@@ -625,8 +626,8 @@ CREATE INDEX IF NOT EXISTS idx_sgs_batch
 -- (is_current=1) from different scan runs are both visible in one query.
 -- No per-run scoping.  storage_gap_summary is for reporting only.
 --
--- Both views exclude batches that:
---   - already have output files (jpg_file_count > 0 / det_count > 0)
+-- Readiness views exclude batches that:
+--   - already have their stage's output files
 --   - have an active, unexpired lease in stage_leases
 --   - have ever had a successful stage_run (NOT EXISTS on stage_runs)
 --
@@ -797,7 +798,7 @@ ORDER BY j.batch_date ASC, j.batch_id ASC, l.site ASC, l.storage_domain ASC, l.n
 -- run", not "is it staged on the compute cluster". Submission readiness for
 -- the actual compute cluster (CERES by default — det_to_world is CPU-only,
 -- unlike GPU-bound jpg_to_det on ATLAS) is checked separately by
--- scripts/job/submit.py's filter_det_to_world_staged_ready(), which requires
+-- scripts/job/submit.py's metadata-selected all-inputs gate, which requires
 -- all three pieces — images, detections, AND grids — to show
 -- status='completed' in staged_inputs. All three are planned and staged by
 -- orchestrator/input_staging_planner.py (images/detections via
@@ -892,6 +893,104 @@ WHERE COALESCE(w.georef_count, 0) = 0   -- no georeferenced output exists yet
 ORDER BY i.batch_date ASC, i.batch_id ASC;
 
 
+-- -----------------------------------------------------------------------------
+-- v_batches_needing_det_to_seg
+-- Batches with current developed-image JPGs, per-image detection TXT files,
+-- AND the batch-level georeferenced CSV produced by det_to_world, with no
+-- current segmentation PNG output yet.
+--
+-- Like det_to_world readiness, this view is site-agnostic: it answers whether
+-- every required input exists somewhere in the indexed inventory. The input
+-- staging and submission workflow separately resolves each piece to ATLAS and
+-- requires every expected staged_inputs destination to be completed before
+-- compute begins.
+-- -----------------------------------------------------------------------------
+DROP VIEW IF EXISTS v_batches_needing_det_to_seg;
+CREATE VIEW v_batches_needing_det_to_seg AS
+WITH
+img_batches AS (
+    SELECT
+        batch_id,
+        MIN(batch_date) AS batch_date,
+        COUNT(*)        AS img_count
+    FROM globus_file_index
+    WHERE data_state = 'semifield-developed-images'
+      AND entry_type = 'file'
+      AND batch_id   IS NOT NULL
+      AND is_current = 1
+      AND file_ext   IN ('jpg', 'jpeg')
+      AND parent_dir = 'images'
+    GROUP BY batch_id
+),
+det_batches AS (
+    SELECT
+        batch_id,
+        COUNT(*) AS det_count
+    FROM globus_file_index
+    WHERE data_state = 'semifield-developed-images'
+      AND entry_type = 'file'
+      AND batch_id   IS NOT NULL
+      AND is_current = 1
+      AND file_ext   = 'txt'
+      AND parent_dir IN ('detections', 'plant-detections', 'metadata')
+    GROUP BY batch_id
+),
+georef_batches AS (
+    SELECT
+        batch_id,
+        COUNT(*) AS georef_count
+    FROM globus_file_index
+    WHERE data_state = 'semifield-developed-images'
+      AND entry_type = 'file'
+      AND batch_id   IS NOT NULL
+      AND is_current = 1
+      AND file_ext   = 'csv'
+      AND parent_dir = 'georeferenced'
+      AND file_name  = batch_id || '_georeferenced.csv'
+    GROUP BY batch_id
+),
+seg_batches AS (
+    SELECT
+        batch_id,
+        COUNT(*) AS seg_count
+    FROM globus_file_index
+    WHERE data_state = 'semifield-developed-images'
+      AND entry_type = 'file'
+      AND batch_id   IS NOT NULL
+      AND is_current = 1
+      AND file_ext   = 'png'
+      AND parent_dir = 'segmentations'
+    GROUP BY batch_id
+),
+active_leases AS (
+    SELECT batch_id
+    FROM   stage_leases
+    WHERE  stage      = 'det_to_seg'
+      AND  expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+)
+SELECT
+    i.batch_id,
+    i.batch_date,
+    i.img_count,
+    d.det_count,
+    g.georef_count,
+    COALESCE(s.seg_count, 0) AS seg_count
+FROM  img_batches       i
+JOIN  det_batches       d  ON i.batch_id = d.batch_id
+JOIN  georef_batches    g  ON i.batch_id = g.batch_id
+LEFT JOIN seg_batches   s  ON i.batch_id = s.batch_id
+LEFT JOIN active_leases al ON i.batch_id = al.batch_id
+WHERE COALESCE(s.seg_count, 0) = 0
+  AND al.batch_id IS NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM stage_runs sr
+      WHERE sr.batch_id = i.batch_id
+        AND sr.stage    = 'det_to_seg'
+        AND sr.status   = 'success'
+  )
+ORDER BY i.batch_date ASC, i.batch_id ASC;
+
+
 -- =============================================================================
 -- v8: add v_batches_needing_det_to_world for stage 3 (det_to_world) readiness.
 -- v9: add species/species_aliases/species_multi_symbols/cultivars/
@@ -900,5 +999,7 @@ ORDER BY i.batch_date ASC, i.batch_id ASC;
 --      jpg_locations to site IN ('JUNO', 'CERES') — jpg_to_det now resolves
 --      its images input via the same destination/CERES/JUNO priority chain
 --      as det_to_world, so ATLAS-resident batches must surface here too.
-PRAGMA user_version = 10;
+-- v11: add v_batches_needing_det_to_seg for class-coded segmentation
+--      readiness after det_to_world georeferencing.
+PRAGMA user_version = 11;
 COMMIT;

@@ -145,7 +145,7 @@ install_pipeline() {
     uv pip install -e ".[${extras}]"
   else
     log "Installing editable: ."
-    uv pip install -e .
+    uv pip install -e .["all"]
   fi
 }
 

@@ -1,0 +1,97 @@
+# configs/config.det_to_seg.atlas.example.yaml
+# ============================================================
+# ATLAS orchestration configuration for det_to_seg.
+#
+# This is the stage/orchestrator config consumed by scripts/job/stage_inputs.py
+# and scripts/job/submit.py. It is separate from the segmentation model config
+# passed through paths.stage_config.
+#
+# det_to_seg requires three independently staged pieces below the common batch
+# root: images/, detections/, and georeferenced/. The readiness view requires
+# all three to exist somewhere, and submission waits until all three destination
+# paths have completed staged_inputs rows on ATLAS.
+# ============================================================
+
+stage:
+  name: det_to_seg
+  cli_module: stages.det_to_seg.cli
+  # Resolve every detection to its det_to_world species/cultivar class before
+  # segmentation. The batch CSV is staged with the batch; the generated
+  # catalog remains a shared reference-data input.
+  cli_args: >-
+    --i $TMPDIR/input/detections
+    --j $TMPDIR/input/images
+    --georeferenced-csv $TMPDIR/input/georeferenced/${BATCH_ID}_georeferenced.csv
+    --species-catalog $SPECIES_CATALOG_PATH
+    --c $CONFIG_PATH
+    --o $TMPDIR/output
+    --batch-id $BATCH_ID
+    --device cuda
+  # No worker-count argument: det_to_seg owns one GPU model and processes
+  # images sequentially, batching ordinary detection crops within each image.
+  output_subdir: det_to_seg
+  final_dest_suffix: segmentations
+
+render:
+  template: slurm_job.sh.j2
+
+paths:
+  agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
+  uv_env: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/.venv/bin/activate
+
+  # Segmentation model config read by stages/det_to_seg/processor.py. The
+  # checkpoint path remains inside this model config and is resolved relative
+  # to that file when it is not absolute.
+  stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/stages/det_to_seg/configs/default.yaml
+
+  # Exported into the generated job as $SPECIES_CATALOG_PATH. It stays outside
+  # the model YAML because reference taxonomy is an input, not model tuning.
+  species_catalog: /project/dash_agir/semifield-utils/species_information/species_catalog.generated.json
+
+  # Staged layout:
+  #   <input_staging_root>/<batch_id>/images/
+  #   <input_staging_root>/<batch_id>/detections/
+  #   <input_staging_root>/<batch_id>/georeferenced/
+  input_staging_root: /90daydata/dash_agir/semifield-developed-images
+
+  output_stage_runs: /90daydata/dash_agir/tmp/stage_runs/det_to_seg
+  final_dest_root: /90daydata/dash_agir/semifield-developed-images
+  log_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs/det_to_seg
+
+  db: /project/dash_agir/globus_index/globus_file_index.sqlite3
+  db_read_mode: direct
+  db_temp_dir: /90daydata/dash_agir/tmp/db
+  locks_root: /project/dash_agir/locks
+
+transfer:
+  juno_endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
+  atlas_endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+  ceres_endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+
+  dry_run: false
+  poll_interval_seconds: 30
+  poll_timeout_seconds: 7200
+
+  routes:
+    det_to_seg:
+      destination_site: ATLAS
+      source_root_atlas: /90daydata/dash_agir/semifield-developed-images
+      source_root_ceres: /90daydata/dash_agir/semifield-developed-images
+      source_root_juno: /LTS/project/dash_agir/semifield-developed-images
+
+# Atlas produces the run bundle and promoted masks. Ceres later pulls and
+# validates the immutable bundle using the shared result-sync workflow.
+result_sync:
+  enabled: true
+  outbox: /90daydata/dash_agir/result_sync/outbox
+  source_endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+  destination_endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+  destination_run_root: /90daydata/dash_agir/tmp/stage_runs
+
+slurm:
+  account: dash_agir
+  partition: gpu-a100
+  gres: gpu:1
+  cpus_per_task: 16
+  mem: 128G
+  time: "2:00:00"

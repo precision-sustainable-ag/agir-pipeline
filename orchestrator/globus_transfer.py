@@ -27,6 +27,7 @@ class TransferRequest:
     src_path: str
     dst_path: str
     label: Optional[str] = None
+    file_names: Optional[Sequence[str]] = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class TransferSubmitResult:
     globus_task_id: Optional[str]
     details: str
     command: list[str]
+    file_names: Optional[Sequence[str]] = None
 
 
 @dataclass(frozen=True)
