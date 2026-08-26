@@ -16,3 +16,6 @@ edge_aware:
 post_fusion_nms:
   enabled: false
   iou: 0.5
+mirror_pad:
+  enabled: true
+  pad_px: 512
