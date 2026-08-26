@@ -37,7 +37,7 @@ render:
 
 paths:
   agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
-  uv_env: /project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/activate
+  uv_env: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/.venv/bin/activate
 
   # Segmentation model config read by stages/det_to_seg/processor.py. The
   # checkpoint path remains inside this model config and is resolved relative
