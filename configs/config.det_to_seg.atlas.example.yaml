@@ -32,6 +32,26 @@ stage:
   output_subdir: det_to_seg
   final_dest_suffix: segmentations
 
+# ── Visualization sample ─────────────────────────────────────────────────────
+# Colorizes a random sample of class-ID mask PNGs (see
+# stages/det_to_seg/segmentor.py's write_mask_png) back onto the staged JPGs
+# — see scripts/job/visualize.py's det_to_seg mode. species-catalog reuses
+# $SPECIES_CATALOG_PATH (same catalog resolved above for the CLI's
+# --species-catalog), which supplies each class's display color/name; a
+# legend.png keyed to whatever classes were actually sampled is written
+# alongside the overlays into $VIZ_DIR, so both ship in the same
+# det_to_seg_sample_<batch_id>.zip.
+visualization:
+  enabled: true
+  mode: det_to_seg
+  args:
+    images: '"$TMPINPUT/images"'
+    masks: '"$RUN_DIR/artifacts/masks"'
+    species_catalog: '"$SPECIES_CATALOG_PATH"'
+    output: '"$VIZ_DIR"'
+    sample_size: 50
+    max_width: 1800
+
 render:
   template: slurm_job.sh.j2
 
@@ -92,6 +112,6 @@ slurm:
   account: dash_agir
   partition: gpu-a100
   gres: gpu:1
-  cpus_per_task: 16
+  cpus_per_task: 1
   mem: 128G
   time: "2:00:00"
