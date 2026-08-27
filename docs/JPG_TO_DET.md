@@ -51,11 +51,13 @@ JPG image
   |
   v
 run_multiscale()
+  |-- Mirror-pad frame on all sides (optional)
   |-- YOLO predict at each scale (e.g. 0.5x, 1.0x, 1.5x)
   |-- Edge-aware confidence filtering (optional)
   |-- Weighted Box Fusion (WBF) across scales
   |-- Post-fusion Non-Maximum Suppression (optional)
   |-- Final confidence threshold + NMS
+  |-- Map boxes back to original frame, clip, drop pad-only boxes
   |
   v
 Nx6 tensor [x1, y1, x2, y2, conf, cls]  (absolute pixel coordinates)
@@ -85,6 +87,31 @@ Dynamic confidence threshold based on distance to the nearest image edge. Boxes 
 - `edge_band_rel` — Fraction of shorter side defining the hard edge zone
 - `min_factor` — Multiplier on `base_conf` at the very edge (e.g. 0.60)
 - `taper_rel` — Relative distance at which the threshold returns to `base_conf`
+
+---
+
+### Function: `mirror_pad_image(im_bgr, pad_px) -> ndarray`
+
+Reflect-pads an image on all four sides before detection (`cv2.BORDER_REFLECT_101`). Objects sitting against the raw frame boundary are underdetected because the model sees them truncated by the tensor edge, not because they're inherently hard to recognize — padding with mirrored content gives them real spatial context so they're inferred as ordinary interior objects. No-op if `pad_px <= 0`.
+
+**Parameters:**
+- `im_bgr` — Source image, HxWx3 BGR
+- `pad_px` — Pixels of reflected border to add on each side
+
+**Returns:** Padded image, `(H + 2*pad_px) x (W + 2*pad_px) x 3`.
+
+---
+
+### Function: `unpad_and_clip_detections(dets_xyxy_conf_cls, pad_px, orig_wh) -> Tensor`
+
+Maps detections from the padded inference canvas back to the original image's coordinate frame: shifts by `-pad_px`, clamps to original bounds, and drops boxes that fall entirely inside the mirrored padding (no real image content). No-op if `pad_px <= 0`.
+
+**Parameters:**
+- `dets_xyxy_conf_cls` — Nx6 tensor `[x1, y1, x2, y2, conf, cls]` in absolute pixel coordinates of the padded canvas
+- `pad_px` — Pixels of border added on each side before inference
+- `orig_wh` — `(width, height)` of the original, unpadded image
+
+**Returns:** Mx6 tensor in the original image's absolute pixel coordinates.
 
 ---
 
@@ -160,15 +187,21 @@ Main detection pipeline. Runs YOLO inference at multiple image scales, fuses ove
 - `device` — Torch device string (e.g. `"cpu"`, `"cuda:0"`)
 
 **Flow:**
-1. Compute scaled image sizes from `base_imgsz * scales[]`
-2. Run `model.predict()` at each scale with per-scale conf/iou/max_det thresholds
-3. Normalize all boxes to [0,1] and concatenate across scales
-4. Apply edge-aware filtering (if `edge_aware.enabled`)
-5. Run weighted box fusion across all scales
-6. Optional post-fusion NMS (if `post_fusion_nms.enabled`)
-7. Apply final confidence threshold and final NMS
+1. Mirror-pad the frame on all sides (if `mirror_pad.enabled`) — all steps below run in this padded canvas's coordinate space
+2. Compute scaled image sizes from `base_imgsz * scales[]`
+3. Run `model.predict()` at each scale with per-scale conf/iou/max_det thresholds
+4. Normalize all boxes to [0,1] and concatenate across scales
+5. Apply edge-aware filtering (if `edge_aware.enabled`) — relative to the padded canvas's edges, not the original frame's
+6. Run weighted box fusion across all scales
+7. Optional post-fusion NMS (if `post_fusion_nms.enabled`)
+8. Apply final confidence threshold and final NMS
+9. Map surviving boxes back to the original frame (`unpad_and_clip_detections`): shift by `-pad_px`, clamp to original bounds, drop boxes that landed entirely in the mirrored padding
 
-**Returns:** Nx6 tensor `[x1, y1, x2, y2, conf, cls]` in absolute pixel coordinates, or empty `(0, 6)` tensor if no detections survive.
+**Returns:** Nx6 tensor `[x1, y1, x2, y2, conf, cls]` in absolute pixel coordinates of the **original, unpadded** image, or empty `(0, 6)` tensor if no detections survive.
+
+**`mirror_pad` config:**
+- `enabled` — Whether to pad before inference
+- `pad_px` — Pixels of reflected border added on each side (`cv2.BORDER_REFLECT_101`)
 
 ---
 
@@ -418,6 +451,12 @@ edge_aware:
 post_fusion_nms:
   enabled: false
   iou: 0.5
+
+# Mirror-pad before inference (optional) — recovers detections near the
+# frame border that YOLO underscores from sitting against the tensor edge
+mirror_pad:
+  enabled: true
+  pad_px: 256
 ```
 
 
@@ -486,4 +525,7 @@ edge_aware:
 post_fusion_nms:
   enabled: false
   iou: 0.5
+mirror_pad:
+  enabled: true
+  pad_px: 256
 ```

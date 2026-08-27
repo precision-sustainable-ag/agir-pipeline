@@ -333,6 +333,67 @@ def export_predictions(
     return txt_path, detection_rows
 
 
+def mirror_pad_image(im_bgr: np.ndarray, pad_px: int) -> np.ndarray:
+    """
+    Reflect-pad an image on all four sides before detection.
+
+    Objects sitting against the raw frame boundary are underdetected because
+    the model sees them truncated by the tensor edge, not because they're
+    inherently hard to recognize. Padding with mirrored content gives them
+    real spatial context on all sides, so they're inferred as ordinary
+    interior objects. Callers must map returned boxes back to the original
+    frame (see `unpad_and_clip_detections`).
+
+    Args:
+        im_bgr: Source image, HxWx3 BGR.
+        pad_px: Pixels of reflected border to add on each side. No-op if <= 0.
+
+    Returns:
+        Padded image, (H + 2*pad_px)x(W + 2*pad_px)x3.
+    """
+    if pad_px <= 0:
+        return im_bgr
+    return cv2.copyMakeBorder(
+        im_bgr, pad_px, pad_px, pad_px, pad_px, borderType=cv2.BORDER_REFLECT_101
+    )
+
+
+def unpad_and_clip_detections(
+    dets_xyxy_conf_cls: torch.Tensor,
+    pad_px: int,
+    orig_wh: tuple[int, int],
+) -> torch.Tensor:
+    """
+    Map detections from the padded inference canvas back to the original image.
+
+    Boxes are shifted by -pad_px and clamped to the original bounds. A box
+    that falls entirely inside the mirrored padding (no overlap with real
+    image content) is dropped rather than clamped to a degenerate sliver.
+
+    Args:
+        dets_xyxy_conf_cls: Nx6 tensor [x1, y1, x2, y2, conf, cls] in
+            absolute pixel coordinates of the padded canvas.
+        pad_px: Pixels of border added on each side before inference. No-op
+            if <= 0.
+        orig_wh: (width, height) of the original, unpadded image.
+
+    Returns:
+        Mx6 tensor in the original image's absolute pixel coordinates.
+    """
+    if pad_px <= 0 or dets_xyxy_conf_cls.numel() == 0:
+        return dets_xyxy_conf_cls
+
+    orig_w, orig_h = orig_wh
+    dets = dets_xyxy_conf_cls.clone()
+    dets[:, 0] = (dets[:, 0] - pad_px).clamp(0, orig_w)
+    dets[:, 1] = (dets[:, 1] - pad_px).clamp(0, orig_h)
+    dets[:, 2] = (dets[:, 2] - pad_px).clamp(0, orig_w)
+    dets[:, 3] = (dets[:, 3] - pad_px).clamp(0, orig_h)
+
+    keep = (dets[:, 2] > dets[:, 0]) & (dets[:, 3] > dets[:, 1])
+    return dets[keep]
+
+
 # ── main multiscale pipeline ─────────────────────────────────────────────────
 
 def run_multiscale(model, im0_bgr, config: dict, device=None) -> torch.Tensor:
@@ -342,14 +403,27 @@ def run_multiscale(model, im0_bgr, config: dict, device=None) -> torch.Tensor:
     Args:
         model: Loaded YOLO model instance
         im0_bgr: original BGR image in numpy HxWx3 format
-        config: Detection config dict 
+        config: Detection config dict
         device: Torch device string (e.g. "cpu", "cuda:0") or None
 
     Returns:
         Nx6 tensor [x1, y1, x2, y2, conf, cls] in absolute pixel coordinates,
         or an empty (0, 6) tensor when no detections survive.
     """
-    h, w = im0_bgr.shape[:2]
+    orig_h, orig_w = im0_bgr.shape[:2]
+
+    mirror_cfg = config.get("mirror_pad")
+    pad_px = (
+        int(mirror_cfg.get("pad_px", 0))
+        if mirror_cfg is not None and mirror_cfg.get("enabled", False)
+        else 0
+    )
+    infer_bgr = mirror_pad_image(im0_bgr, pad_px)
+
+    # All inference below (scales, edge-aware filtering, WBF, NMS) runs in
+    # the padded canvas's coordinate space; results are mapped back to the
+    # original image just before returning.
+    h, w = infer_bgr.shape[:2]
 
     base_imgsz = int(config["base_imgsz"])
     scale_factors = list(config["scales"])
@@ -388,7 +462,7 @@ def run_multiscale(model, im0_bgr, config: dict, device=None) -> torch.Tensor:
 
     all_boxes_norm, all_scores, all_classes = [], [], []
 
-    im_rgb = cv2.cvtColor(im0_bgr, cv2.COLOR_BGR2RGB)
+    im_rgb = cv2.cvtColor(infer_bgr, cv2.COLOR_BGR2RGB)
 
     # go through image scale predicitons
     for imgsz in imgszs:
@@ -505,5 +579,7 @@ def run_multiscale(model, im0_bgr, config: dict, device=None) -> torch.Tensor:
 
     fused_abs = fused_abs[fused_abs[:, 4] >= final_conf]
     fused_abs = nms_xyxy_abs(fused_abs, iou_thr=final_iou, max_det=final_max_det)
+
+    fused_abs = unpad_and_clip_detections(fused_abs, pad_px, (orig_w, orig_h))
 
     return fused_abs

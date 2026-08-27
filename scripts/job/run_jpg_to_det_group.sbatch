@@ -27,7 +27,7 @@ cd "${PROJECT_DIR}"
 
 # Use your actual environment setup.
 CUDA_VISIBLE_DEVICES="" bash ./setup.sh
-source "/project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/activate"
+source "${PROJECT_DIR}/.venv/bin/activate"
 
 if [[ ! -f "${GROUP_FILE}" ]]; then
     echo "Batch group file not found: ${GROUP_FILE}" >&2
