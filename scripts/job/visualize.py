@@ -25,6 +25,23 @@ Works for any stage — behaviour is controlled by --mode:
                renders all of it rather than sampling a second time.
                Output: overlay JPGs downscaled to --max-width.
 
+  det_to_seg   Overlay class-ID segmentation masks on a random sample of
+               JPGs. Requires --masks directory of per-image mask PNGs
+               (pixel value = class ID, 0 = background) from det_to_seg.
+               When --species-catalog is also given (a catalog JSON with
+               'species' entries keyed by class_id/rgb and, for cultivar
+               classes, 'cultivars' entries keyed by cultivar_class_id/r/g/b
+               — e.g. species_catalog.generated.json, or species_info.json
+               for species-only colors), each class is colorized by its own
+               species/cultivar color, each overlay gets an in-image legend
+               box (color + name, top-left corner, cultivar name preferred
+               over species common name) for the classes present in that
+               image, and a legend.png swatch/name key covering every class
+               seen across the whole sample is written alongside the
+               overlays. Omit --species-catalog and every foreground pixel
+               renders as solid red with no legend. Output: overlay JPGs
+               downscaled to --max-width, plus legend.png when colorized.
+
 Output always goes to --output and is promoted to:
   <final_dest_root>/<batch_id>/<stage>/sample/
 
@@ -56,6 +73,16 @@ python scripts/job/visualize.py \\
     --output /path/to/sample \\
     --max-width 1800
 
+# det_to_seg mask overlay sample, colorized by species:
+python scripts/job/visualize.py \\
+    --mode det_to_seg \\
+    --images /path/to/batch/images \\
+    --masks /path/to/run/artifacts/masks \\
+    --species-catalog /path/to/species_catalog.generated.json \\
+    --output /path/to/sample \\
+    --sample-size 24 \\
+    --max-width 1800
+
 Exit codes:
   0  Success
   1  Hard failure (bad args, unreadable directories)
@@ -65,6 +92,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import random
 from pathlib import Path
@@ -73,6 +101,7 @@ from tqdm import tqdm
 
 import cv2
 import geopandas as gpd
+import numpy as np
 from shapely.geometry import Polygon
 
 logger = logging.getLogger(__name__)
@@ -101,6 +130,30 @@ _DET_TO_WORLD_LABEL_Y_MIN    = 20
 # units is not cm^2 without a geodetic reprojection. Skip the area label
 # rather than show a wildly wrong number.
 _DEGREE_CRS_CODES = {"4326"}
+
+# det_to_seg mask overlay style — true alpha blend, masked pixels only (see
+# _render_det_to_seg), so background pixels outside a mask are left exactly
+# as-is. Deliberately high: crop imagery backgrounds range from light soil
+# to dark green canopy, and at a low alpha a dark background dominates the
+# blend regardless of the class color, e.g. a bright red class reading as
+# muddy brown over dark canopy. High opacity keeps every class's color true
+# to its catalog swatch no matter what's underneath, at the cost of mostly
+# hiding image texture within the mask — the point of this overlay is
+# unambiguous class identification, not to see through the mask.
+_MASK_ALPHA = 0.85
+_MASK_FALLBACK_COLOR_BGR = (0, 0, 255)  # red, for class IDs absent from the catalog
+
+# In-image legend box style (see _draw_legend_box). Drawn *after*
+# max-width downscaling, like det_to_world's labels above, so its size stays
+# stable/legible regardless of source resolution.
+_LEGEND_MARGIN         = 10
+_LEGEND_ROW_HEIGHT     = 26
+_LEGEND_SWATCH_SIZE    = 16
+_LEGEND_FONT_SCALE     = 0.5
+_LEGEND_FONT_THICKNESS = 1
+_LEGEND_BG_COLOR       = (255, 255, 255)
+_LEGEND_TEXT_COLOR     = (0, 0, 0)
+_LEGEND_BG_ALPHA       = 0.75
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +432,211 @@ def _render_det_to_world(
     return ok
 
 
+def _extract_rgb(entry: dict) -> tuple[int, int, int] | None:
+    """An entry's (r, g, b) as ints, however the catalog happens to store it:
+    species_catalog.generated.json uses separate top-level 'r'/'g'/'b' keys
+    (for both its 'species' and 'cultivars' sections), while species_info.json
+    nests them as a nested 'rgb': [r, g, b] list instead. Returns None if
+    neither shape yields a complete triple."""
+    rgb = entry.get("rgb")
+    if rgb is not None:
+        r, g, b = rgb
+        return int(r), int(g), int(b)
+
+    r, g, b = entry.get("r"), entry.get("g"), entry.get("b")
+    if r is None or g is None or b is None:
+        return None
+    return int(r), int(g), int(b)
+
+
+def load_species_colors(
+    species_catalog_path: Path,
+) -> tuple[dict[int, tuple[int, int, int]], dict[int, str]]:
+    """Per-class BGR colors and display names keyed by class_id, merged from
+    a species catalog JSON's 'species' entries (keyed by USDA symbol;
+    class_id + rgb, see _extract_rgb for the two field shapes) and its
+    'cultivars' entries (keyed by cultivar_class_id; cultivar_class_id + rgb)
+    — see stages/det_to_world/species.py's enrich_with_catalog for the same
+    two sections. The two ID spaces don't overlap (cultivar_class_id starts
+    well above the species range), so no explicit collision handling is
+    needed. Cultivar name wins over species common name for a cultivar
+    class_id, mirroring _detection_name_label's cultivar_name-over-
+    species_name preference. species_info.json has no 'cultivars' section,
+    so callers passing it get species-only colors/names."""
+    catalog = json.loads(species_catalog_path.read_text(encoding="utf-8"))
+
+    colors: dict[int, tuple[int, int, int]] = {}
+    names: dict[int, str] = {}
+
+    for entry in catalog.get("species", {}).values():
+        class_id = entry.get("class_id")
+        rgb = _extract_rgb(entry)
+        if class_id is None or rgb is None:
+            continue
+        r, g, b = rgb
+        class_id = int(class_id)
+        colors[class_id] = (b, g, r)
+        names[class_id] = entry.get("common_name") or entry.get("USDA_symbol") or str(class_id)
+
+    for entry in catalog.get("cultivars", {}).values():
+        class_id = entry.get("cultivar_class_id")
+        rgb = _extract_rgb(entry)
+        if class_id is None or rgb is None:
+            continue
+        r, g, b = rgb
+        class_id = int(class_id)
+        colors[class_id] = (b, g, r)
+        names[class_id] = entry.get("cultivar_name") or entry.get("display_name") or str(class_id)
+
+    return colors, names
+
+
+def build_color_lut(colors: dict[int, tuple[int, int, int]]) -> np.ndarray:
+    """256-entry BGR lookup table for vectorized mask colorization
+    (color_lut[mask] colorizes a whole uint8 class-ID array in one index)."""
+    lut = np.full((256, 3), _MASK_FALLBACK_COLOR_BGR, dtype=np.uint8)
+    for class_id, bgr in colors.items():
+        if 0 <= class_id <= 255:
+            lut[class_id] = bgr
+    lut[0] = (0, 0, 0)  # background stays untinted
+    return lut
+
+
+def write_legend(
+    path: Path,
+    class_ids: list[int],
+    colors: dict[int, tuple[int, int, int]],
+    names: dict[int, str],
+    row_height: int = 36,
+    width: int = 420,
+) -> None:
+    """Swatch + label per class ID actually seen across the sampled masks —
+    a global species-color key would run to ~80 rows for the full catalog,
+    most of them irrelevant to any one batch."""
+    img = np.full((row_height * len(class_ids) + 10, width, 3), 255, dtype=np.uint8)
+    for i, class_id in enumerate(class_ids):
+        y0 = 10 + i * row_height
+        swatch = row_height - 10
+        color = colors.get(class_id, _MASK_FALLBACK_COLOR_BGR)
+        cv2.rectangle(img, (10, y0), (10 + swatch, y0 + swatch), color, -1)
+        cv2.putText(
+            img,
+            f"{class_id}: {names.get(class_id, 'unknown')}",
+            (20 + swatch, y0 + swatch - 6),
+            _FONT, 0.55, (0, 0, 0), 1, cv2.LINE_AA,
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(path), img)
+
+
+def _draw_legend_box(
+    im: np.ndarray,
+    class_ids: list[int],
+    color_lut: np.ndarray,
+    names: dict[int, str],
+) -> np.ndarray:
+    """Draw a color-swatch + name key for this image's own class IDs in its
+    top-left corner (as opposed to write_legend's separate legend.png, which
+    covers every class across the whole sample) — cultivar name if the class
+    is a cultivar, else species common name, per load_species_colors."""
+    if not class_ids:
+        return im
+
+    labels = [names.get(class_id, str(class_id)) for class_id in class_ids]
+    label_widths = [
+        cv2.getTextSize(label, _FONT, _LEGEND_FONT_SCALE, _LEGEND_FONT_THICKNESS)[0][0]
+        for label in labels
+    ]
+    box_w = _LEGEND_MARGIN * 3 + _LEGEND_SWATCH_SIZE + max(label_widths)
+    box_h = _LEGEND_MARGIN * 2 + len(class_ids) * _LEGEND_ROW_HEIGHT
+
+    overlay = im.copy()
+    cv2.rectangle(
+        overlay,
+        (_LEGEND_MARGIN, _LEGEND_MARGIN),
+        (_LEGEND_MARGIN + box_w, _LEGEND_MARGIN + box_h),
+        _LEGEND_BG_COLOR, -1,
+    )
+    im = cv2.addWeighted(overlay, _LEGEND_BG_ALPHA, im, 1.0 - _LEGEND_BG_ALPHA, 0)
+
+    for i, (class_id, label) in enumerate(zip(class_ids, labels)):
+        y0 = _LEGEND_MARGIN * 2 + i * _LEGEND_ROW_HEIGHT
+        color = tuple(int(c) for c in color_lut[class_id])
+        cv2.rectangle(
+            im,
+            (_LEGEND_MARGIN * 2, y0),
+            (_LEGEND_MARGIN * 2 + _LEGEND_SWATCH_SIZE, y0 + _LEGEND_SWATCH_SIZE),
+            color, -1,
+        )
+        cv2.putText(
+            im, label,
+            (_LEGEND_MARGIN * 3 + _LEGEND_SWATCH_SIZE, y0 + _LEGEND_SWATCH_SIZE - 3),
+            _FONT, _LEGEND_FONT_SCALE, _LEGEND_TEXT_COLOR, _LEGEND_FONT_THICKNESS, cv2.LINE_AA,
+        )
+
+    return im
+
+
+def _render_det_to_seg(
+    image_path: Path,
+    mask_path: Path,
+    out_path: Path,
+    max_width: int,
+    color_lut: np.ndarray | None,
+    class_names: dict[int, str] | None = None,
+) -> tuple[bool, set[int]]:
+    """Overlay one det_to_seg class-ID mask (pixel value = class ID, 0 =
+    background) on its source JPG. Colorized per class via color_lut when
+    given, else every foreground pixel renders as solid red. When color_lut
+    and class_names are both given, also draws an in-image legend box (see
+    _draw_legend_box) for the classes present in this mask. Returns whether
+    the overlay was written and which class IDs were present in this mask,
+    so the caller can build a legend covering only classes actually sampled.
+    """
+    im = cv2.imread(str(image_path))
+    if im is None:
+        logger.warning("Could not read: %s", image_path)
+        return False, set()
+
+    h, w = im.shape[:2]
+    present_classes: set[int] = set()
+
+    if mask_path.exists():
+        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        if mask is None:
+            logger.warning("Could not read mask: %s", mask_path)
+        else:
+            if mask.shape[:2] != (h, w):
+                mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+            present_classes = {int(c) for c in np.unique(mask) if c != 0}
+            if color_lut is not None:
+                color_layer = color_lut[mask]
+            else:
+                color_layer = np.full_like(im, _MASK_FALLBACK_COLOR_BGR)
+            # True alpha blend (weights sum to 1), not additive — additive
+            # tinting (color*alpha + im, weights summing to >1) barely moves
+            # dark/muted species colors off the background and reads as
+            # grey. Only masked pixels get blended; np.where keeps
+            # background pixels exactly as the source image, since
+            # color_layer's background entries (class 0 / fallback) aren't
+            # meaningful colors to blend in.
+            blended = cv2.addWeighted(color_layer, _MASK_ALPHA, im, 1.0 - _MASK_ALPHA, 0)
+            im = np.where(mask[..., None] > 0, blended, im)
+
+    if im.shape[1] > max_width:
+        scale = max_width / im.shape[1]
+        im = cv2.resize(im, (int(im.shape[1] * scale), int(im.shape[0] * scale)))
+
+    if color_lut is not None and class_names is not None and present_classes:
+        im = _draw_legend_box(im, sorted(present_classes), color_lut, class_names)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    ok = cv2.imwrite(str(out_path), im)
+    if not ok:
+        logger.warning("cv2.imwrite failed for %s", out_path)
+    return ok, present_classes
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -388,7 +646,8 @@ def main() -> int:
         description="Generate a downscaled random sample of stage outputs for QC."
     )
     parser.add_argument(
-        "--mode", required=True, choices=["raw_to_jpg", "jpg_to_det", "det_to_world"],
+        "--mode", required=True,
+        choices=["raw_to_jpg", "jpg_to_det", "det_to_world", "det_to_seg"],
         help="Stage to visualize.",
     )
     parser.add_argument(
@@ -400,6 +659,18 @@ def main() -> int:
         help=(
             "Directory of .txt detection files (jpg_to_det mode), or the "
             "single *_georeferenced.csv file (det_to_world mode)."
+        ),
+    )
+    parser.add_argument(
+        "--masks", type=Path, default=None,
+        help="det_to_seg mode only: directory of per-image class-ID mask PNGs.",
+    )
+    parser.add_argument(
+        "--species-catalog", type=Path, default=None,
+        help=(
+            "det_to_seg mode only: species catalog JSON with per-species "
+            "'class_id'/'rgb' fields, used to colorize masks by class and "
+            "write a legend.png. Omit to render every class as solid red."
         ),
     )
     parser.add_argument(
@@ -454,6 +725,10 @@ def main() -> int:
         logger.error("--detections must be a valid *_georeferenced.csv file for det_to_world mode")
         return 1
 
+    if args.mode == "det_to_seg" and (args.masks is None or not args.masks.is_dir()):
+        logger.error("--masks must be a valid directory for det_to_seg mode")
+        return 1
+
     images = sorted(
         list(args.images.glob("*.jpg")) +
         list(args.images.glob("*.JPG")) +
@@ -483,7 +758,15 @@ def main() -> int:
     if args.mode == "det_to_world":
         rows_by_image = load_georeferenced_rows_by_image(args.detections)
 
+    seg_colors: dict[int, tuple[int, int, int]] = {}
+    seg_names: dict[int, str] = {}
+    seg_color_lut: np.ndarray | None = None
+    if args.mode == "det_to_seg" and args.species_catalog is not None:
+        seg_colors, seg_names = load_species_colors(args.species_catalog)
+        seg_color_lut = build_color_lut(seg_colors)
+
     written = failed = 0
+    seg_present_classes: set[int] = set()
     # generate random list of indices of full-sized images to include in the sample (max 5)
     fullsized_rdm_idx = random.sample(range(len(sample)), min(5, len(sample)))
 
@@ -499,6 +782,13 @@ def main() -> int:
         elif args.mode == "det_to_world":
             image_rows = rows_by_image.get(image_path.stem, [])
             ok = _render_det_to_world(image_path, image_rows, out_path, args.max_width)
+
+        elif args.mode == "det_to_seg":
+            mask_path = args.masks / f"{image_path.stem}.png"
+            ok, present_classes = _render_det_to_seg(
+                image_path, mask_path, out_path, args.max_width, seg_color_lut, seg_names
+            )
+            seg_present_classes |= present_classes
 
         else:
             det_path = args.detections / f"{image_path.stem}.txt"
@@ -519,6 +809,11 @@ def main() -> int:
         # "NC_2026-07-17_georeferenced.csv" -> "NC_2026-07-17"
         batch_id = args.detections.stem.removesuffix("_georeferenced")
         write_bbox_shapefile(all_rows, batch_id, args.bbox_shp_output)
+
+    if args.mode == "det_to_seg" and seg_color_lut is not None and seg_present_classes:
+        legend_path = args.output / "legend.png"
+        write_legend(legend_path, sorted(seg_present_classes), seg_colors, seg_names)
+        logger.info("Wrote legend for %d class(es) to %s", len(seg_present_classes), legend_path)
 
     return 0
 

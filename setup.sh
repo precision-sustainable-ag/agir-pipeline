@@ -31,8 +31,7 @@ UV_BIN="${UV_BIN_DIR}/uv"
 LOCAL_ROOT="/home/${USER}"
 HPC_ROOT="/project/dash_agir/${USER}"
 
-LOCAL_VENV="${LOCAL_ROOT}/software/uv/venvs/${ENV_NAME}"
-HPC_VENV="${HPC_ROOT}/software/uv/venvs/${ENV_NAME}"
+VENV_PATH="${SCRIPT_DIR}/.venv"
 
 LOCAL_CACHE="${LOCAL_ROOT}/uv-cache"
 HPC_CACHE="${HPC_ROOT}/uv-cache"
@@ -66,10 +65,8 @@ configure_mode() {
   esac
 
   if [[ "${AGIR_MODE}" == "hpc" ]]; then
-    VENV_PATH="${HPC_VENV}"
     CACHE_DIR="${HPC_CACHE}"
   else
-    VENV_PATH="${LOCAL_VENV}"
     CACHE_DIR="${LOCAL_CACHE}"
   fi
 
@@ -119,6 +116,11 @@ activate_or_create_venv() {
     rm -rf "${VENV_PATH}"
   fi
 
+  if [[ -d "${VENV_PATH}" && ! -f "${VENV_PATH}/bin/activate" ]]; then
+    warn "Existing venv at ${VENV_PATH} is missing bin/activate -> removing and recreating"
+    rm -rf "${VENV_PATH}"
+  fi
+
   if [[ ! -d "${VENV_PATH}" ]]; then
     log "Creating venv (Python ${PYTHON_VERSION}) -> ${VENV_PATH}"
     uv venv --python "${PYTHON_VERSION}" "${VENV_PATH}" || die "uv venv failed"
@@ -145,7 +147,7 @@ install_pipeline() {
     uv pip install -e ".[${extras}]"
   else
     log "Installing editable: ."
-    uv pip install -e .
+    uv pip install -e .["all"]
   fi
 }
 

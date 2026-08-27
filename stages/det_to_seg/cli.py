@@ -344,7 +344,6 @@ def main() -> int:
             )
         else:
             num_failed += 1
-            logger.error("Image %s failed: [%s] %s", r.image_id, r.error_code, r.error_message)
             manifest.add_failed_item(
                 image_id=r.image_id,
                 error_type=r.error_type,

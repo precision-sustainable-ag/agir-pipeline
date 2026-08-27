@@ -190,6 +190,7 @@ def process_requests(
             src_path=req.src_path,
             dst_path=req.dst_path,
             label=build_input_staging_label(req.stage, req.batch_id),
+            file_names=req.file_names,
         )
         submit_result = submit_func(transfer_request)
         if submit_result.status == "submitted":

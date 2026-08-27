@@ -9,6 +9,8 @@ from typing import Iterable
 
 import cv2
 import yaml
+from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from stages import ITEM_FAILED, ITEM_OK
 from stages.common import resolve_path
@@ -290,14 +292,41 @@ class Processor:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         results: list[SegmentationResult] = []
+        total = len(pairs)
 
         logger.info(
             "Execution plan | device=%s | mode=sequential | workers=1 | model_copies=1",
             self.device,
         )
-        for txt_path, jpg_path in pairs:
-            result = self.process_image(txt_path, jpg_path, output_dir)
-            results.append(result)
-            if result.status == ITEM_FAILED and fail_stop:
-                return results
+        with logging_redirect_tqdm():
+            progress = tqdm(pairs, total=total, desc="det_to_seg", unit="img")
+            for idx, (txt_path, jpg_path) in enumerate(progress, start=1):
+                image_id = txt_path.stem
+                progress.set_postfix_str(image_id)
+                logger.info("[%d/%d] Processing image %s", idx, total, image_id)
+
+                result = self.process_image(txt_path, jpg_path, output_dir)
+                results.append(result)
+
+                if result.status == ITEM_OK:
+                    logger.info(
+                        "[%d/%d] Image %s OK -> %s (detections=%d, fallback=%d)",
+                        idx,
+                        total,
+                        image_id,
+                        result.mask_path,
+                        result.n_detections,
+                        result.n_fallback_detections,
+                    )
+                else:
+                    logger.error(
+                        "[%d/%d] Image %s FAILED [%s]: %s",
+                        idx,
+                        total,
+                        image_id,
+                        result.error_code,
+                        result.error_message,
+                    )
+                    if fail_stop:
+                        return results
         return results

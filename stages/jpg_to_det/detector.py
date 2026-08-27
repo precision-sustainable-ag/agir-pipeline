@@ -418,6 +418,7 @@ def run_multiscale(model, im0_bgr, config: dict, device=None) -> torch.Tensor:
         if mirror_cfg is not None and mirror_cfg.get("enabled", False)
         else 0
     )
+    
     infer_bgr = mirror_pad_image(im0_bgr, pad_px)
 
     # All inference below (scales, edge-aware filtering, WBF, NMS) runs in

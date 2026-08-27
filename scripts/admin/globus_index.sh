@@ -44,7 +44,7 @@ echo "[INFO] Main log: ${MAIN_LOG}"
 # ---- Environment ----
 # Load whatever your system requires for globus CLI and Python.
 # module load globus-cli
-source /project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/activate
+source /project/dash_agir/matthew.kutugata/repos/agir-pipeline/.venv/bin/activate
 
 # ---- Paths ----
 REPO_DIR="/project/dash_agir/matthew.kutugata/repos/agir-pipeline"
@@ -95,9 +95,16 @@ python3 "${PYTHON_SCRIPT}" \
     --log-file "${LOG_DIR}/globus_index_sqlite_${TIMESTAMP}.log"
 
 if command -v sqlite3 >/dev/null 2>&1; then
-    echo "[INFO] Latest inventory runs:"
+    echo "[INFO] Latest inventory runs (most recent run per site/scope):"
     sqlite3 -header -column "${SQLITE_DB}" \
-        "SELECT run_id, site, namespace, storage_root, data_state, status, total_seen, total_marked_stale, started_at_ts_iso, ended_at_ts_iso FROM inventory_runs ORDER BY run_id DESC LIMIT 20;"
+        "SELECT ir.run_id, ir.site, ir.namespace, ir.storage_root, ir.data_state, ir.status, ir.total_seen, ir.total_marked_stale, ir.started_at_ts_iso, ir.ended_at_ts_iso
+         FROM inventory_runs ir
+         JOIN (
+             SELECT site, storage_domain, namespace, storage_root, data_state, MAX(run_id) AS run_id
+             FROM inventory_runs
+             GROUP BY site, storage_domain, namespace, storage_root, data_state
+         ) latest USING (site, storage_domain, namespace, storage_root, data_state, run_id)
+         ORDER BY ir.site, ir.namespace, ir.storage_root, ir.data_state;"
 
     echo "[INFO] Current file counts by site/root/state:"
     sqlite3 -header -column "${SQLITE_DB}" \

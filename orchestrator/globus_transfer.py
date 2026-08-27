@@ -27,6 +27,7 @@ class TransferRequest:
     src_path: str
     dst_path: str
     label: Optional[str] = None
+    file_names: Optional[Sequence[str]] = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class TransferSubmitResult:
     globus_task_id: Optional[str]
     details: str
     command: list[str]
+    file_names: Optional[Sequence[str]] = None
 
 
 @dataclass(frozen=True)
@@ -91,7 +93,7 @@ def build_transfer_command(
     return cmd
 
 
-def build_batch_stdin(request: StagingRequest) -> str:
+def build_batch_stdin(request: TransferRequest) -> str:
     """
     Build the stdin payload for a batch-mode (individual-file) transfer:
     one ``SRC_PATH DST_PATH`` pair per line, joining each sampled file name
