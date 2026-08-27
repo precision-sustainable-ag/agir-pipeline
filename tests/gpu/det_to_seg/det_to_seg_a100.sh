@@ -205,7 +205,8 @@ python3 "$VIZ_SCRIPT" \
   --masks "$MASK_DIR" \
   --output "$FINAL_VIZ_DIR" \
   --sample-size "$VIZ_SAMPLE_SIZE" \
-  --max-width "$VIZ_MAX_WIDTH"
+  --max-width "$VIZ_MAX_WIDTH" \
+  --species-catalog "$SPECIES_CATALOG_PATH"
 
 echo "Job finished at $(date)"
 echo "Detections:              $DET_ARTIFACT_DIR"

@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=jpg_to_det_group
+#SBATCH --job-name=det_to_seg_group
 #SBATCH --account=dash_agir
 #SBATCH --partition=atlas
 #SBATCH --time=1-00:00:00
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=2G
-#SBATCH --output=/project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs/jpg_to_det_group_%j.out
-#SBATCH --error=/project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs/jpg_to_det_group_%j.err
+#SBATCH --output=/project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs/det_to_seg_group_%j.out
+#SBATCH --error=/project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs/det_to_seg_group_%j.err
 
 set -Eeuo pipefail
 umask 002
 
 PROJECT_DIR="/project/dash_agir/matthew.kutugata/repos/agir-pipeline"
-CONFIG_FILE="configs/config.jpg_to_det.atlas.example.yaml"
-STAGE="jpg_to_det"
+CONFIG_FILE="configs/config.det_to_seg.atlas.example.yaml"
+STAGE="det_to_seg"
 POLL_SECONDS=60
 
-GROUP_FILE="${1:?Usage: sbatch run_jpg_to_det_group.sbatch <group-file>}"
+GROUP_FILE="${1:?Usage: sbatch run_det_to_seg_group.sbatch <group-file>}"
 
 GROUP_START_EPOCH=$(date +%s)
 GROUP_START_TIME=$(date --iso-8601=seconds)
@@ -148,7 +148,11 @@ while IFS= read -r batch_id || [[ -n "${batch_id}" ]]; do
 
     rm -f "${batch_file}"
 
-    # Do not submit the next batch until this batch's downstream job finishes.
+    # Do not submit the next batch until this batch's det_to_seg job
+    # finishes — det_to_seg holds a single a100 GPU per job (gres: gpu:1,
+    # see slurm: in CONFIG_FILE), so waiting here keeps this group from ever
+    # having more than one det_to_seg job in flight, which is what keeps the
+    # GPU from running out of memory.
     wait_for_batch_job "${batch_id}"
 
     echo "Finished batch: ${batch_id}"

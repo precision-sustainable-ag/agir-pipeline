@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 
 from orchestrator.globus_transfer import (
+    TransferRequest,
     build_batch_stdin,
     build_input_staging_label,
     build_task_show_command,
@@ -14,13 +15,10 @@ from orchestrator.globus_transfer import (
     submit_many,
     submit_transfer,
 )
-from orchestrator.input_staging_planner import StagingRequest
 
 
-def make_request() -> StagingRequest:
-    return StagingRequest(
-        batch_id="NC_2025-01-01",
-        stage="raw_to_jpg",
+def make_request() -> TransferRequest:
+    return TransferRequest(
         src_endpoint="juno-uuid",
         dst_endpoint="ceres-uuid",
         src_path="/LTS/project/dash_agir/semifield-upload/NC_2025-01-01",
@@ -28,12 +26,15 @@ def make_request() -> StagingRequest:
     )
 
 
+def test_build_input_staging_label() -> None:
+    assert build_input_staging_label("raw_to_jpg", "NC_2025-01-01") == (
+        "agir:raw_to_jpg:NC_2025-01-01:input_stage"
+    )
+
+
 def test_build_transfer_command() -> None:
     request = make_request()
 
-    assert build_input_staging_label(request.stage, request.batch_id) == (
-        "agir:raw_to_jpg:NC_2025-01-01:input_stage"
-    )
     assert build_transfer_command(request, label="label-1") == [
         "globus",
         "transfer",
@@ -47,10 +48,8 @@ def test_build_transfer_command() -> None:
     ]
 
 
-def make_batch_request() -> StagingRequest:
-    return StagingRequest(
-        batch_id="MD_2026-03-19",
-        stage="det_to_world",
+def make_batch_request() -> TransferRequest:
+    return TransferRequest(
         src_endpoint="atlas-uuid",
         dst_endpoint="ceres-uuid",
         src_path="/90daydata/dash_agir/semifield-developed-images/MD_2026-03-19/images",

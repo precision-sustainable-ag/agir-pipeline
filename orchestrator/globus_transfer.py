@@ -93,7 +93,7 @@ def build_transfer_command(
     return cmd
 
 
-def build_batch_stdin(request: StagingRequest) -> str:
+def build_batch_stdin(request: TransferRequest) -> str:
     """
     Build the stdin payload for a batch-mode (individual-file) transfer:
     one ``SRC_PATH DST_PATH`` pair per line, joining each sampled file name
