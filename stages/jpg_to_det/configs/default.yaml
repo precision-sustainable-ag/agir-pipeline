@@ -10,9 +10,9 @@ wbf_iou: 0.55
 wbf_score_thr: 0.001
 edge_aware:
   enabled: true
-  edge_band_rel: 0.08
-  min_factor: 0.60
-  taper_rel: 0.20
+  edge_band_rel: 0.12 # relative edge, percentage of the edge that included relative to total image size
+  min_factor: 0.45 # reduce this to 0.45 conf threshold for edges 
+  taper_rel: 0.0 # conf gradient extending from the center portion to the outside edge based on edge_band_rel. 0 means no gradient. 
 post_fusion_nms:
   enabled: false
   iou: 0.5
