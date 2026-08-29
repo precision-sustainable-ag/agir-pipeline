@@ -1,34 +1,34 @@
 #!/usr/bin/env python3
 """Test suite for raw_to_jpg stage."""
 
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-import tempfile
-from unittest.mock import patch, Mock
-import numpy as np
-import yaml
+import os
 import subprocess
+import tempfile
+from pathlib import Path
+from unittest.mock import patch, Mock
 
-from stages.raw_to_jpg.processor import Processor, load_config, validate_config, _classify_error, ImageResult
+import numpy as np
+import pytest
+import yaml
+
+from stages.raw_to_jpg.processor import Processor, load_config, validate_config
 from stages.raw_to_jpg.raw_to_jpg import RawToDng, DngToJpg
 from stages.common.config import parse_batch_id
-from stages import ITEM_OK, ITEM_FAILED
-from stages.raw_to_jpg import (
-    ERROR_FILE_NOT_FOUND, ERROR_INVALID_RAW, ERROR_DNG_CONVERSION_FAILED,
-    ERROR_JPG_DEVELOPMENT_FAILED, ERROR_RT_TIMEOUT, ERROR_UNKNOWN,
-)
+from stages import ITEM_OK
 
 
-def create_mock_config(tmp_dir: Path) -> Path:
-    """Create valid config with mock files."""
-    config_dir = tmp_dir / "config"
+# ============================================================================
+# Fixtures
+# ============================================================================
+
+@pytest.fixture
+def mock_config(tmp_path):
+    """Create valid config with mock files and return config path."""
+    config_dir = tmp_path / "config"
     assets_dir = config_dir / "assets"
     config_dir.mkdir(parents=True, exist_ok=True)
     assets_dir.mkdir(parents=True, exist_ok=True)
 
-    # Prepare data
     color_matrix_data = np.array({
         "color_matrix": np.eye(3),
         "forward_matrix": np.eye(3),
@@ -55,7 +55,6 @@ def create_mock_config(tmp_dir: Path) -> Path:
         },
     }
 
-    # Create all files
     np.save(assets_dir / "color_matrix.npy", color_matrix_data)
     with open(assets_dir / "svs_tags.yaml", "w") as f:
         yaml.dump(svs_tags, f)
@@ -82,9 +81,9 @@ def create_mock_config(tmp_dir: Path) -> Path:
     return config_path
 
 
-def create_mock_raw_file(tmp_dir: Path, name: str = "test.raw") -> Path:
+def _create_mock_raw_file(tmp_path, name="test.raw"):
     """Create mock RAW file."""
-    raw_path = tmp_dir / name
+    raw_path = tmp_path / name
     raw_path.write_bytes(b"\x00" * (4096 * 3072 * 2))
     return raw_path
 
@@ -93,256 +92,157 @@ def create_mock_raw_file(tmp_dir: Path, name: str = "test.raw") -> Path:
 # Tests
 # ============================================================================
 
-def test_config_loading():
-    """Test config loading."""
-    print("[TEST]: test_config_loading")
-    with tempfile.TemporaryDirectory() as tmp:
-        config_path = create_mock_config(Path(tmp))
-        config = load_config(config_path)
-        assert "paths" in config
-        assert "color_matrix" in config
+class TestConfigLoading:
+    def test_load_config(self, mock_config):
+        """Test config loading has all essential keys."""
+        config = load_config(mock_config)
+        for key in ["paths", "processing", "color_matrix", "dng_tags"]:
+            assert key in config, f"Missing key: {key}"
         assert isinstance(config["color_matrix"], np.ndarray)
-        print("Config loading works")
+        assert isinstance(config["dng_tags"], dict)
+
+    def test_missing_file_raises(self):
+        """Test FileNotFoundError for missing config."""
+        with pytest.raises(FileNotFoundError):
+            load_config(Path("fake.yaml"))
+
+    def test_path_resolution(self, mock_config):
+        """Test that relative paths in config are resolved relative to config directory."""
+        config_dir = mock_config.parent
+        loaded_config = load_config(mock_config)
+
+        validate_config(loaded_config)
+        for key in ["paths", "processing", "color_matrix", "dng_tags"]:
+            assert key in loaded_config, f"Missing key: {key}"
+            assert loaded_config[key] is not None, f"Key is None: {key}"
+
+        # Verify wrong path fails for each required path
+        for path_key in ["rawtherapee_cli", "color_matrix", "svs_tags", "pp3_profile"]:
+            bad_config = dict(loaded_config)
+            bad_config["paths"] = dict(loaded_config["paths"])
+            bad_config["paths"][path_key] = str(config_dir / "nonexistent" / path_key)
+            with pytest.raises(ValueError, match="(?i)not found"):
+                validate_config(bad_config)
 
 
-def test_config_missing_file():
-    """Test FileNotFoundError for missing config."""
-    print("[TEST]: test_config_missing_file")
-    try:
-        load_config(Path("fake.yaml"))
-        assert False, "Should raise FileNotFoundError"
-    except FileNotFoundError:
-        print("Missing file handled")
+class TestBatchIdParsing:
+    def test_valid_batch_ids(self):
+        assert parse_batch_id("TX_2024-06-01") == "TX_2024-06-01"
+        assert parse_batch_id("/data/NC_2025-12-31/raw/") == "NC_2025-12-31"
+
+    def test_invalid_batch_id(self):
+        assert parse_batch_id("invalid") is None
 
 
-def test_path_resolution():
-    """Test that relative paths in config are resolved relative to config directory."""
-    print("[TEST]: test_path_resolution")
-    with tempfile.TemporaryDirectory() as tmp:
-        config_path = create_mock_config(Path(tmp))
-        config_dir = config_path.parent
+class TestRawTherapeeValidation:
+    @pytest.mark.skipif(
+        not (Path(__file__).parent.parent.parent / "scripts" / "validate_rawtherapee.sh").exists(),
+        reason="validate_rawtherapee.sh script not found",
+    )
+    def test_rawtherapee_validation(self):
+        """Test RawTherapee validation by running the script."""
+        script_path = Path(__file__).parent.parent.parent / "scripts" / "validate_rawtherapee.sh"
 
-        # Load config, resolve paths, then validate directly
-        loaded_config = load_config(config_path)
-        try:
-            validate_config(loaded_config)
-            assert "color_matrix" in loaded_config
-            assert loaded_config["color_matrix"] is not None
-            assert "dng_tags" in loaded_config
-            assert loaded_config["dng_tags"] is not None
-            print("Paths resolved correctly")
-            print("Files loaded successfully from paths")
-        except ValueError as e:
-            assert False, f"Path resolution failed: {e}"
-
-        # Verify wrong path fails
-        bad_config = dict(loaded_config)
-        bad_config["paths"] = dict(loaded_config["paths"])
-        bad_config["paths"]["color_matrix"] = str(config_dir / "nonexistent/color_matrix.npy")
-        try:
-            validate_config(bad_config)
-            assert False, "Should have raised ValueError for missing file"
-        except ValueError as e:
-            assert "not found" in str(e).lower()
-            print("Missing path caught correctly")
-
-
-def test_batch_id_parsing():
-    """Test batch ID parsing."""
-    print("[TEST]: test_batch_id_parsing")
-    assert parse_batch_id("TX_2024-06-01") == "TX_2024-06-01"
-    assert parse_batch_id("/data/NC_2025-12-31/raw/") == "NC_2025-12-31"
-    assert parse_batch_id("invalid") is None
-    print("Batch ID parsing works")
-
-
-
-def test_rawtherapee_validation():
-    """Test RawTherapee validation by running the script."""
-    print("[TEST]: test_rawtherapee_validation")
-    script_path = Path(__file__).parent.parent.parent / "scripts" / "validate_rawtherapee.sh"
-
-    if not script_path.exists():
-        print(f"Script not found: {script_path}")
-        return
-
-    try:
+        # run rawtherapee script
         result = subprocess.run([str(script_path)], capture_output=True, text=True, timeout=300)
-        if result.returncode == 0:
-            print("RawTherapee validation script executed successfully")
+        if result.returncode != 0:
+            pytest.skip(f"Script failed with return code {result.returncode}: {result.stderr}")
 
-            # Output is a single line: export RT_CLI_PATH='/path/to/rawtherapee-cli'
-            export_statement = result.stdout.strip()
-            if not export_statement.startswith("export RT_CLI_PATH="):
-                print("ERROR: Unexpected output format:", export_statement)
-                return
+        # validate export statement
+        export_statement = result.stdout.strip()
+        assert export_statement.startswith("export RT_CLI_PATH="), (
+            f"Unexpected output format: {export_statement}"
+        )
 
-            rt_cli_path = export_statement.split("export RT_CLI_PATH='")[1].rstrip("'")
-            path_obj = Path(rt_cli_path)
-
-            if not path_obj.exists() or not path_obj.is_file():
-                print(f"ERROR: RawTherapee CLI path does not exist: {rt_cli_path}")
-                return
-
-            import os
-            if not os.access(rt_cli_path, os.X_OK):
-                print(f"ERROR: RawTherapee CLI is not executable: {rt_cli_path}")
-                return
-
-            print(f"✓ RawTherapee CLI found and executable: {rt_cli_path}")
-            print(f"✓ Export statement: {export_statement}")
-        else:
-            print(f"Script failed with return code {result.returncode}")
-            print("Error:", result.stderr)
-    except subprocess.TimeoutExpired:
-        print("Script timed out (expected for download)")
-    except Exception as e:
-        print(f"Note: RawTherapee validation: {e}")
+        rt_cli_path = export_statement.split("export RT_CLI_PATH='")[1].rstrip("'")
+        path_obj = Path(rt_cli_path)
+        assert path_obj.exists() and path_obj.is_file(), (
+            f"RawTherapee CLI path does not exist: {rt_cli_path}"
+        )
+        assert os.access(rt_cli_path, os.X_OK), (
+            f"RawTherapee CLI is not executable: {rt_cli_path}"
+        )
 
 
-def test_raw_to_dng_conversion():
-    """Test RAW to DNG conversion."""
-    print("[TEST]: test_raw_to_dng_conversion")
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_dir = Path(tmp)
-        config_path = create_mock_config(tmp_dir)
-        raw_path = create_mock_raw_file(tmp_dir)
+class TestConversion:
+    def test_raw_to_dng(self, mock_config, tmp_path):
+        """Test RAW to DNG conversion."""
+        raw_path = _create_mock_raw_file(tmp_path)
 
-        # mock numpy.fromfile
-        with patch("numpy.fromfile") as mock_fromfile:
-            # mock validate installation method
-            with patch.object(DngToJpg, "validate_installation", return_value=True):
-                # mock install_rawtherapee to do nothing
-                with patch.object(DngToJpg, "install_rawtherapee"):
-                    with patch("pathlib.Path.exists", return_value=True):
-                        mock_fromfile.return_value = np.zeros((3072, 4096), dtype=np.uint16)
-                        config = load_config(config_path)
-                        raw_to_dng = RawToDng(config)
-                        dng_path = raw_to_dng.convert(raw_path)
-                        assert dng_path.name == "test.dng"
-    print("RAW to DNG conversion works")
+        with patch("numpy.fromfile") as mock_fromfile, \
+             patch.object(DngToJpg, "validate_installation", return_value=True), \
+             patch.object(DngToJpg, "install_rawtherapee"), \
+             patch("pathlib.Path.exists", return_value=True):
 
 
-def test_dng_to_jpg_development():
-    """Test DNG to JPG development."""
-    print("[TEST]: test_dng_to_jpg_development")
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_dir = Path(tmp)
-        config_path = create_mock_config(tmp_dir)
-        dng_path = (tmp_dir / "test.dng")
+            mock_fromfile.return_value = np.zeros((3072, 4096), dtype=np.uint16)
+            config = load_config(mock_config)
+            raw_to_dng = RawToDng(config)
+            dng_path = raw_to_dng.convert(raw_path)
+            assert dng_path.name == "test.dng"
+
+    def test_dng_to_jpg(self, mock_config, tmp_path):
+        """Test DNG to JPG development."""
+        dng_path = tmp_path / "test.dng"
         dng_path.touch()
-        jpg_path = tmp_dir / "output" / "test.jpg"
+        jpg_path = tmp_path / "output" / "test.jpg"
 
-        # mock validate installation method
-        with patch.object(DngToJpg, "validate_installation", return_value=True):
-            # mock install_rawtherapee to do nothing
-            with patch.object(DngToJpg, "install_rawtherapee"):
-                # mock a successful RawTherapee CLI call
-                with patch("pathlib.Path.exists", return_value=True):
-                    with patch("subprocess.run") as mock_run:
-                        mock_run.return_value = Mock(returncode=0)
-                        config = load_config(config_path)
-                        dng_to_jpg = DngToJpg(config)
-                        result = dng_to_jpg.develop(dng_path, jpg_path)
-                        assert result == jpg_path, f"Expected {jpg_path}, got {result}"
-                        assert mock_run.called, "subprocess.run was not called"
-    print("[TEST]: test_dng_to_jpg_development passed")
+        with patch.object(DngToJpg, "validate_installation", return_value=True), \
+             patch.object(DngToJpg, "install_rawtherapee"), \
+             patch("pathlib.Path.exists", return_value=True), \
+             patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0)
+            config = load_config(mock_config)
+            dng_to_jpg = DngToJpg(config)
+            result = dng_to_jpg.develop(dng_path, jpg_path)
+            assert result == jpg_path
+            assert mock_run.called
 
 
+class TestProcessing:
+    def test_process_image(self, mock_config, tmp_path):
+        """Test single image processing."""
+        raw_path = _create_mock_raw_file(tmp_path)
+        output_dir = tmp_path / "output"
 
-def test_process_image():
-    """Test single image processing."""
-    print("[TEST]: test_process_image")
-    with tempfile.TemporaryDirectory() as tmp:
-        # root tmp dir for test files
-        tmp_dir = Path(tmp)
-        config_path = create_mock_config(tmp_dir)
-        raw_path = create_mock_raw_file(tmp_dir)
-        output_dir = tmp_dir / "output"
+        # ensures reading of mock raw file
+        with (
+            patch("numpy.fromfile") as mock_fromfile,
+            # mocks rawtherapee validation
+            patch.object(DngToJpg, "validate_installation", return_value=True),
+            patch.object(DngToJpg, "install_rawtherapee"),
+            # ensures path returns true
+            patch("pathlib.Path.exists", return_value=True),
+            # ensure subprocesses run as true
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = Mock(returncode=0)
+            mock_fromfile.return_value = np.zeros((3072, 4096), dtype=np.uint16)
+            processor = Processor(mock_config)
+            # assert file returns
+            jpg_path = processor.process_image(raw_path, output_dir)
+            assert jpg_path.name == "test.jpg"
 
+    def test_batch_processing(self, mock_config, tmp_path):
+        """Test batch processing."""
+        raw_files = [_create_mock_raw_file(tmp_path, f"img{i}.raw") for i in range(3)]
+        output_dir = tmp_path / "output"
 
-        # mock color matrix
-        with patch("numpy.fromfile") as mock_fromfile:
-            # mock validate installation method
-            with patch.object(DngToJpg, "validate_installation", return_value=True):
-                # mock install_rawtherapee to do nothing
-                with patch.object(DngToJpg, "install_rawtherapee"):
-                    # mock a successful RawTherapee CLI call
-                    with patch("pathlib.Path.exists", return_value=True):
-                        with patch("subprocess.run") as mock_run:
-                            mock_run.return_value = Mock(returncode=0)
-                            mock_fromfile.return_value = np.zeros((3072, 4096), dtype=np.uint16)
-                            processor = Processor(config_path)
-                            jpg_path = processor.process_image(raw_path, output_dir)
-                            assert jpg_path.name == "test.jpg"
-    print("Single image processing works")
-
-
-def test_batch_processing():
-    """Test batch processing."""
-    print("[TEST]: test_batch_processing")
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_dir = Path(tmp)
-        config_path = create_mock_config(tmp_dir)
-        raw_files = [create_mock_raw_file(tmp_dir, f"img{i}.raw") for i in range(3)]
-        output_dir = tmp_dir / "output"
-
-        # mock color matrix
-        with patch("numpy.fromfile") as mock_fromfile:
-            # mock validate installation method
-            with patch.object(DngToJpg, "validate_installation", return_value=True):
-                # mock install_rawtherapee to do nothing
-                with patch.object(DngToJpg, "install_rawtherapee"):
-                    # mock a successful RawTherapee CLI call
-                    with patch("pathlib.Path.exists", return_value=True):
-                        with patch("subprocess.run") as mock_run:
-                            mock_run.return_value = Mock(returncode=0)
-                            mock_fromfile.return_value = np.zeros((3072, 4096), dtype=np.uint16)
-                            processor = Processor(config_path)
-                            results = processor.process_batch(raw_files, output_dir, max_workers=2)
-                            assert len(results) == 3
-                            assert all(r.status == ITEM_OK for r in results)
-
-
-
-                            
-print("Batch processing works")
-
-
-print("=" * 60)
-print("raw_to_jpg Stage Tests")
-print("=" * 60)
-
-tests = [
-    test_config_loading,
-    test_config_missing_file,
-    test_path_resolution,
-    test_batch_id_parsing,
-    test_rawtherapee_validation,
-    test_raw_to_dng_conversion,
-    test_dng_to_jpg_development,
-    test_process_image,
-    test_batch_processing,
-]
-
-failed = []
-for test_func in tests:
-    try:
-        test_func()
-    except Exception as e:
-        print(f"{test_func.__name__} failed: {e}")
-        import traceback
-        traceback.print_exc()
-        failed.append(test_func.__name__)
-
-print("\n" + "=" * 60)
-if failed:
-    print(f"{len(failed)} test(s) failed:")
-    for name in failed:
-        print(f"  - {name}")
-    sys.exit(1)
-else:
-    print(f"All {len(tests)} tests passed!")
-print("=" * 60)
-
-
+        # ensures reading of mock raw file
+        with (
+            patch("numpy.fromfile") as mock_fromfile,
+            # mocks rawtherapee validation
+            patch.object(DngToJpg, "validate_installation", return_value=True),
+            patch.object(DngToJpg, "install_rawtherapee"),
+            # ensures path returns true
+            patch("pathlib.Path.exists", return_value=True),
+            # ensure subprocesses run as true
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = Mock(returncode=0)
+            mock_fromfile.return_value = np.zeros((3072, 4096), dtype=np.uint16)
+            processor = Processor(mock_config)
+            # assert multiple files run
+            results = processor.process_batch(raw_files, output_dir, max_workers=2)
+            assert len(results) == 3
+            assert all(r.status == ITEM_OK for r in results)
