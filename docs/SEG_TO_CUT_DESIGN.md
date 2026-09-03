@@ -160,10 +160,16 @@ A practical first schema is:
   "cutout_version": "<configured schema version>",
   "cutout_props": {
     "is_primary": true,
+    "intruder_cleanup": {
+      "method": "border_sweep",
+      "border_width_px": 3,
+      "removed_components": 2,
+      "remaining_components": 46
+    },
     "extends_border": false,
     "edge_cut": {
       "flagged": true,
-      "threshold": 0.1,
+      "threshold": 0.05,
       "band_width_px": 3,
       "flagged_sides": ["right"],
       "source_image_sides": ["right"],
@@ -191,10 +197,29 @@ A practical first schema is:
     "non_target_weed_pred_conf": null
   },
   "category": {
-    "species_id": "TRIN3",
-    "class_id": 31,
-    "common_name": "Crimson clover",
+    "species_id": "URRE2",
+    "class_id": 42,
+    "USDA_symbol": "URRE2",
+    "EPPO": "PANRP",
+    "group": "monocot",
+    "class": "Liliopsida",
+    "subclass": "Commelinidae",
+    "order": "Cyperales",
+    "family": "Poaceae",
+    "genus": "Urochloa",
+    "species": "Reptans",
+    "common_name": "Sprawling Signalgrass",
+    "authority": "(Linnaeus) Stapf",
+    "growth_habit": "graminoid",
+    "duration": "annual perennial",
+    "category": "summer weed",
+    "multi_species_USDA_symbol": null,
+    "link": "https://plants.usda.gov/home/plantProfile?symbol=URRE2",
+    "note": null,
+    "hex": "#aa952b",
+    "rgb": [170, 149, 43],
     "cultivar_id": null,
+    "cultivar_class_id": null,
     "cultivar_name": null
   }
 }
