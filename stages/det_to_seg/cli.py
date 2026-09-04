@@ -11,6 +11,7 @@ from pathlib import Path
 
 from stages import EXIT_CONFIG_ERROR, EXIT_FAILURE, EXIT_PARTIAL, EXIT_SUCCESS, ITEM_OK
 from stages.common import ManifestBuilder, RunReportBuilder, parse_batch_id, setup_logging
+from stages.common.class_ids import ClassIdResolutionError, load_class_id_index
 
 from . import (
     ERROR_CFG_VALIDATION_FAILED,
@@ -19,7 +20,6 @@ from . import (
     STAGE,
     STAGE_VERSION,
 )
-from .class_ids import ClassIdResolutionError, load_class_id_index
 from .processor import Processor
 
 logger = logging.getLogger(__name__)

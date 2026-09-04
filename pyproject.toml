@@ -103,6 +103,7 @@ build-backend = "setuptools.build_meta"
 "stages.det_to_world" = "stages/det_to_world"
 "stages.jpg_to_det" = "stages/jpg_to_det"
 "stages.det_to_seg" = "stages/det_to_seg"
+"stages.seg_to_cut" = "stages/seg_to_cut"
 "stages.raw_to_jpg" = "stages/raw_to_jpg"
 "orchestrator" = "orchestrator"
 
@@ -113,12 +114,14 @@ packages = [
     "stages.det_to_world",
     "stages.jpg_to_det",
     "stages.det_to_seg",
+    "stages.seg_to_cut",
     "stages.raw_to_jpg",
     "orchestrator"
 ]
 
 [tool.setuptools.package-data]
 orchestrator = ["templates/*.j2"]
+"stages.seg_to_cut" = ["configs/*.yaml"]
 
 # =============================================================================
 # CODE FORMATTING & LINTING
