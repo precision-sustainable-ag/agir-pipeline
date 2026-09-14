@@ -27,7 +27,7 @@ from stages.common import (
     setup_logging,
 )
 
-from . import ERROR_PROCESSING_FAILED, STAGE, STAGE_VERSION
+from . import ERROR_CONFIG_INVALID, ERROR_PROCESSING_FAILED, STAGE, STAGE_VERSION
 from .config import DEFAULT_CONFIG_PATH, SegToCutConfig, load_config
 from .contracts import BatchValidationResult, CutoutProcessingResult
 from .errors import SegToCutError
@@ -46,6 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--output", "--o", dest="output", type=Path, default=None)
     parser.add_argument("--batch-id", default=None)
+    parser.add_argument(
+        "--t",
+        type=int,
+        default=8,
+        help="Number of parallel image workers. Default: 8; use 0 or 1 for sequential processing.",
+    )
     parser.add_argument("--fail-stop", "--fs", dest="fail_stop", action="store_true")
     parser.add_argument("--input-manifest", type=Path, default=None)
     parser.add_argument("--season", default=None)
@@ -72,6 +78,7 @@ def _load_validation(
         georeferenced_csv=args.georeferenced_csv,
         species_catalog=args.species_catalog,
         config=config,
+        max_workers=args.t,
     )
     return config, validation
 
@@ -177,6 +184,29 @@ def _write_run_contracts(
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.t < 0:
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "error_code": ERROR_CONFIG_INVALID,
+                    "message": "--t must be a non-negative integer",
+                }
+            )
+        )
+        return EXIT_CONFIG_ERROR
+    if args.output is not None and args.fail_stop and args.t > 1:
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "error_code": ERROR_CONFIG_INVALID,
+                    "message": "--fail-stop cannot be combined with --t greater than 1",
+                }
+            )
+        )
+        return EXIT_CONFIG_ERROR
+
     # Supplying --output selects the complete stage flow. Without it, retain
     # the scaffold's useful validation-only behavior for existing callers.
     if args.output is None:
@@ -281,6 +311,7 @@ def main(argv: list[str] | None = None) -> int:
             batch_id=batch_id,
             config=config,
             fail_stop=args.fail_stop,
+            max_workers=args.t,
             season=args.season,
             bbot_version=args.bbot_version,
             lens_model=args.lens_model,

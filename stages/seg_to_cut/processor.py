@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import math
 import re
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
+from itertools import repeat
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -14,7 +17,7 @@ import cv2
 import numpy as np
 
 from stages import ITEM_FAILED, ITEM_OK, ITEM_SKIPPED
-from stages.common.class_ids import ClassIdResolutionError, build_class_id_index
+from stages.common.class_ids import ClassIdIndex, ClassIdResolutionError, build_class_id_index
 
 from . import (
     ERROR_CSV_INVALID,
@@ -48,6 +51,8 @@ from .metadata import (
     finalize_species_bbox_metrics,
 )
 from .writer import write_cutout_artifacts
+
+logger = logging.getLogger(__name__)
 
 _SAFE_ID_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
@@ -93,8 +98,21 @@ class _DetectionRow:
     world_bbox: WorldBoundingBox | None
 
 
+@dataclass(frozen=True)
+class _EligibilityPassResult:
+    eligible: tuple[tuple[str, int], ...]
+    area_inputs: tuple[AreaMetricInput, ...]
+    early_results: tuple[CutoutProcessingResult, ...]
+
+
 def _input_error(code: str, message: str, **context: Any) -> SegToCutInputError:
     return SegToCutInputError(code, message, **context)
+
+
+def _bounded_worker_count(max_workers: int, item_count: int) -> int:
+    if isinstance(max_workers, bool) or not isinstance(max_workers, int) or max_workers < 0:
+        raise ValueError("max_workers must be a non-negative integer")
+    return min(max_workers, item_count)
 
 
 def _normalize_image_id(value: Any, *, context: str) -> tuple[str, str]:
@@ -438,6 +456,80 @@ def _validate_image_and_mask(
     return width, height
 
 
+def _validate_discovered_image(
+    normalized_image_id: str,
+    image_rows: Sequence[_DetectionRow],
+    image_index: Mapping[str, Path],
+    mask_index: Mapping[str, Path],
+    class_ids: ClassIdIndex,
+    known_class_ids: frozenset[int],
+) -> ValidatedImageInput:
+    image_id = image_rows[0].image_id
+    image_path = image_index.get(normalized_image_id)
+    if image_path is None:
+        raise _input_error(
+            ERROR_IMAGE_MISSING,
+            f"No JPG image matches image_id {image_id!r}",
+            image_id=image_id,
+        )
+    mask_path = mask_index.get(normalized_image_id)
+    if mask_path is None:
+        raise _input_error(
+            ERROR_MASK_MISSING,
+            f"No segmentation mask matches image_id {image_id!r}",
+            image_id=image_id,
+        )
+
+    width, height = _validate_image_and_mask(
+        image_id=image_id,
+        image_path=image_path,
+        mask_path=mask_path,
+        known_class_ids=known_class_ids,
+    )
+    detections: list[DetectionInput] = []
+    for row in image_rows:
+        class_id = class_ids.get(row.image_id, row.bounding_box_id)
+        if class_id is None:
+            raise _input_error(
+                ERROR_CSV_INVALID,
+                f"No class assignment for detection {row.image_id!r}:{row.bounding_box_id}",
+            )
+        if class_id not in known_class_ids:
+            raise _input_error(
+                ERROR_CSV_INVALID,
+                f"Detection {row.image_id!r}:{row.bounding_box_id} resolves to "
+                f"class {class_id}, which is absent from the species catalog",
+                image_id=row.image_id,
+                bounding_box_id=row.bounding_box_id,
+            )
+        detections.append(
+            DetectionInput(
+                image_id=row.image_id,
+                bounding_box_id=row.bounding_box_id,
+                normalized_bbox=row.normalized_bbox,
+                pixel_bbox=normalized_bbox_to_pixels(
+                    row.normalized_bbox,
+                    width=width,
+                    height=height,
+                    image_id=row.image_id,
+                    bounding_box_id=row.bounding_box_id,
+                ),
+                class_id=class_id,
+                species_id=row.species_id,
+                cultivar_id=row.cultivar_id,
+                world_bbox=row.world_bbox,
+            )
+        )
+    return ValidatedImageInput(
+        image_id=image_id,
+        image_path=image_path,
+        mask_path=mask_path,
+        width=width,
+        height=height,
+        detections=tuple(detections),
+    )
+
+
 def discover_and_validate_inputs(
     *,
     images_dir: str | Path,
@@ -445,6 +537,7 @@ def discover_and_validate_inputs(
     georeferenced_csv: str | Path,
     species_catalog: str | Path,
     config: SegToCutConfig,
+    max_workers: int = 0,
 ) -> BatchValidationResult:
     """Discover, match, and fully validate all inputs needed before cutout generation."""
 
@@ -462,75 +555,31 @@ def discover_and_validate_inputs(
     for row in rows:
         rows_by_image.setdefault(row.normalized_image_id, []).append(row)
 
-    validated_images: list[ValidatedImageInput] = []
-    for normalized_image_id in sorted(rows_by_image):
-        image_rows = rows_by_image[normalized_image_id]
-        image_id = image_rows[0].image_id
-        image_path = image_index.get(normalized_image_id)
-        if image_path is None:
-            raise _input_error(
-                ERROR_IMAGE_MISSING,
-                f"No JPG image matches image_id {image_id!r}",
-                image_id=image_id,
-            )
-        mask_path = mask_index.get(normalized_image_id)
-        if mask_path is None:
-            raise _input_error(
-                ERROR_MASK_MISSING,
-                f"No segmentation mask matches image_id {image_id!r}",
-                image_id=image_id,
-            )
+    image_groups = tuple(
+        (normalized_image_id, tuple(rows_by_image[normalized_image_id]))
+        for normalized_image_id in sorted(rows_by_image)
+    )
 
-        width, height = _validate_image_and_mask(
-            image_id=image_id,
-            image_path=image_path,
-            mask_path=mask_path,
-            known_class_ids=known_class_ids,
+    def validate_group(group: tuple[str, tuple[_DetectionRow, ...]]) -> ValidatedImageInput:
+        normalized_image_id, image_rows = group
+        return _validate_discovered_image(
+            normalized_image_id,
+            image_rows,
+            image_index,
+            mask_index,
+            class_ids,
+            known_class_ids,
         )
-        detections: list[DetectionInput] = []
-        for row in image_rows:
-            class_id = class_ids.get(row.image_id, row.bounding_box_id)
-            if class_id is None:
-                raise _input_error(
-                    ERROR_CSV_INVALID,
-                    f"No class assignment for detection {row.image_id!r}:{row.bounding_box_id}",
-                )
-            if class_id not in known_class_ids:
-                raise _input_error(
-                    ERROR_CSV_INVALID,
-                    f"Detection {row.image_id!r}:{row.bounding_box_id} resolves to "
-                    f"class {class_id}, which is absent from the species catalog",
-                    image_id=row.image_id,
-                    bounding_box_id=row.bounding_box_id,
-                )
-            detections.append(
-                DetectionInput(
-                    image_id=row.image_id,
-                    bounding_box_id=row.bounding_box_id,
-                    normalized_bbox=row.normalized_bbox,
-                    pixel_bbox=normalized_bbox_to_pixels(
-                        row.normalized_bbox,
-                        width=width,
-                        height=height,
-                        image_id=row.image_id,
-                        bounding_box_id=row.bounding_box_id,
-                    ),
-                    class_id=class_id,
-                    species_id=row.species_id,
-                    cultivar_id=row.cultivar_id,
-                    world_bbox=row.world_bbox,
-                )
-            )
-        validated_images.append(
-            ValidatedImageInput(
-                image_id=image_id,
-                image_path=image_path,
-                mask_path=mask_path,
-                width=width,
-                height=height,
-                detections=tuple(detections),
-            )
-        )
+
+    workers = _bounded_worker_count(max_workers, len(image_groups))
+    if workers > 1:
+        cv2.setNumThreads(1)
+        logger.info("Validating images with %d threads", workers)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            validated_images = list(executor.map(validate_group, image_groups))
+    else:
+        logger.info("Validating images sequentially")
+        validated_images = [validate_group(group) for group in image_groups]
 
     return BatchValidationResult(
         images=tuple(validated_images),
@@ -691,6 +740,155 @@ def _failed_result(detection: DetectionInput, exc: Exception) -> CutoutProcessin
     )
 
 
+def _initialize_processing_worker() -> None:
+    """Keep one OpenCV thread per image worker to avoid nested oversubscription."""
+
+    cv2.setNumThreads(1)
+
+
+def _evaluate_image_eligibility(
+    image: ValidatedImageInput,
+    config: SegToCutConfig,
+) -> _EligibilityPassResult:
+    eligible: list[tuple[str, int]] = []
+    area_inputs: list[AreaMetricInput] = []
+    early_results: list[CutoutProcessingResult] = []
+    try:
+        mask = _read_validated_mask(image)
+    except Exception as exc:
+        return _EligibilityPassResult(
+            eligible=(),
+            area_inputs=(),
+            early_results=tuple(_failed_result(detection, exc) for detection in image.detections),
+        )
+
+    for detection in image.detections:
+        cleanup = border_sweep_cleanup(
+            _crop(mask, detection),
+            expected_class_id=detection.class_id,
+            border_width_px=config.border_width_px,
+        )
+        if cleanup.skipped:
+            early_results.append(_skipped_result(detection, cleanup.skip_reason or "EMPTY_TARGET"))
+            continue
+        eligible.append(detection.identity)
+        area = calculate_area_properties(detection.world_bbox, config=config)
+        area_inputs.append(
+            AreaMetricInput(
+                image_id=detection.image_id,
+                bounding_box_id=detection.bounding_box_id,
+                species_id=detection.species_id,
+                cultivar_id=detection.cultivar_id,
+                bbox_area_cm2=area["bbox_area_cm2"],
+            )
+        )
+
+    return _EligibilityPassResult(
+        eligible=tuple(eligible),
+        area_inputs=tuple(area_inputs),
+        early_results=tuple(early_results),
+    )
+
+
+def _process_image_outputs(
+    image: ValidatedImageInput,
+    eligible_identities: tuple[tuple[str, int], ...],
+    image_early_results: tuple[CutoutProcessingResult, ...],
+    image_group_metrics: Mapping[tuple[str, int], Mapping[str, Any]],
+    output_dir: str | Path,
+    batch_id: str,
+    catalog: Mapping[str, Any],
+    config: SegToCutConfig,
+    fail_stop: bool,
+    season: str | None,
+    bbot_version: str | None,
+    lens_model: str | None,
+) -> tuple[CutoutProcessingResult, ...]:
+    eligible = set(eligible_identities)
+    early_results = {result.identity: result for result in image_early_results}
+    arrays: tuple[np.ndarray, np.ndarray] | None = None
+    if eligible:
+        try:
+            arrays = (_read_validated_rgb(image), _read_validated_mask(image))
+        except Exception as exc:
+            for detection in image.detections:
+                if detection.identity in eligible:
+                    early_results[detection.identity] = _failed_result(detection, exc)
+                    eligible.remove(detection.identity)
+
+    results: list[CutoutProcessingResult] = []
+    halted = False
+    for detection in image.detections:
+        if halted:
+            results.append(_skipped_result(detection, "FAIL_STOP"))
+            continue
+        prior = early_results.get(detection.identity)
+        if prior is not None:
+            results.append(prior)
+            if fail_stop and prior.status == ITEM_FAILED:
+                halted = True
+            continue
+        try:
+            assert arrays is not None
+            rgb, mask = arrays
+            rgb_crop = _crop(rgb, detection)
+            cleanup = border_sweep_cleanup(
+                _crop(mask, detection),
+                expected_class_id=detection.class_id,
+                border_width_px=config.border_width_px,
+            )
+            if cleanup.skipped:
+                results.append(_skipped_result(detection, cleanup.skip_reason or "EMPTY_TARGET"))
+                continue
+            properties = calculate_cutout_properties(
+                rgb_crop,
+                cleanup.mask,
+                expected_class_id=detection.class_id,
+                pixel_bbox=detection.pixel_bbox,
+                image_width=image.width,
+                image_height=image.height,
+                config=config,
+                world_bbox=detection.world_bbox,
+            )
+            cutout_id = make_cutout_id(detection.image_id, detection.bounding_box_id)
+            metadata = _cutout_metadata(
+                detection=detection,
+                cutout_id=cutout_id,
+                batch_id=batch_id,
+                rgb_crop=rgb_crop,
+                cleanup=cleanup,
+                properties=properties,
+                group_properties=image_group_metrics[detection.identity],
+                catalog=catalog,
+                config=config,
+                season=season,
+                bbot_version=bbot_version,
+                lens_model=lens_model,
+            )
+            artifacts = write_cutout_artifacts(
+                output_dir,
+                cutout_id=cutout_id,
+                rgb_crop=rgb_crop,
+                cleaned_mask=cleanup.mask,
+                expected_class_id=detection.class_id,
+                metadata=metadata,
+            )
+            results.append(
+                CutoutProcessingResult(
+                    image_id=detection.image_id,
+                    bounding_box_id=detection.bounding_box_id,
+                    cutout_id=cutout_id,
+                    status=ITEM_OK,
+                    artifacts=artifacts,
+                )
+            )
+        except Exception as exc:
+            results.append(_failed_result(detection, exc))
+            if fail_stop:
+                halted = True
+    return tuple(results)
+
+
 def process_validated_batch(
     validation: BatchValidationResult,
     *,
@@ -698,130 +896,117 @@ def process_validated_batch(
     batch_id: str,
     config: SegToCutConfig,
     fail_stop: bool = False,
+    max_workers: int = 0,
     season: str | None = None,
     bbot_version: str | None = None,
     lens_model: str | None = None,
 ) -> tuple[CutoutProcessingResult, ...]:
     """Create cutouts with a bounded-memory, deterministic two-pass flow."""
 
+    workers = _bounded_worker_count(max_workers, len(validation.images))
+    if fail_stop and max_workers > 1:
+        raise ValueError("fail_stop cannot be combined with parallel image processing")
+
     eligible: set[tuple[str, int]] = set()
     area_inputs: list[AreaMetricInput] = []
     early_results: dict[tuple[str, int], CutoutProcessingResult] = {}
 
-    # First pass decides which detections survive cleanup, allowing category
-    # statistics to exclude empty targets without retaining image-sized arrays.
-    for image in validation.images:
-        try:
-            mask = _read_validated_mask(image)
-        except Exception as exc:
-            for detection in image.detections:
-                early_results[detection.identity] = _failed_result(detection, exc)
-            continue
-        for detection in image.detections:
-            cleanup = border_sweep_cleanup(
-                _crop(mask, detection),
-                expected_class_id=detection.class_id,
-                border_width_px=config.border_width_px,
+    parallel = workers > 1
+    logger.info(
+        "Processing images in %s mode with %d worker%s",
+        "parallel" if parallel else "sequential",
+        workers if parallel else 1,
+        "s" if parallel else "",
+    )
+    executor = (
+        ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_initialize_processing_worker,
+        )
+        if parallel
+        else None
+    )
+    try:
+        # First pass decides which detections survive cleanup, allowing category
+        # statistics to exclude empty targets without retaining image-sized arrays.
+        if executor is None:
+            eligibility_results = tuple(
+                _evaluate_image_eligibility(image, config) for image in validation.images
             )
-            if cleanup.skipped:
-                early_results[detection.identity] = _skipped_result(
-                    detection, cleanup.skip_reason or "EMPTY_TARGET"
-                )
-                continue
-            eligible.add(detection.identity)
-            area = calculate_area_properties(detection.world_bbox, config=config)
-            area_inputs.append(
-                AreaMetricInput(
-                    image_id=detection.image_id,
-                    bounding_box_id=detection.bounding_box_id,
-                    species_id=detection.species_id,
-                    cultivar_id=detection.cultivar_id,
-                    bbox_area_cm2=area["bbox_area_cm2"],
+        else:
+            eligibility_results = tuple(
+                executor.map(
+                    _evaluate_image_eligibility,
+                    validation.images,
+                    repeat(config),
                 )
             )
 
-    group_metrics = finalize_species_bbox_metrics(area_inputs, config=config)
-    results: list[CutoutProcessingResult] = []
-    halted = False
-    for image in validation.images:
-        arrays: tuple[np.ndarray, np.ndarray] | None = None
-        if any(detection.identity in eligible for detection in image.detections):
-            try:
-                arrays = (_read_validated_rgb(image), _read_validated_mask(image))
-            except Exception as exc:
-                for detection in image.detections:
-                    if detection.identity in eligible:
-                        early_results[detection.identity] = _failed_result(detection, exc)
-                        eligible.remove(detection.identity)
+        for eligibility in eligibility_results:
+            eligible.update(eligibility.eligible)
+            area_inputs.extend(eligibility.area_inputs)
+            early_results.update((result.identity, result) for result in eligibility.early_results)
 
-        for detection in image.detections:
+        group_metrics = finalize_species_bbox_metrics(area_inputs, config=config)
+        output_tasks = []
+        for image in validation.images:
+            image_eligible = tuple(
+                detection.identity
+                for detection in image.detections
+                if detection.identity in eligible
+            )
+            image_early = tuple(
+                early_results[detection.identity]
+                for detection in image.detections
+                if detection.identity in early_results
+            )
+            image_metrics = {identity: group_metrics[identity] for identity in image_eligible}
+            output_tasks.append((image, image_eligible, image_early, image_metrics))
+
+        if executor is not None:
+            result_groups = executor.map(
+                _process_image_outputs,
+                (task[0] for task in output_tasks),
+                (task[1] for task in output_tasks),
+                (task[2] for task in output_tasks),
+                (task[3] for task in output_tasks),
+                repeat(output_dir),
+                repeat(batch_id),
+                repeat(validation.catalog),
+                repeat(config),
+                repeat(False),
+                repeat(season),
+                repeat(bbot_version),
+                repeat(lens_model),
+            )
+            return tuple(result for group in result_groups for result in group)
+
+        results: list[CutoutProcessingResult] = []
+        halted = False
+        for image, image_eligible, image_early, image_metrics in output_tasks:
             if halted:
-                results.append(_skipped_result(detection, "FAIL_STOP"))
+                results.extend(
+                    _skipped_result(detection, "FAIL_STOP") for detection in image.detections
+                )
                 continue
-            prior = early_results.get(detection.identity)
-            if prior is not None:
-                results.append(prior)
-                if fail_stop and prior.status == ITEM_FAILED:
-                    halted = True
-                continue
-            try:
-                assert arrays is not None
-                rgb, mask = arrays
-                rgb_crop = _crop(rgb, detection)
-                cleanup = border_sweep_cleanup(
-                    _crop(mask, detection),
-                    expected_class_id=detection.class_id,
-                    border_width_px=config.border_width_px,
-                )
-                if cleanup.skipped:
-                    results.append(
-                        _skipped_result(detection, cleanup.skip_reason or "EMPTY_TARGET")
-                    )
-                    continue
-                properties = calculate_cutout_properties(
-                    rgb_crop,
-                    cleanup.mask,
-                    expected_class_id=detection.class_id,
-                    pixel_bbox=detection.pixel_bbox,
-                    image_width=image.width,
-                    image_height=image.height,
-                    config=config,
-                    world_bbox=detection.world_bbox,
-                )
-                cutout_id = make_cutout_id(detection.image_id, detection.bounding_box_id)
-                metadata = _cutout_metadata(
-                    detection=detection,
-                    cutout_id=cutout_id,
-                    batch_id=batch_id,
-                    rgb_crop=rgb_crop,
-                    cleanup=cleanup,
-                    properties=properties,
-                    group_properties=group_metrics[detection.identity],
-                    catalog=validation.catalog,
-                    config=config,
-                    season=season,
-                    bbot_version=bbot_version,
-                    lens_model=lens_model,
-                )
-                artifacts = write_cutout_artifacts(
-                    output_dir,
-                    cutout_id=cutout_id,
-                    rgb_crop=rgb_crop,
-                    cleaned_mask=cleanup.mask,
-                    expected_class_id=detection.class_id,
-                    metadata=metadata,
-                )
-                results.append(
-                    CutoutProcessingResult(
-                        image_id=detection.image_id,
-                        bounding_box_id=detection.bounding_box_id,
-                        cutout_id=cutout_id,
-                        status=ITEM_OK,
-                        artifacts=artifacts,
-                    )
-                )
-            except Exception as exc:
-                results.append(_failed_result(detection, exc))
-                if fail_stop:
-                    halted = True
-    return tuple(results)
+            image_results = _process_image_outputs(
+                image,
+                image_eligible,
+                image_early,
+                image_metrics,
+                output_dir,
+                batch_id,
+                validation.catalog,
+                config,
+                fail_stop,
+                season,
+                bbot_version,
+                lens_model,
+            )
+            results.extend(image_results)
+            if fail_stop and any(result.status == ITEM_FAILED for result in image_results):
+                halted = True
+        return tuple(results)
+    finally:
+        if executor is not None:
+            executor.shutdown()

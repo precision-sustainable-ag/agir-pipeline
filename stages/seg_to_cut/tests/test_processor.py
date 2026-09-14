@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import pytest
 
-from stages import ITEM_OK
+from stages import ITEM_FAILED, ITEM_OK
 from stages.seg_to_cut import (
     ERROR_CSV_INVALID,
     ERROR_DIMENSION_MISMATCH,
@@ -311,3 +311,102 @@ def test_eligibility_pass_reads_only_the_mask(input_paths, tmp_path, monkeypatch
         (image.image_path, cv2.IMREAD_COLOR),
         (image.mask_path, cv2.IMREAD_UNCHANGED),
     ]
+
+
+def test_parallel_processing_matches_sequential_output(input_paths, tmp_path) -> None:
+    write_image_and_mask(input_paths, "image_b")
+    write_image_and_mask(input_paths, "image_a")
+    write_csv(
+        input_paths,
+        [
+            detection_row("image_b", 2),
+            detection_row("image_a", 1),
+        ],
+    )
+    config = SegToCutConfig(border_width_px=1)
+    validation = discover_and_validate_inputs(
+        images_dir=input_paths["images"],
+        masks_dir=input_paths["masks"],
+        georeferenced_csv=input_paths["csv"],
+        species_catalog=input_paths["catalog"],
+        config=config,
+        max_workers=2,
+    )
+
+    sequential_dir = tmp_path / "sequential"
+    parallel_dir = tmp_path / "parallel"
+    sequential = process_validated_batch(
+        validation,
+        output_dir=sequential_dir,
+        batch_id="batch_1",
+        config=config,
+    )
+    parallel = process_validated_batch(
+        validation,
+        output_dir=parallel_dir,
+        batch_id="batch_1",
+        config=config,
+        max_workers=2,
+    )
+
+    assert [result.identity for result in parallel] == [result.identity for result in sequential]
+    assert [result.status for result in parallel] == [ITEM_OK, ITEM_OK]
+    assert {path.name: path.read_bytes() for path in parallel_dir.iterdir()} == {
+        path.name: path.read_bytes() for path in sequential_dir.iterdir()
+    }
+
+
+def test_parallel_processing_rejects_fail_stop(input_paths, tmp_path) -> None:
+    write_image_and_mask(input_paths, "image_1")
+    write_csv(input_paths, [detection_row("image_1", 0)])
+    config = SegToCutConfig(border_width_px=1)
+    validation = discover_and_validate_inputs(
+        images_dir=input_paths["images"],
+        masks_dir=input_paths["masks"],
+        georeferenced_csv=input_paths["csv"],
+        species_catalog=input_paths["catalog"],
+        config=config,
+    )
+
+    with pytest.raises(ValueError, match="fail_stop"):
+        process_validated_batch(
+            validation,
+            output_dir=tmp_path / "cutouts",
+            batch_id="batch_1",
+            config=config,
+            fail_stop=True,
+            max_workers=2,
+        )
+
+
+def test_parallel_processing_isolates_image_failure(input_paths, tmp_path) -> None:
+    write_image_and_mask(input_paths, "image_a")
+    write_image_and_mask(input_paths, "image_b")
+    write_csv(
+        input_paths,
+        [
+            detection_row("image_a", 1),
+            detection_row("image_b", 2),
+        ],
+    )
+    config = SegToCutConfig(border_width_px=1)
+    validation = discover_and_validate_inputs(
+        images_dir=input_paths["images"],
+        masks_dir=input_paths["masks"],
+        georeferenced_csv=input_paths["csv"],
+        species_catalog=input_paths["catalog"],
+        config=config,
+    )
+    (input_paths["masks"] / "image_b.png").write_bytes(b"not a png")
+
+    results = process_validated_batch(
+        validation,
+        output_dir=tmp_path / "cutouts",
+        batch_id="batch_1",
+        config=config,
+        max_workers=2,
+    )
+
+    assert [result.identity for result in results] == [("image_a", 1), ("image_b", 2)]
+    assert [result.status for result in results] == [ITEM_OK, ITEM_FAILED]
+    assert results[1].error_code == ERROR_MASK_INVALID

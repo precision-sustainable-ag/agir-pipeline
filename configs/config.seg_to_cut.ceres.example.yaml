@@ -10,6 +10,7 @@ stage:
     --species-catalog $SPECIES_CATALOG_PATH
     --config $CONFIG_PATH
     --output $TMPDIR/output
+    --t $CPUS
     --batch-id $BATCH_ID
     --bbot-version $BBOT_VERSION
     --lens-model "Linos Inspect XL"
