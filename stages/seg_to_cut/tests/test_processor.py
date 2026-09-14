@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import pytest
 
+from stages import ITEM_OK
 from stages.seg_to_cut import (
     ERROR_CSV_INVALID,
     ERROR_DIMENSION_MISMATCH,
@@ -24,6 +25,7 @@ from stages.seg_to_cut.processor import (
     discover_and_validate_inputs,
     load_detection_rows,
     normalized_bbox_to_pixels,
+    process_validated_batch,
 )
 
 from .helpers import detection_row, make_input_paths, write_csv, write_image_and_mask
@@ -271,3 +273,41 @@ def test_validation_does_not_write_cutouts(input_paths) -> None:
 
     after = sorted(path.relative_to(batch_root) for path in batch_root.rglob("*"))
     assert after == before
+
+
+def test_eligibility_pass_reads_only_the_mask(input_paths, tmp_path, monkeypatch) -> None:
+    write_image_and_mask(input_paths, "image_1")
+    write_csv(input_paths, [detection_row("image_1", 0)])
+    config = SegToCutConfig(border_width_px=1)
+    validation = discover_and_validate_inputs(
+        images_dir=input_paths["images"],
+        masks_dir=input_paths["masks"],
+        georeferenced_csv=input_paths["csv"],
+        species_catalog=input_paths["catalog"],
+        config=config,
+    )
+    image = validation.images[0]
+
+    original_imread = cv2.imread
+    reads: list[tuple[Path, int]] = []
+
+    def counted_imread(path: str, flags: int):
+        reads.append((Path(path), flags))
+        return original_imread(path, flags)
+
+    monkeypatch.setattr("stages.seg_to_cut.processor.cv2.imread", counted_imread)
+
+    results = process_validated_batch(
+        validation,
+        output_dir=tmp_path / "cutouts",
+        batch_id="batch_1",
+        config=config,
+    )
+
+    assert [result.status for result in results] == [ITEM_OK]
+    assert all(path.is_file() for path in results[0].artifacts.paths)
+    assert reads == [
+        (image.mask_path, cv2.IMREAD_UNCHANGED),
+        (image.image_path, cv2.IMREAD_COLOR),
+        (image.mask_path, cv2.IMREAD_UNCHANGED),
+    ]

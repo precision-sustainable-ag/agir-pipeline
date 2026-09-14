@@ -557,24 +557,26 @@ def make_cutout_id(image_id: str, bounding_box_id: int) -> str:
     return f"{image_id}_{bounding_box_id}"
 
 
-def _read_validated_arrays(
-    image: ValidatedImageInput,
-) -> tuple[np.ndarray, np.ndarray]:
+def _read_validated_rgb(image: ValidatedImageInput) -> np.ndarray:
     bgr = cv2.imread(str(image.image_path), cv2.IMREAD_COLOR)
-    mask = cv2.imread(str(image.mask_path), cv2.IMREAD_UNCHANGED)
     if bgr is None or bgr.shape != (image.height, image.width, 3):
         raise _input_error(
             ERROR_IMAGE_INVALID,
             f"Image {image.image_path} changed or became unreadable after validation",
             image_id=image.image_id,
         )
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+
+def _read_validated_mask(image: ValidatedImageInput) -> np.ndarray:
+    mask = cv2.imread(str(image.mask_path), cv2.IMREAD_UNCHANGED)
     if mask is None or mask.dtype != np.uint8 or mask.shape != (image.height, image.width):
         raise _input_error(
             ERROR_MASK_INVALID,
             f"Mask {image.mask_path} changed or became unreadable after validation",
             image_id=image.image_id,
         )
-    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), mask
+    return mask
 
 
 def _crop(array: np.ndarray, detection: DetectionInput) -> np.ndarray:
@@ -710,7 +712,7 @@ def process_validated_batch(
     # statistics to exclude empty targets without retaining image-sized arrays.
     for image in validation.images:
         try:
-            _, mask = _read_validated_arrays(image)
+            mask = _read_validated_mask(image)
         except Exception as exc:
             for detection in image.detections:
                 early_results[detection.identity] = _failed_result(detection, exc)
@@ -745,7 +747,7 @@ def process_validated_batch(
         arrays: tuple[np.ndarray, np.ndarray] | None = None
         if any(detection.identity in eligible for detection in image.detections):
             try:
-                arrays = _read_validated_arrays(image)
+                arrays = (_read_validated_rgb(image), _read_validated_mask(image))
             except Exception as exc:
                 for detection in image.detections:
                     if detection.identity in eligible:
