@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import numpy as np
 import pytest
 
 from stages import ITEM_FAILED, ITEM_OK
+from stages.common.class_ids import build_class_id_index
 from stages.seg_to_cut import (
     ERROR_CSV_INVALID,
     ERROR_DIMENSION_MISMATCH,
@@ -91,6 +93,41 @@ def test_discovers_matches_and_sorts_inputs(input_paths) -> None:
     assert [d.bounding_box_id for d in result.images[0].detections] == [1, 3]
     assert result.images[1].detections[0].class_id == 19
     assert result.known_class_ids == frozenset({11, 19, 107})
+
+
+def test_missing_bbox_id_column_generates_matching_per_image_ids(input_paths, caplog):
+    write_image_and_mask(input_paths, "image_a")
+    write_image_and_mask(input_paths, "image_b", mask_value=19)
+    rows = [detection_row("image_a", 7), detection_row("image_b", 3, species_id="BETVU"),
+            detection_row("IMAGE_A", 8, species_id="BETVU"),
+            detection_row("image_b", 4)]
+    write_csv(input_paths, rows)
+    with input_paths["csv"].open(newline="") as f:
+        reader = csv.DictReader(f)
+        fields = [field for field in reader.fieldnames if field != "bounding_box_id"]
+        without_ids = [{field: row[field] for field in fields} for row in reader]
+    with input_paths["csv"].open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(without_ids)
+
+    result = validate(input_paths)
+    assert [[(d.bounding_box_id, d.class_id) for d in image.detections]
+            for image in result.images] == [[(0, 11), (1, 19)], [(0, 19), (1, 11)]]
+    assert "generating IDs from 0 per image" in caplog.text
+    catalog, _ = load_catalog(input_paths["catalog"])
+    index = build_class_id_index(input_paths["csv"], catalog)
+    assert index.by_detection == {
+        ("image_a", 0): 11, ("image_a", 1): 19,
+        ("image_b", 0): 19, ("image_b", 1): 11,
+    }
+
+
+def test_existing_blank_bbox_id_is_still_rejected(input_paths):
+    row = detection_row("image_a", 0)
+    row["bounding_box_id"] = ""
+    write_csv(input_paths, [row])
+    assert_error_code(ERROR_CSV_INVALID, lambda: load_detection_rows(input_paths["csv"]))
 
 
 def test_cultivar_id_is_the_expected_mask_value(input_paths) -> None:

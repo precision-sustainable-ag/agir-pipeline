@@ -59,7 +59,6 @@ _SAFE_ID_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 REQUIRED_CSV_COLUMNS = (
     "image_id",
-    "bounding_box_id",
     "xmin",
     "ymin",
     "xmax",
@@ -223,14 +222,26 @@ def load_detection_rows(path: str | Path) -> tuple[_DetectionRow, ...]:
                 path=str(csv_path),
             )
 
+        generate_ids = "bounding_box_id" not in fieldnames
+        if generate_ids:
+            logger.warning(
+                "Georeferenced CSV %s has no bounding_box_id column; generating IDs "
+                "from 0 per image in CSV row order",
+                csv_path,
+            )
+        next_ids: dict[str, int] = {}
         for row_number, row in enumerate(reader, start=2):
             context = f"{csv_path.name} row {row_number}"
             image_id, normalized_image_id = _normalize_image_id(
                 row.get("image_id"), context=context
             )
-            bounding_box_id = _parse_nonnegative_int(
-                row.get("bounding_box_id"), field="bounding_box_id", context=context
-            )
+            if generate_ids:
+                bounding_box_id = next_ids.get(normalized_image_id, 0)
+                next_ids[normalized_image_id] = bounding_box_id + 1
+            else:
+                bounding_box_id = _parse_nonnegative_int(
+                    row.get("bounding_box_id"), field="bounding_box_id", context=context
+                )
             identity = (normalized_image_id, bounding_box_id)
             if identity in identities:
                 raise _input_error(

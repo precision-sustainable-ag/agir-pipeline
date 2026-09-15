@@ -142,7 +142,7 @@ def build_class_id_index(
     georeferenced_csv_path: str | Path,
     catalog: Mapping[str, Any],
 ) -> ClassIdIndex:
-    """Build the detection-to-class lookup from a georeferenced CSV."""
+    """Build class lookup, generating missing-column IDs per image in CSV row order."""
 
     csv_path = Path(georeferenced_csv_path)
     species_catalog = catalog.get("species")
@@ -159,7 +159,7 @@ def build_class_id_index(
 
     with csv_file:
         reader = csv.DictReader(csv_file)
-        required_columns = {"image_id", "bounding_box_id", "species_id"}
+        required_columns = {"image_id", "species_id"}
         fieldnames = set(reader.fieldnames or ())
         missing_columns = sorted(required_columns - fieldnames)
         if missing_columns:
@@ -168,12 +168,17 @@ def build_class_id_index(
                 f"{', '.join(missing_columns)}"
             )
 
+        next_ids: dict[str, int] = {}
         for row_number, row in enumerate(reader, start=2):
             context = f"{csv_path.name} row {row_number}"
             image_id = _normalize_image_id(row.get("image_id"))
-            bounding_box_id = _parse_bounding_box_id(
-                row.get("bounding_box_id"), context=context
-            )
+            if "bounding_box_id" not in fieldnames:
+                bounding_box_id = next_ids.get(image_id, 0)
+                next_ids[image_id] = bounding_box_id + 1
+            else:
+                bounding_box_id = _parse_bounding_box_id(
+                    row.get("bounding_box_id"), context=context
+                )
 
             cultivar_id = row.get("cultivar_id")
             if cultivar_id is not None and cultivar_id.strip():
