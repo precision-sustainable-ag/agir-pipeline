@@ -14,7 +14,7 @@ import numpy as np
 import torch
 import segmentation_models_pytorch as smp
 
-from .class_ids import DetectionBox, UINT8_MAX
+from stages.common.class_ids import DetectionBox, UINT8_MAX
 
 log = logging.getLogger(__name__)
 

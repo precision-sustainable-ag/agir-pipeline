@@ -1,0 +1,30 @@
+image_extensions:
+  - .jpg
+  - .jpeg
+mask_extension: .png
+
+border_width_px: 100
+edge_threshold: 0.05
+cutout_version: "2.0"
+
+bbox_area:
+  source: georeferenced_csv  # Use georeferenced_csv now; camera support awaits XYZ camera data.
+
+camera:
+  manufacturer: SVS-Vistek
+  model: shr661CXGE
+  megapixels: 127.6
+  image_width_px: 13392
+  image_height_px: 9528
+  sensor_manufacturer: Sony
+  sensor_model: IMX661LQA
+  sensor_size_mm: 56.73  # Type 3.6 sensor size reported in the camera documentation.
+  chroma: color
+  mount: M72x0.75
+  interface: 10GigE
+  lens_model: Linos Inspect XL
+  focal_length_mm: 60
+  lens_height_above_pot_surface_cm: 170
+
+species_bbox_min_sample_size: 5  # Require this many valid areas before calculating a group mean.
+abnormal_bbox_size_threshold: 0.50  # Flag areas that differ from the group mean by more than 50%.

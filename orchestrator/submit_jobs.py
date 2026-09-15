@@ -197,6 +197,8 @@ def _render_slurm_script(
     bbot_version: str = "",
     shapefile_path: str = "",
     species_catalog_path: str = "",
+    publication_mode: str = "standard",
+    publication_args: str = "",
     template_name: str = DEFAULT_JOB_TEMPLATE,
 ) -> str:
     context = {
@@ -233,6 +235,8 @@ def _render_slurm_script(
         "bbot_version": bbot_version,
         "shapefile_path": shapefile_path,
         "species_catalog_path": species_catalog_path,
+        "publication_mode": publication_mode,
+        "publication_args": publication_args,
     }
     return _render_template(template_name, context)
 
@@ -272,6 +276,12 @@ def submit_jobs(
     cli_module     = stage_cfg["cli_module"]
     cli_args       = stage_cfg["cli_args"].strip()
     output_subdir  = stage_cfg.get("output_subdir", stage_name)
+    publication_mode = str(stage_cfg.get("publication_mode", "standard"))
+    if publication_mode not in {"standard", "cutout_batch"}:
+        raise ValueError(
+            "stage.publication_mode must be 'standard' or 'cutout_batch'"
+        )
+    publication_args = str(stage_cfg.get("publication_args", "")).strip()
     visualization_cfg = cfg.get("visualization")
 
     # ── Paths block ───────────────────────────────────────────────────────────
@@ -505,6 +515,8 @@ def submit_jobs(
                 bbot_version=bbot_version,
                 shapefile_path=shapefile_path,
                 species_catalog_path=species_catalog_path,
+                publication_mode=publication_mode,
+                publication_args=publication_args,
                 template_name=template_name,
             )
 

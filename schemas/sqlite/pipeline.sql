@@ -18,6 +18,7 @@
 --   v_batches_needing_jpg_to_det   What to run next for stage 2
 --   v_batches_needing_det_to_world What to run next for stage 3 (det_to_world)
 --   v_batches_needing_det_to_seg   What to run next for stage 4 (det_to_seg)
+--   v_batches_needing_seg_to_cut   What to run next for stage 5 (seg_to_cut)
 --
 -- Views query globus_file_index WHERE is_current = 1 across ALL indexed
 -- endpoints simultaneously, so cross-site inventory gaps resolve correctly
@@ -991,6 +992,86 @@ WHERE COALESCE(s.seg_count, 0) = 0
 ORDER BY i.batch_date ASC, i.batch_id ASC;
 
 
+-- -----------------------------------------------------------------------------
+-- v_batches_needing_seg_to_cut
+-- Batches with current developed-image JPGs, current segmentation PNGs, AND
+-- the exact batch-level georeferenced CSV consumed by seg_to_cut.
+--
+-- This view is deliberately site-agnostic. Images, segmentations, and the CSV
+-- may be indexed at different sites; Commit 9's staging planner is responsible
+-- for resolving and co-locating all three inputs on CERES before submission.
+-- Exact image-to-mask stem agreement remains a stage-level validation.
+-- -----------------------------------------------------------------------------
+DROP VIEW IF EXISTS v_batches_needing_seg_to_cut;
+CREATE VIEW v_batches_needing_seg_to_cut AS
+WITH
+img_batches AS (
+    SELECT
+        batch_id,
+        MIN(batch_date) AS batch_date,
+        COUNT(*)        AS img_count
+    FROM globus_file_index
+    WHERE data_state = 'semifield-developed-images'
+      AND entry_type = 'file'
+      AND batch_id   IS NOT NULL
+      AND is_current = 1
+      AND file_ext   IN ('jpg', 'jpeg')
+      AND parent_dir = 'images'
+    GROUP BY batch_id
+),
+seg_batches AS (
+    SELECT
+        batch_id,
+        COUNT(*) AS seg_count
+    FROM globus_file_index
+    WHERE data_state = 'semifield-developed-images'
+      AND entry_type = 'file'
+      AND batch_id   IS NOT NULL
+      AND is_current = 1
+      AND file_ext   = 'png'
+      AND parent_dir = 'segmentations'
+    GROUP BY batch_id
+),
+georef_batches AS (
+    SELECT
+        batch_id,
+        COUNT(*) AS georef_count
+    FROM globus_file_index
+    WHERE data_state = 'semifield-developed-images'
+      AND entry_type = 'file'
+      AND batch_id   IS NOT NULL
+      AND is_current = 1
+      AND file_ext   = 'csv'
+      AND parent_dir = 'georeferenced'
+      AND file_name  = batch_id || '_georeferenced.csv'
+    GROUP BY batch_id
+),
+active_leases AS (
+    SELECT batch_id
+    FROM   stage_leases
+    WHERE  stage      = 'seg_to_cut'
+      AND  expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+)
+SELECT
+    i.batch_id,
+    i.batch_date,
+    i.img_count,
+    s.seg_count,
+    g.georef_count
+FROM img_batches          i
+JOIN seg_batches          s  ON i.batch_id = s.batch_id
+JOIN georef_batches       g  ON i.batch_id = g.batch_id
+LEFT JOIN active_leases   al ON i.batch_id = al.batch_id
+WHERE al.batch_id IS NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM stage_runs sr
+      WHERE sr.batch_id = i.batch_id
+        AND sr.stage    = 'seg_to_cut'
+        AND sr.status   = 'success'
+  )
+ORDER BY i.batch_date ASC, i.batch_id ASC;
+
+
 -- =============================================================================
 -- v8: add v_batches_needing_det_to_world for stage 3 (det_to_world) readiness.
 -- v9: add species/species_aliases/species_multi_symbols/cultivars/
@@ -1001,5 +1082,6 @@ ORDER BY i.batch_date ASC, i.batch_id ASC;
 --      as det_to_world, so ATLAS-resident batches must surface here too.
 -- v11: add v_batches_needing_det_to_seg for class-coded segmentation
 --      readiness after det_to_world georeferencing.
-PRAGMA user_version = 11;
+-- v12: add v_batches_needing_seg_to_cut for cutout-generation readiness.
+PRAGMA user_version = 12;
 COMMIT;

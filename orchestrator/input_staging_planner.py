@@ -19,6 +19,7 @@ from orchestrator.sqlite_db import (
     get_batches_needing_det_to_world,
     get_batches_needing_jpg_to_det,
     get_batches_needing_raw_to_jpg,
+    get_batches_needing_seg_to_cut,
 )
 
 
@@ -98,6 +99,12 @@ STAGE_INPUT_SPECS: Dict[str, StageInputSpec] = {
         subdirs=("images", "detections", "georeferenced"),
         require_all_staged_inputs=True,
     ),
+    "seg_to_cut": StageInputSpec(
+        stage_name="seg_to_cut",
+        readiness_view="v_batches_needing_seg_to_cut",
+        subdirs=("images", "segmentations", "georeferenced"),
+        require_all_staged_inputs=True,
+    ),
 }
 
 # data_state/parent_dir matched when checking whether a site already has a
@@ -107,6 +114,7 @@ _DEVELOPED_IMAGES_DATA_STATE = "semifield-developed-images"
 _DEVELOPED_IMAGES_PARENT_DIRS = {
     "images": "parent_dir = 'images'",
     "detections": "parent_dir IN ('detections', 'plant-detections', 'metadata')",
+    "segmentations": "parent_dir = 'segmentations' AND file_ext = 'png'",
     "georeferenced": (
         "parent_dir = 'georeferenced' AND file_ext = 'csv' "
         "AND file_name = batch_id || '_georeferenced.csv'"
@@ -159,6 +167,10 @@ def _rows_for_stage(
         # independently across destination/CERES/JUNO, so readiness must not
         # be restricted to whichever site the operator passed on the CLI.
         return get_batches_needing_det_to_seg(conn, site=None, limit=limit, batch_ids=batch_ids)
+    if spec.readiness_view == "v_batches_needing_seg_to_cut":
+        # Each required input is resolved independently to CERES, so the
+        # inventory-level readiness query must remain site-agnostic.
+        return get_batches_needing_seg_to_cut(conn, limit=limit, batch_ids=batch_ids)
     raise ValueError(f"Unsupported readiness view: {spec.readiness_view!r}")
 
 
@@ -476,9 +488,10 @@ def plan_input_staging(
     ``transfer.routes.<stage>.input_subdir`` is optionally appended to both
     paths for single-route stages (e.g. raw_to_jpg). Use ``source_subdir``
     when the source subdirectory differs from the destination. Stages with
-    ``StageInputSpec.subdirs`` set (jpg_to_det, det_to_world, det_to_seg) instead resolve
-    each subdir independently via ``_plan_multi_site_requests`` — see there
-    for that config shape (``destination_site``, ``source_root_<site>``).
+    ``StageInputSpec.subdirs`` set (jpg_to_det, det_to_world, det_to_seg,
+    seg_to_cut) instead resolve each subdir independently via
+    ``_plan_multi_site_requests`` — see there for that config shape
+    (``destination_site``, ``source_root_<site>``).
     """
     if stage not in STAGE_INPUT_SPECS:
         raise ValueError(f"Unsupported stage for input staging: {stage!r}")

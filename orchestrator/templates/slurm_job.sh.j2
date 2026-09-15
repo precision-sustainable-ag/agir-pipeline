@@ -238,6 +238,15 @@ PROMOTED_AT=""
 VIZ_DEST="{{ viz_dest }}"
 
 if [[ "$STAGE_EXIT" -le 1 ]]; then
+{% if (publication_mode | default("standard")) == "cutout_batch" %}
+    set +e
+    python "$AGIR_DIR/scripts/job/publish_cutouts.py" \
+        --run-dir "$RUN_DIR" \
+        --dest "$FINAL_DEST" \
+        {{ publication_args }}
+    PROMOTE_EXIT=$?
+    set -e
+{% else %}
     mkdir -p "$FINAL_DEST"
     set +e
     python "$AGIR_DIR/scripts/job/promote.py" \
@@ -245,6 +254,7 @@ if [[ "$STAGE_EXIT" -le 1 ]]; then
         --dest "$FINAL_DEST"
     PROMOTE_EXIT=$?
     set -e
+{% endif %}
     log "Promote exit: $PROMOTE_EXIT"
     if [[ "$PROMOTE_EXIT" -eq 0 ]]; then
         PROMOTION_SUCCEEDED=1
@@ -297,6 +307,19 @@ REGISTER_EXIT=0
 {% endif %}
 
 RELEASE_REASON="stage_exit_${STAGE_EXIT}_promote_exit_${PROMOTE_EXIT}"
+{% if (publication_mode | default("standard")) == "cutout_batch" %}
+if [[ "$PROMOTE_EXIT" -ne 0 ]]; then
+    # Keep the copied run bundle for diagnosis, but do not ingest its
+    # calculation-success report as a successful end-to-end stage run. That
+    # would suppress readiness and prevent a safe publication retry.
+    python "$AGIR_DIR/scripts/job/ingest_and_release.py" \
+        --db "$DB_PATH" \
+        --lease-id "$LEASE_ID" \
+        --orchestrator-id "$ORCHESTRATOR_ID" \
+        --release-reason "$RELEASE_REASON"
+    exit "$PROMOTE_EXIT"
+fi
+{% endif %}
 python "$AGIR_DIR/scripts/job/ingest_and_release.py" \
     --db "$DB_PATH" \
     --run-report "$ARTIFACT_DEST/run_report.json" \
