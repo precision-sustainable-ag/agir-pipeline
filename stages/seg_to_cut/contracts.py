@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -146,6 +146,7 @@ class CutoutProcessingResult:
     error_type: str | None = None
     error_message: str | None = None
     retryable: bool = False
+    null_metadata_reasons: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def identity(self) -> tuple[str, int]:

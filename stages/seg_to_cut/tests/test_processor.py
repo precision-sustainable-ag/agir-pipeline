@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import cv2
@@ -23,6 +24,7 @@ from stages.seg_to_cut.contracts import PixelBoundingBox
 from stages.seg_to_cut.errors import SegToCutInputError
 from stages.seg_to_cut.processor import (
     discover_and_validate_inputs,
+    load_catalog,
     load_detection_rows,
     normalized_bbox_to_pixels,
     process_validated_batch,
@@ -51,6 +53,22 @@ def assert_error_code(code: str, callable_):
         callable_()
     assert caught.value.code == code
     return caught.value
+
+
+def test_catalog_background_is_preserved_but_excluded_from_foreground(tmp_path):
+    path = tmp_path / "catalog.json"
+    catalog = {"species": {"BACKGROUND": {"class_id": 0}, "ABUTH": {"class_id": 11}}}
+    path.write_text(json.dumps(catalog))
+    loaded, known = load_catalog(path)
+    assert loaded == catalog
+    assert known == frozenset({11})
+
+
+@pytest.mark.parametrize("species_id,value", [("ABUTH", 0), ("BACKGROUND", False)])
+def test_catalog_rejects_invalid_foreground_and_boolean_background(tmp_path, species_id, value):
+    path = tmp_path / "catalog.json"
+    path.write_text(json.dumps({"species": {species_id: {"class_id": value}}}))
+    assert_error_code(ERROR_CSV_INVALID, lambda: load_catalog(path))
 
 
 def test_discovers_matches_and_sorts_inputs(input_paths) -> None:

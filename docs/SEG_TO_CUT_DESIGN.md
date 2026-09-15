@@ -331,6 +331,7 @@ seg_to_cut/<run_id>/
   logs/
   manifest.json
   run_report.json
+  null_metadata_report.json
 ```
 
 The manifest should record all four artifact paths, sizes, and checksums for each successful cutout.

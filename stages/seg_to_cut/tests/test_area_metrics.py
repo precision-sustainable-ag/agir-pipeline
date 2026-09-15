@@ -12,6 +12,7 @@ from stages.seg_to_cut.metadata import (
     calculate_bbox_area_cm2,
     calculate_cutout_properties,
     finalize_species_bbox_metrics,
+    null_metadata_reasons,
 )
 
 
@@ -93,6 +94,34 @@ def test_area_properties_use_georeferenced_csv_source() -> None:
 def test_camera_source_is_null_until_xyz_input_is_defined() -> None:
     config = SegToCutConfig(bbox_area_source="camera")
     assert calculate_area_properties(world_box(), config=config) == {"bbox_area_cm2": None}
+
+
+@pytest.mark.parametrize(
+    "bbox,source,reason",
+    [(None, "georeferenced_csv", "missing"),
+     (world_box(crs="EPSG:4326"), "georeferenced_csv", "not projected"),
+     (world_box(), "camera", "XYZ")],
+)
+def test_null_reasons_identify_area_source_and_dependencies(bbox, source, reason):
+    config = SegToCutConfig(bbox_area_source=source)
+    metadata = {
+        "datetime": None, "lens_model": None, "season": None,
+        "cutout_props": {"bbox_area_cm2": None, "species_mean_bbox_area_cm2": None,
+                         "species_bbox_sample_size": 0, "species_bbox_area_ratio": None,
+                         "abnormal_bbox_size": None},
+    }
+    reasons = null_metadata_reasons(metadata, world_bbox=bbox, config=config)
+    assert len(reasons) == 7
+    assert reason in reasons["bbox_area_cm2"]
+    assert "0 valid area samples" in reasons["species_mean_bbox_area_cm2"]
+    assert "bbox_area_cm2, species_mean_bbox_area_cm2" in reasons["species_bbox_area_ratio"]
+
+
+def test_available_fields_have_no_null_reasons():
+    metadata = {"datetime": "2026-07-17", "lens_model": "lens", "season": "weeds",
+                "cutout_props": {"bbox_area_cm2": 100.0, "species_mean_bbox_area_cm2": 100.0,
+                                 "species_bbox_area_ratio": 1.0, "abnormal_bbox_size": False}}
+    assert null_metadata_reasons(metadata, world_bbox=world_box(), config=SegToCutConfig()) == {}
 
 
 def test_cutout_properties_include_available_area_fields() -> None:

@@ -7,6 +7,7 @@ import argparse
 import json
 import logging
 import sys
+from collections import Counter
 from pathlib import Path
 
 from stages import (
@@ -115,9 +116,14 @@ def _record_results(
     artifacts_dir: Path,
 ) -> tuple[int, int, int]:
     succeeded = failed = skipped = 0
+    null_cutouts = {}
+    null_counts = Counter()
     for result in results:
         if result.status == ITEM_OK:
             succeeded += 1
+            if result.null_metadata_reasons:
+                null_cutouts[result.cutout_id] = dict(result.null_metadata_reasons)
+                null_counts.update(result.null_metadata_reasons.items())
             artifacts, checksums, sizes = _artifact_details(result, artifacts_dir)
             manifest.add_ok_item(
                 image_id=result.cutout_id,
@@ -148,6 +154,25 @@ def _record_results(
                 message=message,
                 retryable=result.retryable,
             )
+    summary = [
+        {"field": field, "reason": reason, "count": count}
+        for (field, reason), count in sorted(null_counts.items())
+    ]
+    diagnostics_path = artifacts_dir.parent / "null_metadata_report.json"
+    diagnostics_path.write_text(
+        json.dumps(
+            {"n_successful_cutouts": succeeded, "n_cutouts_with_null_fields": len(null_cutouts),
+             "summary": summary, "cutouts": null_cutouts},
+            indent=2, sort_keys=True,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    for entry in summary:
+        logger.info(
+            "Null metadata: field=%s count=%d reason=%s",
+            entry["field"], entry["count"], entry["reason"],
+        )
+    logger.info("Null metadata diagnostics saved to %s", diagnostics_path)
     return succeeded, failed, skipped
 
 

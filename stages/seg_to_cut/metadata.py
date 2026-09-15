@@ -110,34 +110,41 @@ def _segments_intersect(
 def calculate_bbox_area_cm2(world_bbox: WorldBoundingBox | None) -> float | None:
     """Calculate planar quadrilateral area in cm² for a supported projected CRS."""
 
+    return _bbox_area_with_reason(world_bbox)[0]
+
+
+def _bbox_area_with_reason(
+    world_bbox: WorldBoundingBox | None,
+) -> tuple[float | None, str | None]:
+
     if world_bbox is None:
-        return None
+        return None, "world coordinates or CRS missing, incomplete, or malformed"
     points = world_bbox.polygon
     try:
         coordinates_are_finite = all(
             math.isfinite(value) for point in points for value in point
         )
     except TypeError:
-        return None
+        return None, "world corners contain nonnumeric coordinates"
     if len(set(points)) != 4 or not coordinates_are_finite:
-        return None
+        return None, "world corners are repeated or contain nonfinite coordinates"
     if _segments_intersect(points[0], points[1], points[2], points[3]) or _segments_intersect(
         points[1], points[2], points[3], points[0]
     ):
-        return None
+        return None, "world box has intersecting or collinear edges"
     try:
         crs = CRS.from_user_input(world_bbox.crs)
     except (CRSError, TypeError, ValueError):
-        return None
+        return None, "CRS could not be parsed"
     if not crs.is_projected or len(crs.axis_info) < 2:
-        return None
+        return None, "CRS is not projected or lacks two coordinate axes"
     x_factor = crs.axis_info[0].unit_conversion_factor
     y_factor = crs.axis_info[1].unit_conversion_factor
     if not all(
         factor is not None and math.isfinite(factor) and factor > 0
         for factor in (x_factor, y_factor)
     ):
-        return None
+        return None, "CRS axis units cannot be converted to metres"
     # Translate near the origin before the shoelace sum to avoid cancellation
     # for large UTM eastings/northings surrounding a small plant box.
     origin_x, origin_y = points[0]
@@ -151,7 +158,47 @@ def calculate_bbox_area_cm2(world_bbox: WorldBoundingBox | None) -> float | None
     )
     native_area = twice_native_area / 2.0
     area_cm2 = native_area * x_factor * y_factor * 10_000.0
-    return float(area_cm2) if math.isfinite(area_cm2) and area_cm2 > 0 else None
+    if not math.isfinite(area_cm2) or area_cm2 <= 0:
+        return None, "calculated world area is nonfinite or nonpositive"
+    return float(area_cm2), None
+
+
+def null_metadata_reasons(
+    metadata: dict[str, Any], *, world_bbox: WorldBoundingBox | None, config: SegToCutConfig
+) -> dict[str, str]:
+    """Explain unavailable fields without changing the cutout metadata contract."""
+
+    reasons: dict[str, str] = {}
+    props = metadata["cutout_props"]
+    if props["bbox_area_cm2"] is None:
+        reasons["bbox_area_cm2"] = (
+            "camera area calculation unavailable pending authoritative XYZ input"
+            if config.bbox_area_source == "camera"
+            else _bbox_area_with_reason(world_bbox)[1] or "physical area unavailable"
+        )
+    if props["species_mean_bbox_area_cm2"] is None:
+        reasons["species_mean_bbox_area_cm2"] = (
+            f"category has {props['species_bbox_sample_size']} valid area samples; "
+            f"requires at least {config.species_bbox_min_sample_size}"
+        )
+    if props["species_bbox_area_ratio"] is None:
+        dependencies = [
+            field for field in ("bbox_area_cm2", "species_mean_bbox_area_cm2")
+            if props[field] is None
+        ]
+        reasons["species_bbox_area_ratio"] = (
+            "unavailable dependencies: " + ", ".join(dependencies)
+            if dependencies else "category mean is nonpositive or current area is invalid"
+        )
+    if props["abnormal_bbox_size"] is None:
+        reasons["abnormal_bbox_size"] = "species_bbox_area_ratio is unavailable"
+    if metadata["datetime"] is None:
+        reasons["datetime"] = "capture datetime input is not currently supported by seg_to_cut"
+    if metadata["lens_model"] is None:
+        reasons["lens_model"] = "--lens-model was not supplied"
+    if metadata["season"] is None:
+        reasons["season"] = "--season was not supplied"
+    return reasons
 
 
 def calculate_area_properties(

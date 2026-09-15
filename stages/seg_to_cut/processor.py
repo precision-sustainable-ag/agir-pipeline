@@ -49,6 +49,7 @@ from .metadata import (
     calculate_area_properties,
     calculate_cutout_properties,
     finalize_species_bbox_metrics,
+    null_metadata_reasons,
 )
 from .writer import write_cutout_artifacts
 
@@ -321,7 +322,9 @@ def normalized_bbox_to_pixels(
     return pixel_bbox
 
 
-def _parse_mask_class_id(value: Any, *, context: str) -> int:
+def _parse_mask_class_id(
+    value: Any, *, context: str, allow_background: bool = False
+) -> int:
     try:
         if isinstance(value, bool):
             raise ValueError
@@ -331,6 +334,8 @@ def _parse_mask_class_id(value: Any, *, context: str) -> int:
             ERROR_CSV_INVALID,
             f"{context} must be an integer class ID, got {value!r}",
         ) from None
+    if allow_background and parsed == 0:
+        return parsed
     if not 1 <= parsed <= 255:
         raise _input_error(
             ERROR_CSV_INVALID,
@@ -369,9 +374,13 @@ def load_catalog(path: str | Path) -> tuple[Mapping[str, Any], frozenset[int]]:
                 ERROR_CSV_INVALID,
                 f"Species catalog entry {species_id!r} must contain class_id",
             )
-        known.add(
-            _parse_mask_class_id(entry["class_id"], context=f"species {species_id!r} class_id")
+        class_id = _parse_mask_class_id(
+            entry["class_id"],
+            context=f"species {species_id!r} class_id",
+            allow_background=str(species_id).strip().upper() == "BACKGROUND",
         )
+        if class_id != 0:
+            known.add(class_id)
     for cultivar_id, entry in cultivars.items():
         if not isinstance(entry, Mapping):
             raise _input_error(
@@ -880,6 +889,9 @@ def _process_image_outputs(
                     cutout_id=cutout_id,
                     status=ITEM_OK,
                     artifacts=artifacts,
+                    null_metadata_reasons=null_metadata_reasons(
+                        metadata, world_bbox=detection.world_bbox, config=config
+                    ),
                 )
             )
         except Exception as exc:
