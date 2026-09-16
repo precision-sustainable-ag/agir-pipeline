@@ -36,7 +36,7 @@ def test_cli_defaults_to_eight_workers(input_paths) -> None:
 
 
 @pytest.mark.parametrize("workers", [1, 2])
-def test_null_diagnostics_are_saved_for_successful_cutouts(input_paths, tmp_path, workers):
+def test_null_diagnostics_are_logged_for_each_successful_cutout(input_paths, tmp_path, workers):
     for image_id in ("image_1", "image_2"):
         write_image_and_mask(input_paths, image_id)
     write_csv(input_paths, [detection_row("image_1", 0), detection_row("image_2", 0)])
@@ -45,14 +45,13 @@ def test_null_diagnostics_are_saved_for_successful_cutouts(input_paths, tmp_path
     output = tmp_path / "output"
     assert main([*_args(input_paths), "--config", str(config), "--output", str(output),
                  "--batch-id", "MD_2026-07-17", "--t", str(workers)]) == EXIT_SUCCESS
-    report_path = next(output.glob("seg_to_cut/*/null_metadata_report.json"))
-    report = json.loads(report_path.read_text())
-    assert report["n_successful_cutouts"] == 2
-    assert report["n_cutouts_with_null_fields"] == 2
-    assert len(report["summary"]) == 7
-    assert all(entry["count"] == 2 for entry in report["summary"])
-    assert "XYZ" in report["cutouts"]["image_1_0"]["bbox_area_cm2"]
-    assert "field=bbox_area_cm2 count=2" in (report_path.parent / "logs/run.log").read_text()
+    run_dir = next(output.glob("seg_to_cut/*"))
+    assert not (run_dir / "null_metadata_report.json").exists()
+    log = (run_dir / "logs/run.log").read_text()
+    assert "image_id=image_1 cutout_id=image_1_0 field=bbox_area_cm2" in log
+    assert "image_id=image_2 cutout_id=image_2_0 field=bbox_area_cm2" in log
+    assert "reason=camera area calculation unavailable pending authoritative XYZ input" in log
+    assert "Null metadata summary: field=bbox_area_cm2 count=2" in log
 
 
 def test_cli_reports_validation_counts(input_paths, capsys) -> None:

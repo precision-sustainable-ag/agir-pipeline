@@ -81,6 +81,8 @@ class ValidatedImageInput:
     width: int
     height: int
     detections: tuple[DetectionInput, ...]
+    capture_datetime: str | None = None
+    lens_model: str | None = None
 
 
 @dataclass(frozen=True)

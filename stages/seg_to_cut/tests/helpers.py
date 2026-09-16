@@ -6,6 +6,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from PIL import Image
 
 
 def make_input_paths(tmp_path: Path) -> dict[str, Path]:
@@ -21,7 +22,16 @@ def make_input_paths(tmp_path: Path) -> dict[str, Path]:
         json.dumps(
             {
                 "species": {
-                    "ABUTH": {"class_id": 11},
+                    "ABUTH": {
+                        "class_id": 11,
+                        "species_group": "dicot",
+                        "taxon_class": "Magnoliopsida",
+                        "taxon_order": "Malvales",
+                        "species_epithet": "theophrasti",
+                        "r": 1,
+                        "g": 2,
+                        "b": 3,
+                    },
                     "BETVU": {"class_id": 19},
                 },
                 "cultivars": {"107": {"display_name": "Cultivar 107"}},
@@ -41,10 +51,21 @@ def write_image_and_mask(
     mask_dtype=np.uint8,
     mask_value: int = 11,
     color_mask: bool = False,
+    exif_datetime: str | None = None,
+    exif_lens_model: str | None = None,
 ) -> None:
     height, width = image_shape
     image = np.full((height, width, 3), 127, dtype=np.uint8)
     assert cv2.imwrite(str(paths["images"] / f"{image_id}.jpg"), image)
+    if exif_datetime is not None or exif_lens_model is not None:
+        image_path = paths["images"] / f"{image_id}.jpg"
+        with Image.open(image_path) as pil_image:
+            exif = pil_image.getexif()
+            if exif_datetime is not None:
+                exif[36867] = exif_datetime
+            if exif_lens_model is not None:
+                exif[42036] = exif_lens_model
+            pil_image.save(image_path, exif=exif)
 
     mask_height, mask_width = mask_shape or image_shape
     shape = (mask_height, mask_width, 3) if color_mask else (mask_height, mask_width)

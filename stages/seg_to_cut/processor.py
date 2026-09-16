@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import csv
+import datetime as dt
 import json
 import logging
 import math
 import re
+import warnings
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from itertools import repeat
 from pathlib import Path
+from threading import Lock
 from typing import Any, Mapping, Sequence
 
 import cv2
 import numpy as np
+from PIL import Image, UnidentifiedImageError
 
 from stages import ITEM_FAILED, ITEM_OK, ITEM_SKIPPED
 from stages.common.class_ids import ClassIdIndex, ClassIdResolutionError, build_class_id_index
@@ -54,6 +58,7 @@ from .metadata import (
 from .writer import write_cutout_artifacts
 
 logger = logging.getLogger(__name__)
+_EXIF_READ_LOCK = Lock()
 
 _SAFE_ID_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
@@ -476,6 +481,44 @@ def _validate_image_and_mask(
     return width, height
 
 
+def _read_exif_metadata(image_path: Path) -> tuple[str | None, str | None]:
+    """Return EXIF capture datetime and lens model without decoding image pixels."""
+
+    try:
+        # warnings.catch_warnings mutates process-wide state, so guard it when
+        # input validation reads EXIF concurrently in a thread pool.
+        with _EXIF_READ_LOCK, warnings.catch_warnings():
+            # EXIF parsing does not decode pixels, so large source dimensions
+            # do not create Pillow's decompression-bomb memory risk here.
+            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+            with Image.open(image_path) as image:
+                exif = image.getexif()
+                nested = exif.get_ifd(34665)
+                datetime_value = exif.get(36867, nested.get(36867))
+                lens_value = exif.get(42036, nested.get(42036))
+    except (OSError, UnidentifiedImageError, ValueError, TypeError):
+        logger.warning("Could not read EXIF metadata from %s", image_path)
+        return None, None
+    if not isinstance(datetime_value, str):
+        logger.warning("Image %s has no EXIF DateTimeOriginal", image_path)
+        capture_datetime = None
+    else:
+        datetime_value = datetime_value.strip()
+        try:
+            dt.datetime.strptime(datetime_value, "%Y:%m:%d %H:%M:%S")
+        except ValueError:
+            logger.warning(
+                "Image %s has invalid EXIF DateTimeOriginal %r", image_path, datetime_value
+            )
+            capture_datetime = None
+        else:
+            capture_datetime = datetime_value
+    lens_model = lens_value.strip() if isinstance(lens_value, str) and lens_value.strip() else None
+    if lens_model is None:
+        logger.warning("Image %s has no EXIF LensModel", image_path)
+    return capture_datetime, lens_model
+
+
 def _validate_discovered_image(
     normalized_image_id: str,
     image_rows: Sequence[_DetectionRow],
@@ -540,6 +583,7 @@ def _validate_discovered_image(
                 world_bbox=row.world_bbox,
             )
         )
+    capture_datetime, lens_model = _read_exif_metadata(image_path)
     return ValidatedImageInput(
         image_id=image_id,
         image_path=image_path,
@@ -547,6 +591,8 @@ def _validate_discovered_image(
         width=width,
         height=height,
         detections=tuple(detections),
+        capture_datetime=capture_datetime,
+        lens_model=lens_model,
     )
 
 
@@ -664,17 +710,8 @@ def _category_metadata(detection: DetectionInput, catalog: Mapping[str, Any]) ->
     category["class_id"] = category.get("class_id")
     category.setdefault("USDA_symbol", detection.species_id)
 
-    aliases = {
-        "group": "species_group",
-        "class": "taxon_class",
-        "order": "taxon_order",
-        "species": "species_epithet",
-    }
-    for output_name, catalog_name in aliases.items():
-        if output_name not in category and catalog_name in category:
-            category[output_name] = category[catalog_name]
-    if "rgb" not in category and all(channel in category for channel in ("r", "g", "b")):
-        category["rgb"] = [category["r"], category["g"], category["b"]]
+    if all(channel in category for channel in ("r", "g", "b")):
+        category["rgb"] = [category.pop(channel) for channel in ("r", "g", "b")]
 
     category["cultivar_id"] = detection.cultivar_id
     category["cultivar_class_id"] = detection.class_id if detection.cultivar_id else None
@@ -705,6 +742,8 @@ def _cutout_metadata(
     season: str | None,
     bbot_version: str | None,
     lens_model: str | None,
+    capture_datetime: str | None,
+    exif_lens_model: str | None,
 ) -> dict[str, Any]:
     cutout_properties = {
         "is_primary": True,
@@ -722,7 +761,7 @@ def _cutout_metadata(
     }
     return {
         "season": season,
-        "datetime": None,
+        "datetime": capture_datetime,
         "bbot_version": bbot_version,
         "batch_id": batch_id,
         "image_id": detection.image_id,
@@ -730,7 +769,7 @@ def _cutout_metadata(
         "cutout_num": detection.bounding_box_id,
         "cutout_height": int(rgb_crop.shape[0]),
         "cutout_width": int(rgb_crop.shape[1]),
-        "lens_model": lens_model,
+        "lens_model": exif_lens_model or lens_model,
         "validated": False,
         "cutout_version": config.cutout_version,
         "cutout_props": cutout_properties,
@@ -884,6 +923,8 @@ def _process_image_outputs(
                 season=season,
                 bbot_version=bbot_version,
                 lens_model=lens_model,
+                capture_datetime=image.capture_datetime,
+                exif_lens_model=image.lens_model,
             )
             artifacts = write_cutout_artifacts(
                 output_dir,

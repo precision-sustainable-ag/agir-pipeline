@@ -330,6 +330,72 @@ def test_validation_does_not_write_cutouts(input_paths) -> None:
     assert after == before
 
 
+@pytest.mark.parametrize(
+    "exif_datetime,expected",
+    [("2026:07:17 10:06:56", "2026:07:17 10:06:56"),
+     (None, None), ("not-a-datetime", None)],
+)
+def test_capture_datetime_comes_from_jpg_exif(input_paths, exif_datetime, expected):
+    write_image_and_mask(input_paths, "image_1", exif_datetime=exif_datetime)
+    write_csv(input_paths, [detection_row("image_1", 0)])
+    assert validate(input_paths).images[0].capture_datetime == expected
+
+
+def test_cutout_metadata_contains_exif_datetime(input_paths, tmp_path):
+    timestamp = "2026:07:17 10:06:56"
+    write_image_and_mask(input_paths, "image_1", exif_datetime=timestamp)
+    write_csv(input_paths, [detection_row("image_1", 0)])
+    results = process_validated_batch(
+        validate(input_paths), output_dir=tmp_path / "cutouts", batch_id="batch_1",
+        config=SegToCutConfig(border_width_px=1),
+    )
+    metadata = json.loads(results[0].artifacts.metadata_path.read_text())
+    assert metadata["datetime"] == timestamp
+    assert "datetime" not in results[0].null_metadata_reasons
+
+
+def test_cutout_metadata_prefers_exif_lens_model(input_paths, tmp_path):
+    write_image_and_mask(input_paths, "image_1", exif_lens_model="EXIF Lens 60mm")
+    write_csv(input_paths, [detection_row("image_1", 0)])
+    validation = validate(input_paths)
+    assert validation.images[0].lens_model == "EXIF Lens 60mm"
+    result = process_validated_batch(
+        validation, output_dir=tmp_path / "cutouts", batch_id="batch_1",
+        config=SegToCutConfig(border_width_px=1), lens_model="CLI fallback lens",
+    )[0]
+    metadata = json.loads(result.artifacts.metadata_path.read_text())
+    assert metadata["lens_model"] == "EXIF Lens 60mm"
+    assert "lens_model" not in result.null_metadata_reasons
+
+
+def test_cutout_metadata_uses_cli_lens_fallback(input_paths, tmp_path):
+    write_image_and_mask(input_paths, "image_1")
+    write_csv(input_paths, [detection_row("image_1", 0)])
+    result = process_validated_batch(
+        validate(input_paths), output_dir=tmp_path / "cutouts", batch_id="batch_1",
+        config=SegToCutConfig(border_width_px=1), lens_model="CLI fallback lens",
+    )[0]
+    metadata = json.loads(result.artifacts.metadata_path.read_text())
+    assert metadata["lens_model"] == "CLI fallback lens"
+
+
+def test_category_keeps_canonical_catalog_fields_without_legacy_aliases(input_paths, tmp_path):
+    write_image_and_mask(input_paths, "image_1")
+    write_csv(input_paths, [detection_row("image_1", 0)])
+    result = process_validated_batch(
+        validate(input_paths), output_dir=tmp_path / "cutouts", batch_id="batch_1",
+        config=SegToCutConfig(border_width_px=1),
+    )[0]
+    category = json.loads(result.artifacts.metadata_path.read_text())["category"]
+    assert category["species_group"] == "dicot"
+    assert category["taxon_class"] == "Magnoliopsida"
+    assert category["taxon_order"] == "Malvales"
+    assert category["species_epithet"] == "theophrasti"
+    assert not {"group", "class", "order", "species"} & category.keys()
+    assert category["rgb"] == [1, 2, 3]
+    assert not {"r", "g", "b"} & category.keys()
+
+
 def test_eligibility_pass_reads_only_the_mask(input_paths, tmp_path, monkeypatch) -> None:
     write_image_and_mask(input_paths, "image_1")
     write_csv(input_paths, [detection_row("image_1", 0)])

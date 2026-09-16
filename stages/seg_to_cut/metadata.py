@@ -193,9 +193,9 @@ def null_metadata_reasons(
     if props["abnormal_bbox_size"] is None:
         reasons["abnormal_bbox_size"] = "species_bbox_area_ratio is unavailable"
     if metadata["datetime"] is None:
-        reasons["datetime"] = "capture datetime input is not currently supported by seg_to_cut"
+        reasons["datetime"] = "source JPG has no valid EXIF DateTimeOriginal"
     if metadata["lens_model"] is None:
-        reasons["lens_model"] = "--lens-model was not supplied"
+        reasons["lens_model"] = "source JPG has no EXIF LensModel and --lens-model was not supplied"
     if metadata["season"] is None:
         reasons["season"] = "--season was not supplied"
     return reasons
