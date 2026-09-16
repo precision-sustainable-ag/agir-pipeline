@@ -33,7 +33,6 @@ from . import (
     ERROR_MASK_INVALID,
     ERROR_MASK_MISSING,
     ERROR_PROCESSING_FAILED,
-    ERROR_UNKNOWN_MASK_VALUE,
 )
 from .cleanup import border_sweep_cleanup, resolve_border_band_widths
 from .config import SegToCutConfig
@@ -432,50 +431,19 @@ def _build_file_index(
     return index
 
 
-def _validate_image_and_mask(
-    *, image_id: str, image_path: Path, mask_path: Path, known_class_ids: frozenset[int]
-) -> tuple[int, int]:
-    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-    if image is None or image.ndim != 3 or image.shape[2] != 3:
+def _read_image_dimensions(image_id: str, image_path: Path) -> tuple[int, int]:
+    """Read dimensions from the image header without decoding pixel data."""
+    try:
+        with _EXIF_READ_LOCK, warnings.catch_warnings():
+            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+            with Image.open(image_path) as image:
+                return image.size
+    except (OSError, UnidentifiedImageError, ValueError, TypeError) as exc:
         raise _input_error(
             ERROR_IMAGE_INVALID,
-            f"Image {image_path} is not a readable RGB JPG",
+            f"Could not read image dimensions from {image_path}: {exc}",
             image_id=image_id,
-        )
-    mask = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
-    if mask is None:
-        raise _input_error(
-            ERROR_MASK_INVALID,
-            f"Mask {mask_path} is not readable",
-            image_id=image_id,
-        )
-    if mask.ndim != 2 or mask.dtype != np.uint8:
-        raise _input_error(
-            ERROR_MASK_INVALID,
-            f"Mask {mask_path} must be single-channel uint8, got shape={mask.shape} "
-            f"dtype={mask.dtype}",
-            image_id=image_id,
-        )
-
-    height, width = image.shape[:2]
-    if mask.shape != (height, width):
-        raise _input_error(
-            ERROR_DIMENSION_MISMATCH,
-            f"Image {image_path} is {width}x{height}, but mask {mask_path} has shape "
-            f"{mask.shape}",
-            image_id=image_id,
-        )
-
-    foreground = {int(value) for value in np.unique(mask) if int(value) != 0}
-    unknown = sorted(foreground - known_class_ids)
-    if unknown:
-        raise _input_error(
-            ERROR_UNKNOWN_MASK_VALUE,
-            f"Mask {mask_path} contains unknown foreground class value(s): {unknown}",
-            image_id=image_id,
-            values=unknown,
-        )
-    return width, height
+        ) from exc
 
 
 def _read_exif_metadata(image_path: Path) -> tuple[str | None, str | None]:
@@ -483,7 +451,7 @@ def _read_exif_metadata(image_path: Path) -> tuple[str | None, str | None]:
 
     try:
         # warnings.catch_warnings mutates process-wide state, so guard it when
-        # input validation reads EXIF concurrently in a thread pool.
+        # image headers may be read concurrently in a thread pool.
         with _EXIF_READ_LOCK, warnings.catch_warnings():
             # EXIF parsing does not decode pixels, so large source dimensions
             # do not create Pillow's decompression-bomb memory risk here.
@@ -540,12 +508,7 @@ def _validate_discovered_image(
             image_id=image_id,
         )
 
-    width, height = _validate_image_and_mask(
-        image_id=image_id,
-        image_path=image_path,
-        mask_path=mask_path,
-        known_class_ids=known_class_ids,
-    )
+    width, height = _read_image_dimensions(image_id, image_path)
     detections: list[DetectionInput] = []
     for row in image_rows:
         class_id = class_ids.get(row.image_id, row.bounding_box_id)
@@ -580,7 +543,6 @@ def _validate_discovered_image(
                 world_bbox=row.world_bbox,
             )
         )
-    capture_datetime, lens_model = _read_exif_metadata(image_path)
     return ValidatedImageInput(
         image_id=image_id,
         image_path=image_path,
@@ -588,8 +550,6 @@ def _validate_discovered_image(
         width=width,
         height=height,
         detections=tuple(detections),
-        capture_datetime=capture_datetime,
-        lens_model=lens_model,
     )
 
 
@@ -602,7 +562,7 @@ def discover_and_validate_inputs(
     config: SegToCutConfig,
     max_workers: int = 0,
 ) -> BatchValidationResult:
-    """Discover, match, and fully validate all inputs needed before cutout generation."""
+    """Match inputs and validate detections using image headers, without decoding pixels."""
 
     rows = load_detection_rows(georeferenced_csv)
     catalog, known_class_ids = load_catalog(species_catalog)
@@ -688,7 +648,7 @@ def _read_validated_rgb(image: ValidatedImageInput) -> np.ndarray:
     if bgr is None or bgr.shape != (image.height, image.width, 3):
         raise _input_error(
             ERROR_IMAGE_INVALID,
-            f"Image {image.image_path} changed or became unreadable after validation",
+            f"Image {image.image_path} is unreadable or does not match its header dimensions",
             image_id=image.image_id,
         )
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
@@ -696,10 +656,17 @@ def _read_validated_rgb(image: ValidatedImageInput) -> np.ndarray:
 
 def _read_validated_mask(image: ValidatedImageInput) -> np.ndarray:
     mask = cv2.imread(str(image.mask_path), cv2.IMREAD_UNCHANGED)
-    if mask is None or mask.dtype != np.uint8 or mask.shape != (image.height, image.width):
+    if mask is None or mask.ndim != 2 or mask.dtype != np.uint8:
         raise _input_error(
             ERROR_MASK_INVALID,
-            f"Mask {image.mask_path} changed or became unreadable after validation",
+            f"Mask {image.mask_path} must be readable, single-channel uint8",
+            image_id=image.image_id,
+        )
+    if mask.shape != (image.height, image.width):
+        raise _input_error(
+            ERROR_DIMENSION_MISMATCH,
+            f"Image {image.image_path} is {image.width}x{image.height}, "
+            f"but mask {image.mask_path} has shape {mask.shape}",
             image_id=image.image_id,
         )
     return mask
@@ -884,9 +851,11 @@ def _process_image_outputs(
     eligible = set(eligible_identities)
     early_results = {result.identity: result for result in image_early_results}
     arrays: tuple[np.ndarray, np.ndarray] | None = None
+    capture_datetime = exif_lens_model = None
     if eligible:
         try:
             arrays = (_read_validated_rgb(image), _read_validated_mask(image))
+            capture_datetime, exif_lens_model = _read_exif_metadata(image.image_path)
         except Exception as exc:
             for detection in image.detections:
                 if detection.identity in eligible:
@@ -941,8 +910,8 @@ def _process_image_outputs(
                 season=season,
                 bbot_version=bbot_version,
                 lens_model=lens_model,
-                capture_datetime=image.capture_datetime,
-                exif_lens_model=image.lens_model,
+                capture_datetime=capture_datetime,
+                exif_lens_model=exif_lens_model,
             )
             artifacts = write_cutout_artifacts(
                 output_dir,
