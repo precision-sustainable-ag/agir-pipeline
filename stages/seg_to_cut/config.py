@@ -19,7 +19,7 @@ DEFAULT_CONFIG_PATH = Path(__file__).parent / "configs" / "default.yaml"
 class SegToCutConfig:
     image_extensions: tuple[str, ...] = (".jpg", ".jpeg")
     mask_extension: str = ".png"
-    border_width_px: int = 100
+    border_band_fraction: float = 0.10
     edge_threshold: float = 0.05
     cutout_version: str = "2.0"
     bbox_area_source: str = "georeferenced_csv"
@@ -114,7 +114,21 @@ def parse_config(data: Mapping[str, Any]) -> SegToCutConfig:
         )
 
     mask_extension = _extension(data.get("mask_extension", ".png"), field="mask_extension")
-    border_width_px = _positive_int(data.get("border_width_px", 100), field="border_width_px")
+    if "border_width_px" in data:
+        raise SegToCutConfigError(
+            ERROR_CONFIG_INVALID,
+            "border_width_px is no longer supported; use border_band_fraction",
+            field="border_width_px",
+        )
+    border_band_fraction = _fraction(
+        data.get("border_band_fraction", 0.10), field="border_band_fraction"
+    )
+    if border_band_fraction <= 0 or border_band_fraction >= 0.5:
+        raise SegToCutConfigError(
+            ERROR_CONFIG_INVALID,
+            "border_band_fraction must be greater than 0 and less than 0.5",
+            field="border_band_fraction",
+        )
     edge_threshold = _fraction(data.get("edge_threshold", 0.05), field="edge_threshold")
     cutout_version = data.get("cutout_version", "2.0")
     if not isinstance(cutout_version, str) or not cutout_version.strip():
@@ -151,7 +165,7 @@ def parse_config(data: Mapping[str, Any]) -> SegToCutConfig:
     return SegToCutConfig(
         image_extensions=image_extensions,
         mask_extension=mask_extension,
-        border_width_px=border_width_px,
+        border_band_fraction=border_band_fraction,
         edge_threshold=edge_threshold,
         cutout_version=cutout_version.strip(),
         bbox_area_source=bbox_area_source,

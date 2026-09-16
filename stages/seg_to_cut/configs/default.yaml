@@ -3,7 +3,7 @@ image_extensions:
   - .jpeg
 mask_extension: .png
 
-border_width_px: 100
+border_band_fraction: 0.10
 edge_threshold: 0.05
 cutout_version: "2.0"
 

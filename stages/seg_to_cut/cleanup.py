@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import cv2
 import numpy as np
 from numpy.typing import NDArray
@@ -13,11 +15,23 @@ from . import (
 from .contracts import CleanupResult
 
 
+def resolve_border_band_widths(
+    shape: tuple[int, int], border_band_fraction: float
+) -> tuple[int, int]:
+    """Return top/bottom and left/right band widths for a crop shape."""
+
+    height, width = shape
+    return (
+        max(1, math.ceil(height * border_band_fraction)),
+        max(1, math.ceil(width * border_band_fraction)),
+    )
+
+
 def border_sweep_cleanup(
     mask: NDArray[np.uint8],
     *,
     expected_class_id: int,
-    border_width_px: int,
+    border_band_fraction: float,
 ) -> CleanupResult:
     """Remove expected-class components confined to the crop's border band.
 
@@ -32,10 +46,13 @@ def border_sweep_cleanup(
         raise ValueError("expected_class_id must be an integer in the range 1..255")
     if not 1 <= expected_class_id <= 255:
         raise ValueError("expected_class_id must be in the range 1..255")
-    if isinstance(border_width_px, bool) or not isinstance(border_width_px, int):
-        raise ValueError("border_width_px must be a positive integer")
-    if border_width_px < 1:
-        raise ValueError("border_width_px must be a positive integer")
+    if (
+        isinstance(border_band_fraction, bool)
+        or not isinstance(border_band_fraction, (int, float))
+        or not math.isfinite(border_band_fraction)
+        or not 0 < border_band_fraction < 0.5
+    ):
+        raise ValueError("border_band_fraction must be a finite number between 0 and 0.5")
 
     candidate = mask == expected_class_id
     cleaned = np.zeros(mask.shape, dtype=np.uint8)
@@ -52,11 +69,14 @@ def border_sweep_cleanup(
         candidate.astype(np.uint8), connectivity=8
     )
     height, width = mask.shape
+    vertical_band, horizontal_band = resolve_border_band_widths(
+        mask.shape, border_band_fraction
+    )
     interior = np.zeros(mask.shape, dtype=bool)
-    if height > 2 * border_width_px and width > 2 * border_width_px:
+    if height > 2 * vertical_band and width > 2 * horizontal_band:
         interior[
-            border_width_px : height - border_width_px,
-            border_width_px : width - border_width_px,
+            vertical_band : height - vertical_band,
+            horizontal_band : width - horizontal_band,
         ] = True
 
     removed_components = 0

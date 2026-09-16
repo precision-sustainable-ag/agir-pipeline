@@ -20,6 +20,7 @@ from pyproj.exceptions import CRSError
 from skimage.measure import blur_effect
 from skimage.morphology import convex_hull_image
 
+from .cleanup import resolve_border_band_widths
 from .config import SegToCutConfig, parse_config
 from .contracts import AreaMetricInput, PixelBoundingBox, WorldBoundingBox
 
@@ -55,7 +56,7 @@ def measurement_provenance(config: SegToCutConfig) -> dict[str, Any]:
             "undefined": None,
         },
         "edge_cut": {
-            "band_width_px": config.border_width_px,
+            "band_fraction": config.border_band_fraction,
             "threshold": config.edge_threshold,
             "fraction": "foreground_pixels / actual_band_pixels",
             "comparison": "strictly_greater",
@@ -373,12 +374,14 @@ def calculate_mask_properties(
     ):
         raise ValueError("mask dimensions and clipped source bounding box must agree")
 
-    band = config.border_width_px
+    vertical_band, horizontal_band = resolve_border_band_widths(
+        target.shape, config.border_band_fraction
+    )
     fractions = {
-        "top": float(target[:band, :].mean()),
-        "bottom": float(target[-band:, :].mean()),
-        "left": float(target[:, :band].mean()),
-        "right": float(target[:, -band:].mean()),
+        "top": float(target[:vertical_band, :].mean()),
+        "bottom": float(target[-vertical_band:, :].mean()),
+        "left": float(target[:, :horizontal_band].mean()),
+        "right": float(target[:, -horizontal_band:].mean()),
     }
     flagged = [side for side in SIDES if fractions[side] > config.edge_threshold]
     source_boundary = {
@@ -404,7 +407,11 @@ def calculate_mask_properties(
         "edge_cut": {
             "flagged": bool(flagged),
             "threshold": config.edge_threshold,
-            "band_width_px": band,
+            "band_fraction": config.border_band_fraction,
+            "band_width_px": {
+                "top_bottom": vertical_band,
+                "left_right": horizontal_band,
+            },
             "flagged_sides": flagged,
             "source_image_sides": [side for side in flagged if source_boundary[side]],
             "detection_box_truncation_sides": [

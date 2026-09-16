@@ -36,7 +36,7 @@ from . import (
     ERROR_PROCESSING_FAILED,
     ERROR_UNKNOWN_MASK_VALUE,
 )
-from .cleanup import border_sweep_cleanup
+from .cleanup import border_sweep_cleanup, resolve_border_band_widths
 from .config import SegToCutConfig
 from .contracts import (
     AreaMetricInput,
@@ -745,11 +745,18 @@ def _cutout_metadata(
     capture_datetime: str | None,
     exif_lens_model: str | None,
 ) -> dict[str, Any]:
+    vertical_band, horizontal_band = resolve_border_band_widths(
+        rgb_crop.shape[:2], config.border_band_fraction
+    )
     cutout_properties = {
         "is_primary": True,
         "intruder_cleanup": {
             "method": "border_sweep",
-            "border_width_px": config.border_width_px,
+            "border_band_fraction": config.border_band_fraction,
+            "border_width_px": {
+                "top_bottom": vertical_band,
+                "left_right": horizontal_band,
+            },
             "removed_components": cleanup.removed_components,
             "remaining_components": cleanup.remaining_components,
             "removed_pixels": cleanup.removed_pixels,
@@ -825,7 +832,7 @@ def _evaluate_image_eligibility(
         cleanup = border_sweep_cleanup(
             _crop(mask, detection),
             expected_class_id=detection.class_id,
-            border_width_px=config.border_width_px,
+            border_band_fraction=config.border_band_fraction,
         )
         if cleanup.skipped:
             early_results.append(_skipped_result(detection, cleanup.skip_reason or "EMPTY_TARGET"))
@@ -894,7 +901,7 @@ def _process_image_outputs(
             cleanup = border_sweep_cleanup(
                 _crop(mask, detection),
                 expected_class_id=detection.class_id,
-                border_width_px=config.border_width_px,
+                border_band_fraction=config.border_band_fraction,
             )
             if cleanup.skipped:
                 results.append(_skipped_result(detection, cleanup.skip_reason or "EMPTY_TARGET"))
