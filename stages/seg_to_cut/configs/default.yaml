@@ -3,6 +3,8 @@ image_extensions:
   - .jpeg
 mask_extension: .png
 
+# Increase to widen the border band and remove more intruder components.
+# Decrease to narrow the border band and keep more components.
 border_band_fraction: 0.10
 edge_threshold: 0.05
 cutout_version: "2.0"

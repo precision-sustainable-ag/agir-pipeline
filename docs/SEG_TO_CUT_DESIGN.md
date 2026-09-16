@@ -122,14 +122,14 @@ reaches the crop interior is kept. The original cropout JPG is unchanged.
 
 ### Edge Truncation Flag
 
-After cleanup, the stage measures the percentage of each border band covered by
-the target plant. A side is flagged when its plant coverage is greater than
+After cleanup, the stage measures the percentage of the outermost row or column
+covered by the target plant. This edge band is fixed at one pixel and cannot be
+configured. It is independent of the intruder-removal band. A side is flagged
+when its plant coverage is greater than
 `edge_threshold`. The default threshold is `0.05`, or 5%.
 
 - Increase the threshold to require more plant coverage. Fewer sides are flagged.
 - Decrease the threshold to require less plant coverage. More sides are flagged.
-- Increase `border_band_fraction` to measure a wider area along each side.
-- Decrease `border_band_fraction` to measure a narrower area.
 
 Placement is based on the flagged sides:
 
@@ -177,8 +177,7 @@ A practical first schema is:
     "edge_cut": {
       "flagged": true,
       "threshold": 0.05,
-      "band_fraction": 0.10,
-      "band_width_px": {"top_bottom": 406, "left_right": 674},
+      "band_width_px": {"top_bottom": 1, "left_right": 1},
       "flagged_sides": ["right"],
       "source_image_sides": ["right"],
       "detection_box_truncation_sides": [],

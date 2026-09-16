@@ -20,7 +20,6 @@ from pyproj.exceptions import CRSError
 from skimage.measure import blur_effect
 from skimage.morphology import convex_hull_image
 
-from .cleanup import resolve_border_band_widths
 from .config import SegToCutConfig, parse_config
 from .contracts import AreaMetricInput, PixelBoundingBox, WorldBoundingBox
 
@@ -56,7 +55,7 @@ def measurement_provenance(config: SegToCutConfig) -> dict[str, Any]:
             "undefined": None,
         },
         "edge_cut": {
-            "band_fraction": config.border_band_fraction,
+            "band_width_px": 1,
             "threshold": config.edge_threshold,
             "fraction": "foreground_pixels / actual_band_pixels",
             "comparison": "strictly_greater",
@@ -374,9 +373,7 @@ def calculate_mask_properties(
     ):
         raise ValueError("mask dimensions and clipped source bounding box must agree")
 
-    vertical_band, horizontal_band = resolve_border_band_widths(
-        target.shape, config.border_band_fraction
-    )
+    vertical_band = horizontal_band = 1
     fractions = {
         "top": float(target[:vertical_band, :].mean()),
         "bottom": float(target[-vertical_band:, :].mean()),
@@ -407,7 +404,6 @@ def calculate_mask_properties(
         "edge_cut": {
             "flagged": bool(flagged),
             "threshold": config.edge_threshold,
-            "band_fraction": config.border_band_fraction,
             "band_width_px": {
                 "top_bottom": vertical_band,
                 "left_right": horizontal_band,
