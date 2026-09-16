@@ -9,9 +9,8 @@ import logging
 import math
 import re
 import warnings
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from itertools import repeat
 from pathlib import Path
 from threading import Lock
 from typing import Any, Mapping, Sequence
@@ -338,9 +337,7 @@ def normalized_bbox_to_pixels(
     return pixel_bbox
 
 
-def _parse_mask_class_id(
-    value: Any, *, context: str, allow_background: bool = False
-) -> int:
+def _parse_mask_class_id(value: Any, *, context: str, allow_background: bool = False) -> int:
     try:
         if isinstance(value, bool):
             raise ValueError
@@ -638,17 +635,31 @@ def discover_and_validate_inputs(
         )
 
     workers = _bounded_worker_count(max_workers, len(image_groups))
+    total = len(image_groups)
+    validated_by_index: dict[int, ValidatedImageInput] = {}
     if workers > 1:
         cv2.setNumThreads(1)
         logger.info("Validating images with %d threads", workers)
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            validated_images = list(executor.map(validate_group, image_groups))
+            futures = {
+                executor.submit(validate_group, group): index
+                for index, group in enumerate(image_groups)
+            }
+            for completed, future in enumerate(as_completed(futures), 1):
+                image = future.result()
+                validated_by_index[futures[future]] = image
+                logger.info(
+                    "Validation [%d/%d] Finished image %s", completed, total, image.image_id
+                )
     else:
         logger.info("Validating images sequentially")
-        validated_images = [validate_group(group) for group in image_groups]
+        for index, group in enumerate(image_groups):
+            image = validate_group(group)
+            validated_by_index[index] = image
+            logger.info("Validation [%d/%d] Finished image %s", index + 1, total, image.image_id)
 
     return BatchValidationResult(
-        images=tuple(validated_images),
+        images=tuple(validated_by_index[index] for index in range(total)),
         known_class_ids=known_class_ids,
         catalog=catalog,
     )
@@ -960,6 +971,23 @@ def _process_image_outputs(
     return tuple(results)
 
 
+def _log_cutout_progress(
+    completed: int,
+    total: int,
+    image_id: str,
+    results: Sequence[CutoutProcessingResult],
+) -> None:
+    logger.info(
+        "Cutouts [%d/%d] Finished image %s: %d succeeded, %d skipped, %d failed cutouts",
+        completed,
+        total,
+        image_id,
+        sum(result.status == ITEM_OK for result in results),
+        sum(result.status == ITEM_SKIPPED for result in results),
+        sum(result.status == ITEM_FAILED for result in results),
+    )
+
+
 def process_validated_batch(
     validation: BatchValidationResult,
     *,
@@ -1000,24 +1028,37 @@ def process_validated_batch(
     try:
         # First pass decides which detections survive cleanup, allowing category
         # statistics to exclude empty targets without retaining image-sized arrays.
+        total = len(validation.images)
+        logger.info("Preparing measurements for %d images", total)
+        eligibility_by_index: dict[int, _EligibilityPassResult] = {}
         if executor is None:
-            eligibility_results = tuple(
-                _evaluate_image_eligibility(image, config) for image in validation.images
-            )
-        else:
-            eligibility_results = tuple(
-                executor.map(
-                    _evaluate_image_eligibility,
-                    validation.images,
-                    repeat(config),
+            for index, image in enumerate(validation.images):
+                eligibility_by_index[index] = _evaluate_image_eligibility(image, config)
+                logger.info(
+                    "Measurements [%d/%d] Finished image %s", index + 1, total, image.image_id
                 )
-            )
+        else:
+            futures = {
+                executor.submit(_evaluate_image_eligibility, image, config): index
+                for index, image in enumerate(validation.images)
+            }
+            for completed, future in enumerate(as_completed(futures), 1):
+                index = futures[future]
+                eligibility_by_index[index] = future.result()
+                logger.info(
+                    "Measurements [%d/%d] Finished image %s",
+                    completed,
+                    total,
+                    validation.images[index].image_id,
+                )
 
-        for eligibility in eligibility_results:
+        for index in range(total):
+            eligibility = eligibility_by_index[index]
             eligible.update(eligibility.eligible)
             area_inputs.extend(eligibility.area_inputs)
             early_results.update((result.identity, result) for result in eligibility.early_results)
 
+        logger.info("Finalizing species measurements")
         group_metrics = finalize_species_bbox_metrics(area_inputs, config=config)
         output_tasks = []
         for image in validation.images:
@@ -1034,30 +1075,44 @@ def process_validated_batch(
             image_metrics = {identity: group_metrics[identity] for identity in image_eligible}
             output_tasks.append((image, image_eligible, image_early, image_metrics))
 
+        logger.info("Creating cutouts for %d images", total)
         if executor is not None:
-            result_groups = executor.map(
-                _process_image_outputs,
-                (task[0] for task in output_tasks),
-                (task[1] for task in output_tasks),
-                (task[2] for task in output_tasks),
-                (task[3] for task in output_tasks),
-                repeat(output_dir),
-                repeat(batch_id),
-                repeat(validation.catalog),
-                repeat(config),
-                repeat(False),
-                repeat(season),
-                repeat(bbot_version),
-                repeat(lens_model),
-            )
-            return tuple(result for group in result_groups for result in group)
+            futures = {
+                executor.submit(
+                    _process_image_outputs,
+                    *task,
+                    output_dir,
+                    batch_id,
+                    validation.catalog,
+                    config,
+                    False,
+                    season,
+                    bbot_version,
+                    lens_model,
+                ): index
+                for index, task in enumerate(output_tasks)
+            }
+            results_by_index: dict[int, tuple[CutoutProcessingResult, ...]] = {}
+            for completed, future in enumerate(as_completed(futures), 1):
+                index = futures[future]
+                image_results = future.result()
+                results_by_index[index] = image_results
+                _log_cutout_progress(
+                    completed, total, output_tasks[index][0].image_id, image_results
+                )
+            return tuple(result for index in range(total) for result in results_by_index[index])
 
         results: list[CutoutProcessingResult] = []
         halted = False
-        for image, image_eligible, image_early, image_metrics in output_tasks:
+        for completed, (image, image_eligible, image_early, image_metrics) in enumerate(
+            output_tasks, 1
+        ):
             if halted:
                 results.extend(
                     _skipped_result(detection, "FAIL_STOP") for detection in image.detections
+                )
+                logger.info(
+                    "Cutouts [%d/%d] Skipped image %s: FAIL_STOP", completed, total, image.image_id
                 )
                 continue
             image_results = _process_image_outputs(
@@ -1075,6 +1130,7 @@ def process_validated_batch(
                 lens_model,
             )
             results.extend(image_results)
+            _log_cutout_progress(completed, total, image.image_id, image_results)
             if fail_stop and any(result.status == ITEM_FAILED for result in image_results):
                 halted = True
         return tuple(results)
