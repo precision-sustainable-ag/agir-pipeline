@@ -108,39 +108,40 @@ For a normal single-class cutout, the only values should be `0` and the target c
 
 ### Intruder Removal
 
-The bounding-box crop can contain leaves or stems from neighboring plants. These unwanted plant regions are intruders. The cropout JPG should preserve them because it is the untouched source crop, but the cutout mask and masked cutout PNG should remove them.
+The crop can contain pieces of neighboring plants. The stage removes a plant
+component when it stays entirely inside the border band. A component that
+reaches the crop interior is kept. The original cropout JPG is unchanged.
 
-The stage should use a border sweep that removes free-floating components confined to a configurable band along the crop border while keeping components that extend into the crop interior. It should preserve the expected class value for retained target pixels, set removed pixels to `0`, record the numbers of removed and remaining components, and run before edge-cut analysis so border intruders do not create false edge flags.
+`border_band_fraction` controls the band size. The default is `0.10`, or 10%.
+
+- Increase it to make the band wider. More components may be removed as border intruders.
+- Decrease it to make the band narrower. Fewer components may be removed.
+- Top and bottom use a percentage of crop height.
+- Left and right use a percentage of crop width.
+- The band is always at least one pixel wide.
 
 ### Edge Truncation Flag
 
-A detection box can cut off part of the target plant. These cutouts cannot be placed freely in a synthetic recreation because the missing part of the plant would be visible. They may still be useful when placed against the matching edge or corner of the synthetic image.
+After cleanup, the stage measures the percentage of each border band covered by
+the target plant. A side is flagged when its plant coverage is greater than
+`edge_threshold`. The default threshold is `0.05`, or 5%.
 
-The stage should measure how much of each cutout edge is occupied by the target plant. This measurement must use the cleaned target mask after intruder removal so that neighboring plants do not create false edge flags.
+- Increase the threshold to require more plant coverage. Fewer sides are flagged.
+- Decrease the threshold to require less plant coverage. More sides are flagged.
+- Increase `border_band_fraction` to measure a wider area along each side.
+- Decrease `border_band_fraction` to measure a narrower area.
 
-For each side, calculate the fraction of edge pixels occupied by the target:
-
-```text
-top_fraction    = target pixels on top edge / cutout width
-bottom_fraction = target pixels on bottom edge / cutout width
-left_fraction   = target pixels on left edge / cutout height
-right_fraction  = target pixels on right edge / cutout height
-```
-
-The implementation uses the same `border_band_fraction` setting for cleanup and edge measurement, defaulting to `0.10`. Top and bottom use that fraction of crop height; left and right use that fraction of crop width. Pixel widths are rounded up with a minimum of one pixel. Each plant fraction is the number of target pixels in that band divided by the actual number of pixels in the band. Bands may overlap and are measured independently. Record both the configured fraction, resolved pixel widths, and threshold (default `0.05`) in metadata.
-
-`extends_border` separately records any foreground contact with the outermost pixel row or column, regardless of the threshold. A band may be flagged without outermost-pixel contact, and sparse contact may fall below the flagging threshold.
-
-Placement strings are `unrestricted`, `<side>_edge_only`, `<vertical>_<horizontal>_corner_only`, or `unsuitable`. Side lists always use top, bottom, left, right order.
-
-A side is flagged when its plant fraction is greater than the configured threshold. The resulting placement guidance is:
+Placement is based on the flagged sides:
 
 - no flagged sides: the plant can be placed anywhere;
-- one flagged side: the plant should be placed against that image edge;
-- two adjacent flagged sides: the plant should be placed in the matching corner;
-- opposing sides or three or more flagged sides: the cutout is likely unsuitable for synthetic recreation.
+- one flagged side: place the plant against that edge;
+- two adjacent flagged sides: place the plant in that corner;
+- opposing sides or three or more flagged sides: the cutout is unsuitable.
 
-The stage should also compare the detection box with the full-sized image boundary. A flagged side that also touches the original image boundary is a source-image edge. A flagged side inside the full image suggests that the detection box was too small and truncated an otherwise visible plant. The latter should be clearly labeled so a downstream pipeline can reject it.
+`extends_border` is true when the plant touches the outermost pixel of the crop.
+A flagged side touching the full image boundary is listed under
+`source_image_sides`. Other flagged sides are listed under
+`detection_box_truncation_sides`.
 
 ### JSON Metadata
 
@@ -169,7 +170,8 @@ A practical first schema is:
       "border_band_fraction": 0.10,
       "border_width_px": {"top_bottom": 406, "left_right": 674},
       "removed_components": 2,
-      "remaining_components": 46
+      "remaining_components": 46,
+      "removed_pixels": 231
     },
     "extends_border": true,
     "edge_cut": {
@@ -206,13 +208,13 @@ A practical first schema is:
     "class_id": 42,
     "USDA_symbol": "URRE2",
     "EPPO": "PANRP",
-    "group": "monocot",
-    "class": "Liliopsida",
+    "species_group": "monocot",
+    "taxon_class": "Liliopsida",
     "subclass": "Commelinidae",
-    "order": "Cyperales",
+    "taxon_order": "Cyperales",
     "family": "Poaceae",
     "genus": "Urochloa",
-    "species": "Reptans",
+    "species_epithet": "Reptans",
     "common_name": "Sprawling Signalgrass",
     "authority": "(Linnaeus) Stapf",
     "growth_habit": "graminoid",
