@@ -141,6 +141,13 @@ class GridCache:
         self._cache[image_id] = grid
         return grid
 
+    def path_for(self, image_id: str) -> Path:
+        """Return the same indexed grid path used by get(), for reference matching."""
+        path = self._index().get(image_id)
+        if path is None:
+            raise FileNotFoundError(f"Grid file not found for image_id={image_id}")
+        return path
+
     # load npz data as a grid object
     def _load_grid(self, image_id: str, data: Any) -> GridData:
         required_keys = [
@@ -338,11 +345,13 @@ def write_georeferenced_csv(
 def remap_rows(
     rows: list[dict[str, str]],
     grid_dir: Path,
+    *,
+    cache: GridCache | None = None,
 ) -> tuple[list[dict[str, Any]], list[ImageRemapResult]]:
     """Remap detection rows to world coordinates, returning mapped rows and per-image results."""
 
     # cache image results to avoid redundant grid loads
-    cache = GridCache(grid_dir)
+    cache = cache if cache is not None else GridCache(grid_dir)
 
     output_rows: list[dict[str, Any]] = []
     results: list[ImageRemapResult] = []

@@ -197,6 +197,7 @@ def _render_slurm_script(
     bbot_version: str = "",
     shapefile_path: str = "",
     species_catalog_path: str = "",
+    grid_root: str = "",
     publication_mode: str = "standard",
     publication_args: str = "",
     template_name: str = DEFAULT_JOB_TEMPLATE,
@@ -235,6 +236,7 @@ def _render_slurm_script(
         "bbot_version": bbot_version,
         "shapefile_path": shapefile_path,
         "species_catalog_path": species_catalog_path,
+        "grid_root": grid_root,
         "publication_mode": publication_mode,
         "publication_args": publication_args,
     }
@@ -515,6 +517,7 @@ def submit_jobs(
                 bbot_version=bbot_version,
                 shapefile_path=shapefile_path,
                 species_catalog_path=species_catalog_path,
+                grid_root=str(paths.get("grid_root", "")),
                 publication_mode=publication_mode,
                 publication_args=publication_args,
                 template_name=template_name,

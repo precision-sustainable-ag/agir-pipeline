@@ -136,6 +136,78 @@ def _join_posix(*parts: str) -> str:
     return prefix + str(PurePosixPath(*cleaned))
 
 
+def _plan_primary_reference_request(
+    conn: sqlite3.Connection, cfg: Dict, *, batch_id: str, priority: int
+) -> StagingRequest:
+    """Stage paired camera/FOV CSVs, preserving their batch-relative layout.
+
+    Roots and site priority are deployment settings. Indexed full paths are
+    Globus paths, never local mount paths. Only the two reference CSV names
+    are transferred; reconstruction directories are retained for grid matching.
+    """
+    route = cfg["transfer"]["routes"]["det_to_world"]
+    transfer = cfg["transfer"]
+    dst_site = route.get("destination_site", "ATLAS")
+    dst_endpoint = _endpoint_for_site(transfer, dst_site)
+    dst_root = route.get("destination_root") or cfg["paths"]["input_staging_root"]
+    dst_path = _join_posix(dst_root, batch_id, "primary_references")
+    sites = route.get("reference_source_sites", [dst_site, "ATLAS", "CERES", "JUNO"])
+    for site in dict.fromkeys(sites):
+        indexed = conn.execute(
+            """SELECT full_path FROM globus_file_index
+               WHERE site = ? AND batch_id = ? AND is_current = 1
+                 AND entry_type = 'file'
+                 AND file_name IN ('camera_reference.csv', 'fov.csv')
+               ORDER BY full_path""",
+            (site, batch_id),
+        ).fetchall()
+        roots = [
+            route.get(f"source_root_references_{site.lower()}"),
+            route.get(f"source_root_grids_{site.lower()}"),
+            route.get(f"source_root_{site.lower()}"),
+        ]
+        # A prior transfer may have been indexed at the destination.
+        source_paths = ([dst_path] if site == dst_site else []) + [
+            _join_posix(root, batch_id) for root in roots if root
+        ]
+        for src_path in dict.fromkeys(source_paths):
+            names = set()
+            for record in indexed:
+                try:
+                    relative = PurePosixPath(record[0]).relative_to(src_path)
+                except ValueError:
+                    continue
+                if ".." not in relative.parts:
+                    names.add(str(relative))
+            if not names:
+                continue
+            parents = {str(PurePosixPath(name).parent) for name in names}
+            if any(
+                not all(
+                    str(PurePosixPath(parent) / filename) in names
+                    for filename in ("camera_reference.csv", "fov.csv")
+                )
+                for parent in parents
+            ):
+                continue
+            src_endpoint = _endpoint_for_site(transfer, site)
+            return StagingRequest(
+                batch_id=batch_id,
+                stage="det_to_world",
+                src_endpoint=src_endpoint,
+                dst_endpoint=dst_endpoint,
+                src_path=src_path,
+                dst_path=dst_path,
+                priority=priority,
+                file_names=tuple(sorted(names)),
+                already_satisfied=src_endpoint == dst_endpoint and src_path == dst_path,
+            )
+    raise ValueError(
+        f"No indexed paired primary-selection references for {batch_id}; "
+        "configure reference_source_sites/source_root_references_<site> and index the CSVs"
+    )
+
+
 def _rows_for_stage(
     conn: sqlite3.Connection,
     stage: str,
@@ -525,6 +597,11 @@ def plan_input_staging(
                 requests.append(
                     _plan_grid_request(conn, cfg, batch_id=batch_id, priority=spec.default_priority)
                 )
+                requests.append(
+                    _plan_primary_reference_request(
+                        conn, cfg, batch_id=batch_id, priority=spec.default_priority
+                    )
+                )
         return requests
 
     paths = cfg["paths"]
@@ -609,6 +686,7 @@ def expected_staged_input_dst_paths(cfg: Dict, stage: str, batch_id: str) -> Lis
         if not grid_root:
             raise ValueError("Config paths block must define grid_root for det_to_world")
         expected.append(_join_posix(grid_root, batch_id))
+        expected.append(_join_posix(input_root, batch_id, "primary_references"))
 
     return expected
 
