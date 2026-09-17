@@ -67,6 +67,7 @@ REQUIRED_CSV_COLUMNS = (
     "xmax",
     "ymax",
     "species_id",
+    "is_primary",
     "world_tl_x",
     "world_tl_y",
     "world_tr_x",
@@ -97,6 +98,7 @@ class _DetectionRow:
     bounding_box_id: int
     normalized_bbox: tuple[float, float, float, float]
     species_id: str
+    is_primary: bool
     cultivar_id: str | None
     world_bbox: WorldBoundingBox | None
 
@@ -198,6 +200,20 @@ def _parse_optional_world_bbox(row: Mapping[str, Any]) -> WorldBoundingBox | Non
     )
 
 
+def _parse_is_primary(value: Any, *, context: str) -> bool:
+    """Read CSV booleans explicitly so the string 'False' stays false."""
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1"}:
+        return True
+    if normalized in {"false", "0"}:
+        return False
+    raise _input_error(
+        ERROR_CSV_INVALID,
+        f"{context}: is_primary must be True/False or 1/0, got {value!r}",
+        field="is_primary",
+    )
+
+
 def load_detection_rows(path: str | Path) -> tuple[_DetectionRow, ...]:
     """Parse and stably sort georeferenced detections, rejecting duplicate identities."""
 
@@ -279,6 +295,7 @@ def load_detection_rows(path: str | Path) -> tuple[_DetectionRow, ...]:
                     bounding_box_id=bounding_box_id,
                     normalized_bbox=normalized_bbox,
                     species_id=species_id,
+                    is_primary=_parse_is_primary(row.get("is_primary"), context=context),
                     cultivar_id=cultivar_id,
                     world_bbox=_parse_optional_world_bbox(row),
                 )
@@ -539,6 +556,7 @@ def _validate_discovered_image(
                 ),
                 class_id=class_id,
                 species_id=row.species_id,
+                is_primary=row.is_primary,
                 cultivar_id=row.cultivar_id,
                 world_bbox=row.world_bbox,
             )
@@ -727,7 +745,7 @@ def _cutout_metadata(
         rgb_crop.shape[:2], config.border_band_fraction
     )
     cutout_properties = {
-        "is_primary": True,
+        "is_primary": detection.is_primary,
         "intruder_cleanup": {
             "method": "border_sweep",
             "border_band_fraction": config.border_band_fraction,
