@@ -11,6 +11,7 @@ from typing import Any, Iterable, Mapping
 
 FALLBACK_CLASS_ID = 27
 UINT8_MAX = 255
+NO_DETECTIONS_ASSIGNMENT_METHOD = "no_detections"
 
 
 class ClassIdResolutionError(ValueError):
@@ -171,6 +172,10 @@ def build_class_id_index(
         next_ids: dict[str, int] = {}
         for row_number, row in enumerate(reader, start=2):
             context = f"{csv_path.name} row {row_number}"
+            if (row.get("assignment_method") or "").strip() == NO_DETECTIONS_ASSIGNMENT_METHOD:
+                # det_to_world emits one all-blank placeholder row per image with
+                # zero detections; it carries no detection to index.
+                continue
             image_id = _normalize_image_id(row.get("image_id"))
             if "bounding_box_id" not in fieldnames:
                 bounding_box_id = next_ids.get(image_id, 0)

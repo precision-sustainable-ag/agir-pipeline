@@ -78,6 +78,8 @@ REQUIRED_CSV_COLUMNS = (
     "crs",
 )
 
+NO_DETECTIONS_ASSIGNMENT_METHOD = "no_detections"
+
 WORLD_COORDINATE_COLUMNS = (
     "world_tl_x",
     "world_tl_y",
@@ -235,6 +237,10 @@ def load_detection_rows(path: str | Path) -> tuple[_DetectionRow, ...]:
         next_ids: dict[str, int] = {}
         for row_number, row in enumerate(reader, start=2):
             context = f"{csv_path.name} row {row_number}"
+            if (row.get("assignment_method") or "").strip() == NO_DETECTIONS_ASSIGNMENT_METHOD:
+                # det_to_world emits one all-blank placeholder row per image with
+                # zero detections; it carries no detection to process.
+                continue
             image_id, normalized_image_id = _normalize_image_id(
                 row.get("image_id"), context=context
             )
