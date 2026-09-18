@@ -1,185 +1,131 @@
-# Segmentation to Cutouts Design (`seg_to_cut`)
+# Segmentation to Cutouts (`seg_to_cut`)
 
-## Purpose
+`seg_to_cut` turns each detected plant into a small image crop, a transparent plant cutout, a mask, and a JSON file describing it. The stage is implemented and runs on CPUs, normally on Ceres.
 
-`seg_to_cut` turns full-sized images and their segmentation masks into small, self-contained records for individual plants. Each record is a set of four files: the original image crop, the masked cutout, the cutout mask, and JSON metadata.
+## What it needs
 
-The stage should preserve the cutout format already used by the SemiField dataset while using the new AgIR pipeline for species and cultivar identity, job tracking, storage discovery, and output publication.
+| Input | What it provides |
+|---|---|
+| Original JPG images | The plant's image pixels. |
+| Segmentation PNG masks | Which pixels belong to each species or cultivar. |
+| Georeferenced CSV | Detection boxes, detection IDs, species/cultivar assignments, and world coordinates when available. |
+| Generated species catalog | Numeric class IDs, plant names, and other category information. |
 
-## Inputs
-
-The batch data lives below:
+The usual batch layout is:
 
 ```text
 semifield-developed-images/<batch_id>/
+  images/<image_id>.jpg
+  segmentations/<image_id>.png
+  georeferenced/<batch_id>_georeferenced.csv
 ```
 
-The stage needs:
+Images and masks are matched by filename without the extension. Each image with detections needs a matching mask with the same width and height. Masks must be 8-bit grayscale.
 
-| Input | Why it is needed |
+## How the stage works
+
+1. Read the detections and look up each plant's species or cultivar class.
+2. Crop each detection box, keeping the crop within the image boundaries.
+3. Keep mask pixels for the target class and remove small regions confined to the crop's border band.
+4. Skip detections that have no target pixels left.
+5. Calculate plant properties, edge flags, and size comparisons within the batch.
+6. Write the four output files and record successes, skips, and errors.
+
+Processing happens in two passes: first, check which detections survive cleanup and calculate batch size averages; then, create their files. Images can be processed in parallel.
+
+When a cultivar is assigned, its numeric ID is the mask value. Otherwise, the species catalog's `class_id` is used. `0` is background; plant values are between `1` and `255`. Pixels with any other class value are ignored for that cutout.
+
+### Cleaning the border
+
+The stage removes separate target-class regions that lie entirely within a band around the crop's edges. A region reaching the crop's interior is kept. The default band covers 10% of the height at the top/bottom and 10% of the width at the left/right, rounded up to at least one pixel.
+
+This helps remove pieces of neighboring plants. It cannot separate plants that touch each other or remove neighboring regions that reach the interior. Very small crops with no interior left after applying the band are skipped. The original JPG crop is unchanged.
+
+### Checking whether the plant is cut off
+
+After cleanup, the stage checks the outermost row or column on each side. A side is flagged when more than 5% of those pixels belong to the plant, using the default threshold.
+
+| Flagged sides | Placement guidance |
 |---|---|
-| `images/<image_id>.jpg` | Supplies the original RGB pixels. |
-| `segmentations/<image_id>.png` | Supplies the full-sized class mask. |
-| `georeferenced/<batch_id>_georeferenced.csv` | Supplies detection boxes, detection IDs, and species/cultivar assignments. |
-| Generated species catalog | Resolves IDs into names and other category metadata. |
+| None | Can be placed anywhere. |
+| One | Place against that edge. |
+| Two adjacent | Place in that corner. |
+| Two opposite, or three/four | Unsuitable for synthetic placement. |
 
-The image and segmentation must have the same width and height. Files are matched by `image_id`, not by directory order.
+This guidance is saved in `edge_cut.synthetic_placement`; unsuitable cutouts are still written. The metadata also distinguishes an edge at the full image boundary from an edge created by the detection box.
 
-The georeferenced CSV is included because images and masks alone do not retain reliable instance boundaries or stable detection IDs. It is already an input to `det_to_seg`, so `seg_to_cut` can reuse the same published batch artifact.
+`extends_border` simply means at least one plant pixel touches the crop edge, even if there are too few pixels to flag that side.
 
-## Species and Cultivar Values
+## Output files
 
-The new pipeline is the source of truth for class identity.
+Each cutout is named `<image_id>_<bounding_box_id>`. For example, detection 0 in image `MD_1784297213` becomes `MD_1784297213_0`.
 
-`det_to_seg` already applies this rule when writing the full-sized mask:
+| File | Contents |
+|---|---|
+| `<cutout_id>.jpg` | Original rectangular RGB crop, saved at JPEG quality 100. |
+| `<cutout_id>.png` | Plant cutout with a transparent background. Background RGB pixels are black. |
+| `<cutout_id>_mask.png` | Grayscale mask: zero for background and the target class ID for plant pixels. |
+| `<cutout_id>.json` | Identity, dimensions, plant category, and calculated properties. |
 
-1. Use `cultivar_id` as the mask value when a cultivar is present.
-2. Otherwise, resolve `species_id` through the species catalog and use its
-   numeric `class_id`.
-3. Reserve `0` for background.
-4. Keep foreground values in the 8-bit range `1` through `255`.
+All three image files have the same dimensions. `cutout_num` is the detection's bounding-box ID, so skipped detections can leave gaps in numbering.
 
-`seg_to_cut` should preserve that nonzero value in the local cutout mask. It must not translate values through the legacy database.
-
-Metadata should retain both kinds of identity where available:
-
-- the human-facing `species_id`, such as a USDA symbol;
-- the numeric species `class_id` used in masks;
-- the `cultivar_id` / `cultivar_class_id` used in cultivar batches;
-- catalog names and taxonomy useful to downstream tasks.
-
-## Outputs
-
-Published cutouts use this layout:
+The stage writes into a run directory:
 
 ```text
-semifield-cutouts/<batch_id>/
-  <cutout_id>.jpg
-  <cutout_id>.png
-  <cutout_id>_mask.png
-  <cutout_id>.json
+<output>/seg_to_cut/<run_id>/
+  artifacts/cutouts/<cutout files>
+  logs/
+  manifest.json
+  run_report.json
 ```
 
-For example:
+The manifest lists each cutout's result and output files. The run report summarizes counts and errors. Files are checked before final names are created, and handled write errors trigger cleanup. Existing cutout files are never overwritten.
 
-```text
-semifield-cutouts/MD_2024-05-06/
-  MD_1715022013_0.jpg
-  MD_1715022013_0.png
-  MD_1715022013_0_mask.png
-  MD_1715022013_0.json
-```
+## JSON structure
 
-All four files form one unit. The stage should publish either the complete set or none of it. A failed write must not leave an apparently valid partial cutout.
-
-### Cropout JPG
-
-`<cutout_id>.jpg` is the rectangular crop from the original image using the detection bounding box.
-
-- RGB image
-- same width and height as the bounding box
-- JPEG quality 100
-- no masking or background replacement
-
-### Cutout PNG
-
-`<cutout_id>.png` contains the same RGB crop with pixels outside the target mask set to black.
-
-The cutout PNG should use:
-
-- 8-bit RGBA PNG;
-- black RGB values outside the target;
-- alpha `255` for target-plant pixels;
-- alpha `0` for non-plant pixels.
-
-This intentionally departs from the historical format, which used alpha `255` for every pixel. Encoding the binary plant mask in the alpha channel makes the background transparent and allows future consumers to recover the plant silhouette directly from the cutout PNG. The separate mask PNG remains the source of the numeric species or cultivar class value.
-
-### Mask PNG
-
-`<cutout_id>_mask.png` is the segmentation mask cropped to the same bounding
-box.
-
-- 8-bit, single-channel grayscale PNG
-- `0` for background
-- the resolved species `class_id` or cultivar class ID for target pixels
-- exactly the same width and height as the JPG and cutout PNG
-
-For a normal single-class cutout, the only values should be `0` and the target class value.
-
-### Intruder Removal
-
-The crop can contain pieces of neighboring plants. The stage removes a plant
-component when it stays entirely inside the border band. A component that
-reaches the crop interior is kept. The original cropout JPG is unchanged.
-
-`border_band_fraction` controls the band size. The default is `0.10`, or 10%.
-
-- Increase it to make the band wider. More components may be removed as border intruders.
-- Decrease it to make the band narrower. Fewer components may be removed.
-- Top and bottom use a percentage of crop height.
-- Left and right use a percentage of crop width.
-- The band is always at least one pixel wide.
-
-### Edge Truncation Flag
-
-After cleanup, the stage measures the percentage of the outermost row or column
-covered by the target plant. This edge band is fixed at one pixel and cannot be
-configured. It is independent of the intruder-removal band. A side is flagged
-when its plant coverage is greater than
-`edge_threshold`. The default threshold is `0.05`, or 5%.
-
-- Increase the threshold to require more plant coverage. Fewer sides are flagged.
-- Decrease the threshold to require less plant coverage. More sides are flagged.
-
-Placement is based on the flagged sides:
-
-- no flagged sides: the plant can be placed anywhere;
-- one flagged side: place the plant against that edge;
-- two adjacent flagged sides: place the plant in that corner;
-- opposing sides or three or more flagged sides: the cutout is unsuitable.
-
-`extends_border` is true when the plant touches the outermost pixel of the crop.
-A flagged side touching the full image boundary is listed under
-`source_image_sides`. Other flagged sides are listed under
-`detection_box_truncation_sides`.
-
-### JSON Metadata
-
-`<cutout_id>.json` describes the output and records enough identity and provenance to understand it without opening the database.
-
-A practical first schema is:
+This example shows the current output fields. Values are illustrative. `category` may include more names, taxonomy, colors, links, or cultivar details from the catalog.
 
 ```json
 {
-  "season": "cool_season_covers_2023_2024_MD_pos_2",
-  "datetime": "2024:05:06 15:00:13",
-  "bbot_version": "v2.0",
-  "batch_id": "MD_2024-05-06",
-  "image_id": "MD_1715022013",
-  "cutout_id": "MD_1715022013_0",
+  "season": "summer_weeds_2026",
+  "datetime": "2026:07:17 15:00:13",
+  "bbot_version": "3.1",
+  "batch_id": "MD_2026-07-17",
+  "image_id": "MD_1784297213",
+  "cutout_id": "MD_1784297213_0",
   "cutout_num": 0,
-  "cutout_height": 4059,
-  "cutout_width": 6740,
-  "lens_model": "FE 55mm F1.8 ZA",
+  "cutout_height": 400,
+  "cutout_width": 600,
+  "lens_model": "Linos Inspect XL",
   "validated": false,
-  "cutout_version": "<configured schema version>",
+  "cutout_version": "2.0",
   "cutout_props": {
     "is_primary": true,
     "intruder_cleanup": {
       "method": "border_sweep",
-      "border_band_fraction": 0.10,
-      "border_width_px": {"top_bottom": 406, "left_right": 674},
+      "border_band_fraction": 0.1,
+      "border_width_px": {
+        "top_bottom": 40,
+        "left_right": 60
+      },
       "removed_components": 2,
-      "remaining_components": 46,
+      "remaining_components": 1,
       "removed_pixels": 231
     },
     "extends_border": true,
     "edge_cut": {
       "flagged": true,
       "threshold": 0.05,
-      "band_width_px": {"top_bottom": 1, "left_right": 1},
-      "flagged_sides": ["right"],
-      "source_image_sides": ["right"],
+      "band_width_px": {
+        "top_bottom": 1,
+        "left_right": 1
+      },
+      "flagged_sides": [
+        "right"
+      ],
+      "source_image_sides": [
+        "right"
+      ],
       "detection_box_truncation_sides": [],
       "synthetic_placement": "right_edge_only",
       "plant_fraction": {
@@ -189,16 +135,24 @@ A practical first schema is:
         "right": 0.34
       }
     },
-    "bbox_area_cm2": 2750.47,
-    "species_mean_bbox_area_cm2": 2401.05,
-    "species_bbox_sample_size": 128,
-    "species_bbox_area_ratio": 1.125,
+    "bbox_area_cm2": 120.0,
+    "species_mean_bbox_area_cm2": 100.0,
+    "species_bbox_sample_size": 10,
+    "species_bbox_area_ratio": 1.2,
     "abnormal_bbox_size": false,
     "solidity": 0.73,
     "blur_effect": 0.404,
-    "num_components": 46,
-    "cropout_rgb_mean": [0.366, 0.339, 0.283],
-    "cropout_rgb_std": [0.148, 0.130, 0.095],
+    "num_components": 1,
+    "cropout_rgb_mean": [
+      0.366,
+      0.339,
+      0.283
+    ],
+    "cropout_rgb_std": [
+      0.148,
+      0.13,
+      0.095
+    ],
     "non_target_weed": null,
     "non_target_weed_pred_conf": null
   },
@@ -206,24 +160,9 @@ A practical first schema is:
     "species_id": "URRE2",
     "class_id": 42,
     "USDA_symbol": "URRE2",
-    "EPPO": "PANRP",
-    "species_group": "monocot",
-    "taxon_class": "Liliopsida",
-    "subclass": "Commelinidae",
-    "taxon_order": "Cyperales",
+    "common_name": "Sprawling Signalgrass",
     "family": "Poaceae",
     "genus": "Urochloa",
-    "species_epithet": "Reptans",
-    "common_name": "Sprawling Signalgrass",
-    "authority": "(Linnaeus) Stapf",
-    "growth_habit": "graminoid",
-    "duration": "annual perennial",
-    "category": "summer weed",
-    "multi_species_USDA_symbol": null,
-    "link": "https://plants.usda.gov/home/plantProfile?symbol=URRE2",
-    "note": null,
-    "hex": "#aa952b",
-    "rgb": [170, 149, 43],
     "cultivar_id": null,
     "cultivar_class_id": null,
     "cultivar_name": null
@@ -231,171 +170,86 @@ A practical first schema is:
 }
 ```
 
-The catalog may add taxonomy, display color, aliases, and links below `category`. Those values should be copied from the current catalog rather than reconstructed from the legacy database.
+### What the fields mean
 
-New outputs start with `validated: false`. Validation is a separate action and must not be implied simply because the stage completed successfully.
-
-Values that cannot be supported by a current input should be written as `null`, not guessed. The field names should remain stable so readers can handle old and new cutouts consistently.
-
-## Properties Calculated by the Stage
-
-The stage can calculate the following directly:
-
-| Property | Practical calculation |
+| Field or group | Meaning |
 |---|---|
-| `cutout_height`, `cutout_width` | Dimensions of the bounding-box crop. |
-| `extends_border` | True when target pixels touch an edge of the local mask. |
-| `edge_cut` | Per-side plant fractions, flagged sides, source-image edge information, and synthetic-placement guidance. |
-| `blur_effect` | Historical calculation: `skimage.measure.blur_effect` over the whole black-masked cutout, with non-target pixels set to black, default `h_size=11`, `channel_axis=2`, and maximum across axes. Higher means blurrier. Undefined/non-finite results are `null`. |
-| `num_components` | Number of connected foreground regions in the local target mask. |
-| `cropout_rgb_mean` | Per-channel mean over every pixel of the original unmasked RGB crop, normalized by dividing by 255. |
-| `cropout_rgb_std` | Per-channel population standard deviation (`ddof=0`) over those same normalized RGB pixels. |
-| `bbox_area_cm2` | Physical bounding-box area from the configured source. The current `georeferenced_csv` source uses projected world corners; the future `camera` source will use authoritative XYZ camera-location data. Otherwise `null`. |
-| `species_mean_bbox_area_cm2` | Mean `bbox_area_cm2` for valid detections in the same batch, grouped by cultivar when present and otherwise by species. |
-| `species_bbox_sample_size` | Number of valid detections used to calculate `species_mean_bbox_area_cm2`. |
-| `species_bbox_area_ratio` | Current `bbox_area_cm2` divided by `species_mean_bbox_area_cm2`. Otherwise `null` when the mean is unavailable or zero. |
-| `abnormal_bbox_size` | True when `species_bbox_area_ratio` differs from `1.0` by more than the configured percentage threshold. |
-| `solidity` | Foreground pixel count divided by the pixel count of `skimage.morphology.convex_hull_image` over all cleaned foreground components, with `offset_coordinates=True` and `include_borders=True`. |
+| `batch_id`, `image_id`, `cutout_id`, `cutout_num` | Identify the batch, source image, and detection. |
+| `cutout_height`, `cutout_width` | Crop dimensions in pixels. |
+| `season`, `bbot_version` | Values supplied when running the stage. |
+| `datetime`, `lens_model` | Capture time and lens from the original image's EXIF metadata. `--lens-model` supplies a fallback lens. |
+| `validated` | Starts as false; stage completion does not mean the cutout has been reviewed. |
+| `cutout_version` | Metadata version from the config, currently `"2.0"` by default. |
+| `is_primary` | Primary-detection flag copied from the CSV; both primary and non-primary detections are processed. |
+| `intruder_cleanup` | Border-band settings and counts of removed/remaining regions and removed pixels. |
+| `extends_border`, `edge_cut` | Whether the plant touches the crop edges and where it can be placed. |
+| `bbox_area_cm2` | Physical area of the detection box, calculated from valid projected world coordinates. This measures the box, not the plant silhouette. |
+| `species_mean_bbox_area_cm2`, `species_bbox_sample_size` | Average box area and number of valid area samples in the same batch/category. Groups use cultivar when present, otherwise species. |
+| `species_bbox_area_ratio`, `abnormal_bbox_size` | Current area divided by the group average, and whether the difference exceeds the configured limit. |
+| `solidity` | How much of the plant's enclosing convex shape is filled by plant pixels. |
+| `blur_effect` | Blur score measured on the cutout with a black background. Higher means blurrier. |
+| `num_components` | Number of separate plant regions remaining after cleanup. |
+| `cropout_rgb_mean`, `cropout_rgb_std` | Average color and color variation across the original unmasked crop, in RGB order on a 0–1 scale. |
+| `non_target_weed`, `non_target_weed_pred_conf` | Currently null; the stage does not run a weed classifier. |
+| `category` | Species identity and catalog information. Cultivar fields are null for species-only cutouts. |
 
-Identity, season, camera, and classifier fields come from upstream data or the current catalog. They should not be inferred from image appearance.
+Unavailable values are written as `null`. This includes missing capture metadata and physical-area measurements that cannot be calculated. Missing optional catalog fields are omitted.
 
-The species-level area metrics require a batch aggregation step. The stage should first calculate valid per-cutout areas, group them by `cultivar_id` when present and otherwise by `species_id`, and then finalize each cutout's mean, sample size, ratio, and abnormal-size flag. The area source and abnormal-size percentage threshold must be configurable, and the fixed grouping rule must be recorded in the metadata or run report.
+For cultivar cutouts, use `category.cultivar_class_id` as the mask value. For species-only cutouts, use `category.class_id`.
 
-The `bbox_area.source` configuration selects `georeferenced_csv` or `camera`. The CSV source calculates `bbox_area_cm2` from a complete valid world-coordinate box in a supported projected CRS. Camera mode returns `null` until the future authoritative XYZ camera-location input and area model are defined; consequently, its batch sample size is `0` and the mean, ratio, and abnormal-size flag are `null`.
+## Configuration
 
-## Processing Flow
+Stage settings live in [`stages/seg_to_cut/configs/default.yaml`](../stages/seg_to_cut/configs/default.yaml). Pass another settings file with `--config` to override them.
 
-For each image, the stage should:
+| Setting | Default | What changing it does |
+|---|---|---|
+| `image_extensions` | `[.jpg, .jpeg]` | Chooses which input image files are found. |
+| `mask_extension` | `.png` | Chooses which input mask files are found. |
+| `border_band_fraction` | `0.10` | Larger values widen the cleanup band and can remove more border regions. Must be greater than 0 and less than 0.5. |
+| `edge_threshold` | `0.05` | Larger values require more plant coverage before an edge is flagged. Allowed range: 0–1. |
+| `cutout_version` | `"2.0"` | Sets the version label in the JSON. |
+| `bbox_area.source` | `georeferenced_csv` | Uses world coordinates from the CSV to calculate physical area. |
+| `species_bbox_min_sample_size` | `5` | Requires this many valid areas before calculating a group average. Must be a positive integer. |
+| `abnormal_bbox_size_threshold` | `0.50` | Flags an area more than 50% above or below its group average. Must be nonnegative. |
 
-1. Load the JPG and matching grayscale segmentation mask.
-2. Validate dimensions, mask type, and mask values.
-3. Read that image's detections in stable `bounding_box_id` order.
-4. Resolve the expected species or cultivar class for each detection.
-5. Clip its bounding box to the image boundary.
-6. Crop the image and select pixels matching the expected class value.
-7. Remove intruders from the local mask using the connected-component cleanup.
-8. Skip the detection with a recorded reason if no target pixels remain.
-9. Measure plant coverage on each edge and assign edge-placement flags.
-10. Calculate the remaining cutout properties.
-11. Write the four outputs to temporary names and move them into place only
-   after all four writes succeed.
-12. Record success or failure in the manifest and run report.
+For example, if the group average is 100 cm², the default size threshold flags areas below 50 cm² or above 150 cm². If the group has fewer than five valid areas, its average, area ratio, and abnormal-size flag are null; the sample count is still recorded.
 
-The stage should process one image at a time so memory use depends on image size rather than batch size. This is expected to be a CPU stage; it does not run a segmentation model.
+`bbox_area.source: camera` is accepted but currently produces null areas. The YAML's camera specifications are descriptive; they do not yet calculate area or supply the metadata's lens model.
 
-## Execution Site
+The separate [`Ceres job configuration`](../configs/config.seg_to_cut.ceres.example.yaml) controls input staging, CPU/memory allocation, paths, and publication. Its example uses 8 CPUs, 64 GB of memory, and four hours. `publication_mode: cutout_batch` publishes complete batches, while `result_sync.enabled: false` keeps this stage's outputs on Ceres.
 
-`seg_to_cut` should run on Ceres by default.
+## Running it
 
-The work is mostly reading images and masks, cropping arrays, calculating simple image properties, and writing many files. It does not need a GPU, so it is a better fit for the CPU-oriented Ceres workflow than the GPU-oriented Atlas workflow.
+Replace these example paths with the actual batch and catalog locations:
 
-The expected sequence is:
-
-1. `det_to_seg` runs on Atlas because it needs a GPU.
-2. Its run bundle and segmentation masks are synchronized and promoted on
-   Ceres through the existing result-sync process.
-3. The Ceres inventory sees the promoted masks and marks the batch ready for
-   `seg_to_cut`.
-4. `seg_to_cut` reads the Ceres copies of the images, masks, and
-   georeferenced CSV, then publishes `semifield-cutouts` on Ceres.
-
-This avoids using an Atlas GPU allocation for CPU work and avoids sending a large directory of four-file cutout sets from Atlas back to Ceres. If an input is not already present on Ceres, the normal staging planner can fetch that input before submission.
-
-## Stage and Run Structure
-
-The code should follow the existing stage pattern:
-
-```text
-stages/seg_to_cut/
-  __init__.py
-  cli.py
-  processor.py
-  metadata.py
-  writers.py
-  configs/default.yaml
-  tests/
+```bash
+python -m stages.seg_to_cut.cli \
+  --images /data/batch/images \
+  --segmentations /data/batch/segmentations \
+  --georeferenced-csv /data/batch/MD_2026-07-17_georeferenced.csv \
+  --species-catalog /data/reference/species_catalog.generated.json \
+  --config stages/seg_to_cut/configs/default.yaml \
+  --batch-id MD_2026-07-17 \
+  --season summer_weeds_2026 \
+  --bbot-version 3.1 \
+  --output /data/stage_runs \
+  --t 8
 ```
 
-Responsibilities should stay simple:
+`--t` sets the number of parallel image workers; the default is 8. Use 0 or 1 to process sequentially. Add `--fail-stop` with sequential processing to stop creating outputs after a failure.
 
-- `cli.py` validates arguments, builds the run directory, and writes the run
-  report and manifest.
-- `processor.py` matches inputs and creates cutouts image by image.
-- `metadata.py` resolves catalog records and calculates properties.
-- `writers.py` owns the exact JPG, PNG, mask, and JSON formats.
+Omit `--output` for a quick input check. This checks file presence, image headers, detection boxes, and class assignments; it does not decode masks or create cutouts.
 
-A run should use the standard pipeline bundle:
+Exit codes are `0` for no failures, `1` for partial success, `2` for processing failure, and `3` for input/configuration errors. A run with no detections or only skipped detections can return zero, but has nothing to publish.
+
+## Publishing on Ceres
+
+The normal job workflow gathers the required inputs on Ceres, runs the stage, and publishes successful cutouts to:
 
 ```text
-seg_to_cut/<run_id>/
-  artifacts/
-    cutouts/
-      <cutout files>
-  logs/
-  manifest.json
-  run_report.json
+semifield-cutouts/<batch_id>/
 ```
 
-The manifest should record all four artifact paths, sizes, and checksums for each successful cutout.
+Publication requires an exit-zero run with at least one successful cutout and no failed cutouts. Skipped detections are allowed. The publisher checks file sets, dimensions, class values, transparency, and checksums, then makes the completed batch directory visible in one rename. It refuses to replace an existing batch.
 
-## Operational Database and Orchestration
-
-`globus_file_index.sqlite3` remains the operational database. No row needs to be inserted to “register” a stage because its stage columns accept names as text.
-
-Implementation work should add:
-
-- `seg_to_cut` to `STAGE_INPUT_SPECS`;
-- `seg_to_cut` to the supported submission stages;
-- a `v_batches_needing_seg_to_cut` readiness view in the maintained SQLite
-  schema and migration path;
-- a stage configuration with its input routes and CPU job resources;
-- promotion support for the `semifield-cutouts` data state; Atlas-to-Ceres result sync is not required for this Ceres stage;
-- tests for staging, readiness, leases, run ingestion, and publication.
-
-The readiness view should select a batch only when its required images, segmentations, and georeferenced CSV are available, no successful `seg_to_cut` run has already completed, and no active lease exists.
-
-Normal operation then creates `seg_to_cut` records in:
-
-- `staged_inputs` while required batch inputs are moved;
-- `stage_leases` while a job owns the batch;
-- `stage_runs` after the run report is ingested.
-
-Published files are indexed in `globus_file_index` under the `semifield-cutouts` data state during the normal inventory refresh.
-
-## Validation and Acceptance Checks
-
-The first implementation is ready for a batch when it can demonstrate:
-
-- every selected image has a matching mask;
-- image and mask dimensions match;
-- masks are 8-bit grayscale and all foreground values are known to the current
-  species/cultivar catalog;
-- every successful cutout has exactly four files;
-- the JPG, cutout PNG, and mask have identical dimensions;
-- every local mask contains only background and its expected target value;
-- cutout PNG background pixels are black, target alpha values are `255`, and non-target alpha values are `0`;
-- JSON identifiers, dimensions, and class values agree with the files;
-- output names are unique and deterministic across reruns;
-- a failed or empty detection has a clear recorded reason and no partial file
-  set;
-- run counts agree with manifest successes, failures, and skips.
-
-Tests should include species and cultivar examples, bounding boxes touching image edges, cutouts with each single edge and each corner flagged, detection-box truncation away from the source image edge, empty masks, separate same-class and different-class intruders, overlapping detections, unknown mask values, malformed input files, interrupted writes, and repeat runs.
-
-## Implementation Plan
-
-1. **Freeze examples and contracts.** Add a few small legacy-style four-file
-   fixtures and define the expected JSON and image properties in tests.
-2. **Build the core processor.** Match images, masks, and detection rows;
-   create local target masks; calculate properties; and write complete output
-   sets.
-3. **Add the stage command.** Produce the standard run directory, manifest,
-   logs, stable exit codes, and run report.
-4. **Wire orchestration.** Add readiness, input staging, submission config,
-   leases, promotion, and inventory reconciliation.
-5. **Validate on representative batches.** Compare file formats and selected
-   properties with historical cutouts, including at least one species batch
-   and one cultivar batch.
-6. **Run a controlled publication test.** Publish one batch to
-   `semifield-cutouts`, refresh the inventory, and verify database visibility
-   before enabling normal batch discovery.
+The Ceres job also refreshes the file inventory. Readiness checks exclude batches with an active job lease or a previous successful stage run. Running the stage CLI directly creates local outputs and reports; publication and database updates are handled separately by the job workflow.
