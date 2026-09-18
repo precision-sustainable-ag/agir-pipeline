@@ -21,10 +21,10 @@
 #      planned separately by that module's _plan_grid_request(), since
 #      GridCache reads them directly off local disk rather than through
 #      $TMPDIR (see stage.cli_args --g below, and grid_root's comment).
-#   2. Submission readiness is gated on live inventory state (images,
-#      detections, AND grids all currently indexed at destination_site),
-#      not on a single "staged_inputs row completed" flag — see
-#      filter_locally_ready_det_to_world() in scripts/job/submit.py.
+#      Legacy primary selection adds paired camera/FOV CSVs as a fourth
+#      input, staged separately with their reconstruction directories intact.
+#   2. Submission readiness requires completed staged_inputs records for
+#      every configured input destination, including legacy references.
 # ============================================================
 
 # ── Stage identity ────────────────────────────────────────────────────────────
@@ -38,7 +38,7 @@
 # skips that lookup entirely.
 #
 # Monoculture seasons (no shapefile) need a *separate* config using
-# `--skip-remap --species <code>` instead of `--shp $SHAPEFILE_PATH` —
+# `--species <code>` instead of `--shp $SHAPEFILE_PATH` —
 # cli_args is one static string applied to every batch submitted with this
 # file, so one config can't serve both modes at once. Which config to use
 # for a given batch is still a manual/operator choice (see
@@ -49,7 +49,8 @@ stage:
   cli_module: stages.det_to_world.cli
   cli_args: >-
     --i $TMPDIR/input/detections/$BATCH_ID.csv
-    --g /90daydata/dash_agir/semifield-asfm/$BATCH_ID
+    --g "$GRID_ROOT/$BATCH_ID"
+    --reference-root "$TMPDIR/input/primary_references"
     --o $TMPDIR/output
     --batch-id $BATCH_ID
     --shp $SHAPEFILE_PATH
@@ -99,10 +100,8 @@ paths:
 
   uv_env: /project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/activate
 
-  # Not read by stages/det_to_world/cli.py (it has no --c flag) — present
-  # only because orchestrator/submit_jobs.py always reads paths.stage_config
-  # to populate $CONFIG_PATH in the generated job script. Points at this
-  # file for traceability.
+  # Used by the orchestrator for job traceability; the stage receives paths
+  # through its CLI arguments.
   stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/configs/config.det_to_world.yaml
 
   # Both images/ and detections/ subdirs for a batch are staged here (see
@@ -210,6 +209,23 @@ transfer:
       # under per-time-range sub-batch folders (see paths.grid_root below).
       source_root_grids_ceres: /90daydata/dash_agir/semifield-asfm
       source_root_grids_juno: /LTS/project/dash_agir/semifield-asfm
+
+      # Stage the paired reference CSVs separately into
+      # <input_staging_root>/<batch_id>/primary_references/, retaining nested
+      # time-range/reference or autosfm/reference directories for grid matching.
+      # Sources must be indexed. Defaults to destination, ATLAS, CERES, JUNO;
+      # each site's grid root is checked before its developed-images root.
+      reference_source_sites: [CERES, ATLAS, JUNO]
+      # Optional overrides: roots containing <batch_id>/.../reference/*.csv.
+      # source_root_references_ceres: /90daydata/dash_agir/semifield-asfm
+      # source_root_references_juno: /LTS/project/dash_agir/semifield-asfm
+      # For Sunny/NCSU transfers add NCSU to reference_source_sites, define
+      # transfer.ncsu_endpoint, and use the Globus-visible source root:
+      # source_root_references_ncsu: /rsstu/users/s/screberg/longterm_images2/semifield-developed-images
+      # For ASFM references nested under staging/<batch_id>/<time-range>:
+      # source_root_references_ncsu: /rsstu/users/s/screberg/longterm_images2/semifield-asfm/staging
+      # Direct Sunny CLI reads instead use its /mnt/research-projects mount
+      # with --reference-root; mount parents never belong in Globus routes.
 
 # ── SLURM job parameters ──────────────────────────────────────────────────────
 # CPU-only stage (scipy RegularGridInterpolator) — no GPU needed.

@@ -261,6 +261,8 @@ python -m stages.det_to_seg.cli \
 python -m stages.det_to_world.cli \
   --i <batch-detection.csv> \
   --g <pixel-world-grid-directory> \
+  --shp <species-zone-shapefile> \
+  --bbot-version <version> \
   --o <output-directory> \
   --batch-id <batch-id>
 ```

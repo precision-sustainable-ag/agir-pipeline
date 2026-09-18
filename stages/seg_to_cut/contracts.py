@@ -50,6 +50,7 @@ class DetectionInput:
     pixel_bbox: PixelBoundingBox
     class_id: int
     species_id: str
+    is_primary: bool
     cultivar_id: str | None = None
     world_bbox: WorldBoundingBox | None = None
 
