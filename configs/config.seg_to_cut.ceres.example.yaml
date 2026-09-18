@@ -1,0 +1,80 @@
+# Ceres orchestration configuration for segmentation-to-cutout processing.
+
+stage:
+  name: seg_to_cut
+  cli_module: stages.seg_to_cut.cli
+  cli_args: >-
+    --images $TMPDIR/input/images
+    --segmentations $TMPDIR/input/segmentations
+    --georeferenced-csv $TMPDIR/input/georeferenced/${BATCH_ID}_georeferenced.csv
+    --species-catalog $SPECIES_CATALOG_PATH
+    --config $CONFIG_PATH
+    --output $TMPDIR/output
+    --t $CPUS
+    --batch-id $BATCH_ID
+    --bbot-version $BBOT_VERSION
+    --lens-model "Linos Inspect XL"
+  output_subdir: seg_to_cut
+  # The dedicated publisher validates every four-file cutout set, builds a
+  # sibling temporary batch directory, and atomically renames it into place.
+  publication_mode: cutout_batch
+  publication_args: >-
+    --refresh-inventory
+    --db "$DB_PATH"
+    --endpoint "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+    --site CERES
+    --storage-domain dash_agir
+    --namespace 90daydata
+    --storage-root /90daydata/dash_agir
+  # An empty suffix makes FINAL_DEST exactly
+  # /90daydata/dash_agir/semifield-cutouts/<batch_id>.
+  final_dest_suffix: ""
+
+visualization:
+  enabled: false
+
+render:
+  template: slurm_job.sh.j2
+
+paths:
+  agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
+  uv_env: /project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/activate
+  # Contains the area-source, border, edge, camera, and lens settings.
+  stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/stages/seg_to_cut/configs/default.yaml
+  # Batch-independent reference data remains shared on Ceres rather than
+  # being copied once per batch.
+  species_catalog: /project/dash_agir/semifield-utils/species_information/species_catalog.generated.json
+  input_staging_root: /90daydata/dash_agir/semifield-developed-images
+  output_stage_runs: /90daydata/dash_agir/tmp/stage_runs/seg_to_cut
+  final_dest_root: /90daydata/dash_agir/semifield-cutouts
+  log_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs/seg_to_cut
+  db: /project/dash_agir/globus_index/globus_file_index.sqlite3
+  db_read_mode: direct
+  db_temp_dir: /90daydata/dash_agir/tmp/db
+  locks_root: /project/dash_agir/locks
+
+transfer:
+  juno_endpoint: "904c2108-90cf-11e8-9672-0a6d4e044368"
+  atlas_endpoint: "c8ce33a1-0ec3-4aaa-b93a-c8ce0b5f8ad7"
+  ceres_endpoint: "f45a24f8-09ba-11ec-b342-1feaf93e3729"
+  dry_run: false
+  poll_interval_seconds: 30
+  poll_timeout_seconds: 7200
+  routes:
+    seg_to_cut:
+      destination_site: CERES
+      source_root_atlas: /90daydata/dash_agir/semifield-developed-images
+      source_root_ceres: /90daydata/dash_agir/semifield-developed-images
+      source_root_juno: /LTS/project/dash_agir/semifield-developed-images
+
+# seg_to_cut runs and publishes on Ceres, so Atlas-to-Ceres result sync is
+# intentionally disabled.
+result_sync:
+  enabled: false
+
+slurm:
+  account: dash_agir
+  partition: compute
+  cpus_per_task: 8
+  mem: 64G
+  time: "4:00:00"

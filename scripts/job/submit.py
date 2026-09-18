@@ -54,6 +54,7 @@ from orchestrator.sqlite_db import (
     get_batches_needing_jpg_to_det,
     get_batches_needing_det_to_seg,
     get_batches_needing_det_to_world,
+    get_batches_needing_seg_to_cut,
     get_completed_input_staging_batch_ids,
     get_fully_staged_batch_ids,
 )
@@ -61,7 +62,13 @@ from orchestrator.submit_jobs import submit_jobs, JobResult
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_STAGES = ("raw_to_jpg", "jpg_to_det", "det_to_world", "det_to_seg")
+SUPPORTED_STAGES = (
+    "raw_to_jpg",
+    "jpg_to_det",
+    "det_to_world",
+    "det_to_seg",
+    "seg_to_cut",
+)
 
 # ---------------------------------------------------------------------------
 # Batch discovery
@@ -114,6 +121,10 @@ def find_batches(cfg: dict, stage: str, *, site: str, limit: int) -> List[str]:
             # Site-agnostic because the input planner independently resolves
             # images, detections, and georeferenced output to ATLAS.
             rows = get_batches_needing_det_to_seg(conn, site=None, limit=limit * 2)
+        elif stage == "seg_to_cut":
+            # The planner resolves images, segmentations, and georeferenced
+            # data independently to CERES.
+            rows = get_batches_needing_seg_to_cut(conn, limit=limit * 2)
         else:
             raise ValueError(f"Unsupported stage: {stage!r}")
     finally:

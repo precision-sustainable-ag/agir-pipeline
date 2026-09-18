@@ -13,7 +13,7 @@ The canonical schema is defined in:
 schemas/sqlite/pipeline.sql
 ```
 
-The current schema version is `10`.
+The current schema version is `12`.
 
 For the complete runtime flow, see
 [`SQLITE_ORCHESTRATOR_ARCHITECTURE.md`](SQLITE_ORCHESTRATOR_ARCHITECTURE.md).
@@ -21,7 +21,7 @@ For day-to-day commands, see [`OPERATOR_RUNBOOK.md`](OPERATOR_RUNBOOK.md).
 
 ## Schema Overview
 
-The database contains four groups of objects:
+The database contains five groups of objects:
 
 | Group | Objects | Purpose |
 | --- | --- | --- |
@@ -29,7 +29,7 @@ The database contains four groups of objects:
 | Inventory | `inventory_runs`, `globus_file_index` | Track storage scans and current file state |
 | Reporting | `batch_inventory_summary`, `storage_gap_summary` | Store per-scan aggregate counts |
 | Orchestration | `stage_runs`, `stage_leases`, `staged_inputs`, `result_syncs` | Track execution, concurrency, prerequisite transfers, and Atlas→Ceres result promotion |
-| Readiness | `v_batches_needing_raw_to_jpg`, `v_batches_needing_jpg_to_det`, `v_batches_needing_det_to_world`, `v_batches_needing_det_to_seg` | Calculate batches eligible for pipeline stages |
+| Readiness | `v_batches_needing_raw_to_jpg`, `v_batches_needing_jpg_to_det`, `v_batches_needing_det_to_world`, `v_batches_needing_det_to_seg`, `v_batches_needing_seg_to_cut` | Calculate batches eligible for pipeline stages |
 
 ## Logical Relationships
 
@@ -782,9 +782,9 @@ They do not use the reporting summary tables and are not restricted to one
 inventory run. This allows current inventory from multiple endpoints and scan
 times to participate in one readiness decision.
 
-Both views exclude a batch when:
+Readiness views exclude a batch when:
 
-- the expected output files already exist;
+- the view defines existing output files as evidence that no work is needed;
 - an unexpired lease exists for the batch and stage; or
 - `stage_runs` contains a successful run for the batch and stage.
 
@@ -878,6 +878,28 @@ The view is site-agnostic. It establishes the inventory-level dependency on
 both `jpg_to_det` and `det_to_world`; the staging workflow separately resolves
 images, detections, and georeferenced data to the ATLAS destination. The view
 excludes active `det_to_seg` leases and successful `det_to_seg` runs.
+
+### `v_batches_needing_seg_to_cut`
+
+Returns batches that have current developed-image JPGs, current segmentation
+PNGs, and the exact batch-level `<batch_id>_georeferenced.csv` consumed by
+`seg_to_cut`.
+
+Output columns:
+
+| Column | Meaning |
+| --- | --- |
+| `batch_id` | Ready batch |
+| `batch_date` | Earliest batch date found in the image inventory |
+| `img_count` | Current developed-image JPG inputs |
+| `seg_count` | Current segmentation PNG inputs |
+| `georef_count` | Current matching georeferenced CSV inputs |
+
+The view is site-agnostic: the three input types may be indexed at different
+sites. Input staging separately resolves and co-locates them on Ceres before
+submission. Exact image-to-mask stem agreement remains a `seg_to_cut`
+validation responsibility. The view excludes active `seg_to_cut` leases and
+successful `seg_to_cut` runs.
 
 ## Indexes
 
@@ -1060,6 +1082,10 @@ LIMIT 20;
 SELECT *
 FROM v_batches_needing_det_to_seg
 LIMIT 20;
+
+SELECT *
+FROM v_batches_needing_seg_to_cut
+LIMIT 20;
 ```
 
 ### Input-staging state
@@ -1149,7 +1175,7 @@ can bypass.
 The schema uses:
 
 ```sql
-PRAGMA user_version = 11;
+PRAGMA user_version = 12;
 ```
 
 Recent version history (see the comment block at the end of
@@ -1161,6 +1187,7 @@ Recent version history (see the comment block at the end of
 | v9 | Add `species`, `species_aliases`, `species_multi_symbols`, `cultivars`, `cultivar_aliases`, `color_palette` reference tables |
 | v10 | `v_batches_needing_jpg_to_det` no longer restricts JPG inputs to `site IN ('JUNO', 'CERES')` — it now resolves images via the same destination/CERES/JUNO priority chain as `det_to_world` |
 | v11 | Add `v_batches_needing_det_to_seg` for batches with JPGs, detection TXT files, and `det_to_world` georeferenced output but no segmentation PNGs |
+| v12 | Add `v_batches_needing_seg_to_cut` for batches with JPGs, segmentation PNGs, and the exact batch georeferenced CSV |
 
 When changing the schema:
 

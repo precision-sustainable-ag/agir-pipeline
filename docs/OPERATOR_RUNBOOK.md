@@ -183,7 +183,7 @@ Verify the installed schema version:
 sqlite3 <database.sqlite3> 'PRAGMA user_version;'
 ```
 
-The current schema declares version `11`.
+The current schema declares version `12`.
 
 Schema application changes database objects. Coordinate it with other
 operators and do not run it during active inventory, staging, polling, or
@@ -680,6 +680,35 @@ cause. Finally, confirm the promoted masks exist at:
 ```text
 <paths.final_dest_root>/<batch-id>/segmentations/<image-id>.png
 ```
+
+### Run and verify `seg_to_cut` on Ceres
+
+Use `configs/config.seg_to_cut.ceres.example.yaml` as the deployment template.
+The stage requires completed staging rows for the batch's `images/`,
+`segmentations/`, and `georeferenced/` directories before submission. It runs
+on the Ceres CPU partition and must not request a GPU.
+
+Preview and submit one batch with the normal staging and submission commands,
+using `--stage seg_to_cut`. A successful job validates every manifest-declared
+cutout set and publishes one complete directory at:
+
+```text
+/90daydata/dash_agir/semifield-cutouts/<batch-id>/
+```
+
+Each successful cutout contributes exactly four files: cropout JPEG, RGBA
+cutout PNG, class-coded mask PNG, and JSON metadata. Publication first builds a
+sibling hidden temporary directory and then atomically renames it to the batch
+name. Validation, copy, or rename failures remove the temporary directory and
+leave no visible batch.
+
+The publisher refuses an existing destination. For an intentional replacement,
+an operator must first move the old batch to a separately named backup after
+confirming that no job or inventory refresh is active; implicit replacement is
+not supported. After publication, the job refreshes the Ceres
+`semifield-cutouts` inventory and verifies that every published path is current.
+If inventory refresh fails after a successful rename, retain the published
+batch and rerun the inventory command rather than rerunning the cutout job.
 
 ## Step 10: Synchronize Atlas Results to Ceres
 

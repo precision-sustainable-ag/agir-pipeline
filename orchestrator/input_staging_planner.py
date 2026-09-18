@@ -19,6 +19,7 @@ from orchestrator.sqlite_db import (
     get_batches_needing_det_to_world,
     get_batches_needing_jpg_to_det,
     get_batches_needing_raw_to_jpg,
+    get_batches_needing_seg_to_cut,
 )
 
 
@@ -98,6 +99,12 @@ STAGE_INPUT_SPECS: Dict[str, StageInputSpec] = {
         subdirs=("images", "detections", "georeferenced"),
         require_all_staged_inputs=True,
     ),
+    "seg_to_cut": StageInputSpec(
+        stage_name="seg_to_cut",
+        readiness_view="v_batches_needing_seg_to_cut",
+        subdirs=("images", "segmentations", "georeferenced"),
+        require_all_staged_inputs=True,
+    ),
 }
 
 # data_state/parent_dir matched when checking whether a site already has a
@@ -107,6 +114,7 @@ _DEVELOPED_IMAGES_DATA_STATE = "semifield-developed-images"
 _DEVELOPED_IMAGES_PARENT_DIRS = {
     "images": "parent_dir = 'images'",
     "detections": "parent_dir IN ('detections', 'plant-detections', 'metadata')",
+    "segmentations": "parent_dir = 'segmentations' AND file_ext = 'png'",
     "georeferenced": (
         "parent_dir = 'georeferenced' AND file_ext = 'csv' "
         "AND file_name = batch_id || '_georeferenced.csv'"
@@ -126,6 +134,78 @@ def _join_posix(*parts: str) -> str:
         return ""
     prefix = "/" if str(parts[0]).startswith("/") else ""
     return prefix + str(PurePosixPath(*cleaned))
+
+
+def _plan_primary_reference_request(
+    conn: sqlite3.Connection, cfg: Dict, *, batch_id: str, priority: int
+) -> StagingRequest:
+    """Stage paired camera/FOV CSVs, preserving their batch-relative layout.
+
+    Roots and site priority are deployment settings. Indexed full paths are
+    Globus paths, never local mount paths. Only the two reference CSV names
+    are transferred; reconstruction directories are retained for grid matching.
+    """
+    route = cfg["transfer"]["routes"]["det_to_world"]
+    transfer = cfg["transfer"]
+    dst_site = route.get("destination_site", "ATLAS")
+    dst_endpoint = _endpoint_for_site(transfer, dst_site)
+    dst_root = route.get("destination_root") or cfg["paths"]["input_staging_root"]
+    dst_path = _join_posix(dst_root, batch_id, "primary_references")
+    sites = route.get("reference_source_sites", [dst_site, "ATLAS", "CERES", "JUNO"])
+    for site in dict.fromkeys(sites):
+        indexed = conn.execute(
+            """SELECT full_path FROM globus_file_index
+               WHERE site = ? AND batch_id = ? AND is_current = 1
+                 AND entry_type = 'file'
+                 AND file_name IN ('camera_reference.csv', 'fov.csv')
+               ORDER BY full_path""",
+            (site, batch_id),
+        ).fetchall()
+        roots = [
+            route.get(f"source_root_references_{site.lower()}"),
+            route.get(f"source_root_grids_{site.lower()}"),
+            route.get(f"source_root_{site.lower()}"),
+        ]
+        # A prior transfer may have been indexed at the destination.
+        source_paths = ([dst_path] if site == dst_site else []) + [
+            _join_posix(root, batch_id) for root in roots if root
+        ]
+        for src_path in dict.fromkeys(source_paths):
+            names = set()
+            for record in indexed:
+                try:
+                    relative = PurePosixPath(record[0]).relative_to(src_path)
+                except ValueError:
+                    continue
+                if ".." not in relative.parts:
+                    names.add(str(relative))
+            if not names:
+                continue
+            parents = {str(PurePosixPath(name).parent) for name in names}
+            if any(
+                not all(
+                    str(PurePosixPath(parent) / filename) in names
+                    for filename in ("camera_reference.csv", "fov.csv")
+                )
+                for parent in parents
+            ):
+                continue
+            src_endpoint = _endpoint_for_site(transfer, site)
+            return StagingRequest(
+                batch_id=batch_id,
+                stage="det_to_world",
+                src_endpoint=src_endpoint,
+                dst_endpoint=dst_endpoint,
+                src_path=src_path,
+                dst_path=dst_path,
+                priority=priority,
+                file_names=tuple(sorted(names)),
+                already_satisfied=src_endpoint == dst_endpoint and src_path == dst_path,
+            )
+    raise ValueError(
+        f"No indexed paired primary-selection references for {batch_id}; "
+        "configure reference_source_sites/source_root_references_<site> and index the CSVs"
+    )
 
 
 def _rows_for_stage(
@@ -159,6 +239,10 @@ def _rows_for_stage(
         # independently across destination/CERES/JUNO, so readiness must not
         # be restricted to whichever site the operator passed on the CLI.
         return get_batches_needing_det_to_seg(conn, site=None, limit=limit, batch_ids=batch_ids)
+    if spec.readiness_view == "v_batches_needing_seg_to_cut":
+        # Each required input is resolved independently to CERES, so the
+        # inventory-level readiness query must remain site-agnostic.
+        return get_batches_needing_seg_to_cut(conn, limit=limit, batch_ids=batch_ids)
     raise ValueError(f"Unsupported readiness view: {spec.readiness_view!r}")
 
 
@@ -476,9 +560,10 @@ def plan_input_staging(
     ``transfer.routes.<stage>.input_subdir`` is optionally appended to both
     paths for single-route stages (e.g. raw_to_jpg). Use ``source_subdir``
     when the source subdirectory differs from the destination. Stages with
-    ``StageInputSpec.subdirs`` set (jpg_to_det, det_to_world, det_to_seg) instead resolve
-    each subdir independently via ``_plan_multi_site_requests`` — see there
-    for that config shape (``destination_site``, ``source_root_<site>``).
+    ``StageInputSpec.subdirs`` set (jpg_to_det, det_to_world, det_to_seg,
+    seg_to_cut) instead resolve each subdir independently via
+    ``_plan_multi_site_requests`` — see there for that config shape
+    (``destination_site``, ``source_root_<site>``).
     """
     if stage not in STAGE_INPUT_SPECS:
         raise ValueError(f"Unsupported stage for input staging: {stage!r}")
@@ -511,6 +596,11 @@ def plan_input_staging(
             if stage == "det_to_world":
                 requests.append(
                     _plan_grid_request(conn, cfg, batch_id=batch_id, priority=spec.default_priority)
+                )
+                requests.append(
+                    _plan_primary_reference_request(
+                        conn, cfg, batch_id=batch_id, priority=spec.default_priority
+                    )
                 )
         return requests
 
@@ -596,6 +686,7 @@ def expected_staged_input_dst_paths(cfg: Dict, stage: str, batch_id: str) -> Lis
         if not grid_root:
             raise ValueError("Config paths block must define grid_root for det_to_world")
         expected.append(_join_posix(grid_root, batch_id))
+        expected.append(_join_posix(input_root, batch_id, "primary_references"))
 
     return expected
 
