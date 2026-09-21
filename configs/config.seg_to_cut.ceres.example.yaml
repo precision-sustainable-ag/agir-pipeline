@@ -38,7 +38,7 @@ render:
 
 paths:
   agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
-  uv_env: /project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/activate
+  uv_env: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/.venv/bin/activate
   # Contains the area-source, border, edge, camera, and lens settings.
   stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/stages/seg_to_cut/configs/default.yaml
   # Batch-independent reference data remains shared on Ceres rather than
