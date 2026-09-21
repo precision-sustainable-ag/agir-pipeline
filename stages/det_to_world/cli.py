@@ -39,6 +39,7 @@ from .remapper import (
     GridCache,
     load_detection_rows,
     remap_rows,
+    resolve_detection_source,
     write_georeferenced_csv,
 )
 from .species import (
@@ -115,7 +116,11 @@ def main() -> int:
         description="Remap jpg_to_det detections into world coordinates using ASFM NPZ "
         "grids, then assign species via shapefile zone or monoculture config."
     )
-    parser.add_argument("--i", type=Path, required=True, help="Input detection CSV from jpg_to_det.")
+    parser.add_argument(
+        "--i", type=Path, required=True,
+        help="Detection CSV from jpg_to_det, or a detections directory: its <batch_id>.csv is "
+        "used if present, otherwise the per-image .txt files (older batches without a CSV).",
+    )
     parser.add_argument("--g", type=Path, required=True, help="Directory containing per-image NPZ grids.")
     parser.add_argument("--o", type=Path, required=True, help="Output directory.")
     parser.add_argument("--batch-id", type=str, default=None, help="Batch ID. Auto-inferred from input path if omitted.")
@@ -153,7 +158,9 @@ def main() -> int:
         return EXIT_CONFIG_ERROR
 
     if not args.i.exists():
-        logger.error("Input detection CSV does not exist: %s", args.i)
+        logger.error("Input detection path does not exist: %s", args.i)
+        if args.i.suffix == ".csv":
+            logger.error("For batches without a CSV, pass the detections directory as --i to use its .txt files.")
         return EXIT_CONFIG_ERROR
     if not args.g.exists():
         logger.error("Grid directory does not exist: %s", args.g)
@@ -220,12 +227,17 @@ def main() -> int:
         deps_id="scipy,geopandas,packaging,shapely",
     )
 
+    # a directory input is its own root; a CSV's root is the folder holding it
+    input_root = args.i if args.i.is_dir() else args.i.parent
+
     try:
-        # load csv input
-        input_fieldnames, rows = load_detection_rows(args.i)
+        # load csv input (or per-image .txt files when a directory has no batch csv)
+        det_source = resolve_detection_source(args.i, batch_id)
+        logger.info("Reading detections from %s", det_source)
+        input_fieldnames, rows = load_detection_rows(det_source)
     except Exception as exc:
-        logger.error("Invalid detection CSV: %s", exc)
-        report.set_stage_error(f"Invalid detection CSV: {exc}")
+        logger.error("Invalid detection input: %s", exc)
+        report.set_stage_error(f"Invalid detection input: {exc}")
         report.add_error(
             unit_id="__stage__",
             code=ERROR_CSV_INVALID,
@@ -234,7 +246,7 @@ def main() -> int:
         )
         report.stop(EXIT_CONFIG_ERROR)
         report.set_inputs(
-            input_root=str(args.i.parent),
+            input_root=str(input_root),
             n_units_discovered=0,
         )
         report.set_outputs(
@@ -260,9 +272,9 @@ def main() -> int:
 
 
     report.set_inputs(
-        input_root=str(args.i.parent),
+        input_root=str(input_root),
         n_units_discovered=len(image_ids),
-        inputs_manifest_path=str(args.i),
+        inputs_manifest_path=str(det_source),
     )
 
     output_csv_path = artifacts_dir / f"{batch_id}_georeferenced.csv"
@@ -472,6 +484,7 @@ def main() -> int:
 
     report.set_extra(
         assignment_mode="monoculture_config" if args.species is not None else "spatial_join",
+        detection_source="txt_dir" if det_source.is_dir() else "csv",
         bbot_version=args.bbot_version,
     )
     report.stop(exit_code)

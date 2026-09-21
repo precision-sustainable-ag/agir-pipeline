@@ -142,6 +142,7 @@ def get_batches_needing_det_to_world(
     site: Optional[str] = None,
     limit: int = 200,
     batch_ids: Optional[Sequence[str]] = None,
+    rerun: bool = False,
 ) -> List[Dict]:
     """
     Return rows from ``v_batches_needing_det_to_world``.
@@ -151,7 +152,54 @@ def get_batches_needing_det_to_world(
     current georeferenced output. Passing ``site`` additionally restricts to
     batches whose detection files are currently indexed at that site (mirrors
     ``get_batches_needing_jpg_to_det``'s use of ``site`` for its images join).
+
+    ``rerun=True`` (requires ``batch_ids``) bypasses the view for those
+    batches: it applies the same images/detections/grids requirements but
+    drops the view's "no georeferenced output" and "never succeeded"
+    exclusions so already-processed batches can be re-staged and rerun.
+    Active leases are still excluded, and ``site`` is ignored.
     """
+    if rerun:
+        if not batch_ids:
+            raise ValueError("rerun=True requires explicit batch_ids")
+        placeholders = ",".join("?" for _ in batch_ids)
+        rows = conn.execute(
+            f"""
+            SELECT
+                g.batch_id,
+                MIN(CASE WHEN g.data_state = 'semifield-developed-images'
+                              AND g.parent_dir = 'images'
+                              AND g.file_ext IN ('jpg', 'jpeg')
+                         THEN g.batch_date END) AS batch_date,
+                SUM(g.data_state = 'semifield-developed-images'
+                    AND g.parent_dir = 'images'
+                    AND g.file_ext IN ('jpg', 'jpeg')) AS img_count,
+                SUM(g.data_state = 'semifield-developed-images'
+                    AND g.parent_dir IN ('detections', 'plant-detections', 'metadata')) AS det_count,
+                SUM(g.data_state = 'semifield-asfm'
+                    AND g.file_ext = 'npz'
+                    AND g.parent_dir = 'pixel_world_grids') AS grid_count,
+                SUM(g.data_state = 'semifield-developed-images'
+                    AND g.parent_dir = 'georeferenced') AS georef_count
+            FROM globus_file_index g
+            WHERE g.batch_id IN ({placeholders})
+              AND g.entry_type = 'file'
+              AND g.is_current = 1
+              AND g.batch_id NOT IN (
+                  SELECT batch_id
+                  FROM   stage_leases
+                  WHERE  stage      = 'det_to_world'
+                    AND  expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+              )
+            GROUP BY g.batch_id
+            HAVING img_count > 0 AND det_count > 0 AND grid_count > 0
+            ORDER BY batch_date ASC, g.batch_id ASC
+            LIMIT ?
+            """,
+            (*batch_ids, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     batch_filter_sql = ""
     filter_params: List = []
     if batch_ids:
