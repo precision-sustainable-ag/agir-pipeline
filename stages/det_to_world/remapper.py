@@ -44,6 +44,9 @@ REQUIRED_INPUT_COLUMNS = [
     "ymax",
 ]
 
+# Full column set of jpg_to_det's batch CSV; the .txt fallback compiles to this shape.
+DETECTION_COLUMNS = REQUIRED_INPUT_COLUMNS + ["conf", "class", "classname"]
+
 GEO_COLUMNS = [
     "world_tl_x",
     "world_tl_y",
@@ -308,13 +311,26 @@ def map_bbox(row: dict[str, str], grid: GridData) -> tuple[dict[str, Any] | None
     return _construct_global_coords(row, mapped, grid.crs), None
 
 
-def load_detection_rows(csv_path: Path) -> tuple[list[str], list[dict[str, str]]]:
-    """ reads detection CSV and validates required columns, returns fieldnames and rows """
-    csv_path = Path(csv_path)
-    if not csv_path.exists():
-        raise FileNotFoundError(f"Detection CSV does not exist: {csv_path}")
+def resolve_detection_source(path: Path, batch_id: str) -> Path:
+    """Pick the detection input to read: a file as given, or for a directory its
+    ``<batch_id>.csv`` when present, else the directory itself (per-image .txt files)."""
+    path = Path(path)
+    if path.is_dir():
+        batch_csv = path / f"{batch_id}.csv"
+        if batch_csv.is_file():
+            return batch_csv
+    return path
 
-    with open(csv_path, newline="") as f:
+
+def load_detection_rows(source: Path) -> tuple[list[str], list[dict[str, str]]]:
+    """ reads detection CSV (or a directory of per-image .txt files) and returns fieldnames and rows """
+    source = Path(source)
+    if source.is_dir():
+        return _load_detection_txt_dir(source)
+    if not source.exists():
+        raise FileNotFoundError(f"Detection CSV does not exist: {source}")
+
+    with open(source, newline="") as f:
         reader = csv.DictReader(f)
         fieldnames = reader.fieldnames or []
         # find missing columns
@@ -324,6 +340,55 @@ def load_detection_rows(csv_path: Path) -> tuple[list[str], list[dict[str, str]]
         rows = list(reader)
 
     return fieldnames, rows
+
+
+def _clamp01(value: float) -> float:
+    return min(max(value, 0.0), 1.0)
+
+
+def _load_detection_txt_dir(txt_dir: Path) -> tuple[list[str], list[dict[str, str]]]:
+    """Compile per-image YOLO .txt files into rows shaped like a jpg_to_det batch CSV.
+
+    Older batches predate the batch CSV and only have these files, one line per box:
+    ``cls xc yc w h [conf]``, normalized. ``conf`` is blank for the 5-column form and
+    ``classname`` is always blank (the files don't record class names). Empty files
+    (images with no detections) contribute no rows, same as the CSV. Corners are
+    clamped to [0, 1]: the files store center/size at 6 decimals, so an edge-touching
+    box can round to a corner ~5e-7 outside the image, which primary selection rejects.
+    """
+    txt_paths = [p for p in sorted(txt_dir.iterdir()) if p.suffix.lower() == ".txt"]
+    if not txt_paths:
+        raise ValueError(f"No detection CSV or .txt files found in {txt_dir}")
+
+    rows: list[dict[str, str]] = []
+    for txt_path in txt_paths:
+        with open(txt_path) as f:
+            boxes = [(n, line.split()) for n, line in enumerate(f, start=1) if line.strip()]
+        for bounding_box_id, (line_number, parts) in enumerate(boxes):
+            if len(parts) not in (5, 6):
+                raise ValueError(
+                    f"{txt_path.name} line {line_number}: expected 5 or 6 fields, got {len(parts)}"
+                )
+            try:
+                class_id = int(parts[0])
+                xc, yc, width, height = (float(value) for value in parts[1:5])
+            except ValueError as exc:
+                raise ValueError(f"{txt_path.name} line {line_number}: {exc}") from exc
+            rows.append(
+                {
+                    "image_id": txt_path.stem,
+                    "bounding_box_id": str(bounding_box_id),
+                    "xmin": f"{_clamp01(xc - width / 2):.6f}",
+                    "ymin": f"{_clamp01(yc - height / 2):.6f}",
+                    "xmax": f"{_clamp01(xc + width / 2):.6f}",
+                    "ymax": f"{_clamp01(yc + height / 2):.6f}",
+                    "conf": parts[5] if len(parts) == 6 else "",
+                    "class": str(class_id),
+                    "classname": "",
+                }
+            )
+
+    return list(DETECTION_COLUMNS), rows
 
 
 def write_georeferenced_csv(

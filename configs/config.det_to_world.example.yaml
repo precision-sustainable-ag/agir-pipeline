@@ -98,7 +98,7 @@ render:
 paths:
   agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
 
-  uv_env: /project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/activate
+  uv_env: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/.venv/bin/activate
 
   # Used by the orchestrator for job traceability; the stage receives paths
   # through its CLI arguments.

@@ -355,6 +355,15 @@ def main() -> int:
         help="Optional batch list file. Limits planning to these batch_ids.",
     )
     parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help=(
+            "Stage batches even if they already have a successful run or "
+            "georeferenced output (which the readiness view excludes). "
+            "det_to_world only; requires --batches."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print planned requests only. Does not write SQLite or call Globus.",
@@ -387,6 +396,10 @@ def main() -> int:
         help="Optional base directory for command logs. Defaults to paths.log_dir from config.",
     )
     args = parser.parse_args()
+    if args.rerun and args.stage != "det_to_world":
+        parser.error("--rerun is only supported for --stage det_to_world")
+    if args.rerun and not args.batches:
+        parser.error("--rerun requires --batches")
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),
@@ -405,13 +418,14 @@ def main() -> int:
     ) as log_paths:
         logger.info("Writing command logs under %s", log_paths.directory)
         logger.info(
-            "Starting input staging command stage=%s config=%s db=%s site=%s limit=%s batches=%s dry_run=%s requested_by=%s",
+            "Starting input staging command stage=%s config=%s db=%s site=%s limit=%s batches=%s rerun=%s dry_run=%s requested_by=%s",
             args.stage,
             args.config,
             cfg["paths"]["db"],
             args.site,
             args.limit,
             args.batches,
+            args.rerun,
             args.dry_run,
             args.requested_by,
         )
@@ -433,6 +447,7 @@ def main() -> int:
                 site=args.site,
                 limit=args.limit,
                 batch_ids=batch_ids,
+                rerun=args.rerun,
             )
         finally:
             plan_conn.close()

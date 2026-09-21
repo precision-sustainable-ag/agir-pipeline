@@ -215,9 +215,12 @@ def _rows_for_stage(
     site: Optional[str],
     limit: int,
     batch_ids: Optional[Sequence[str]] = None,
+    rerun: bool = False,
 ) -> List[Dict]:
     if stage not in STAGE_INPUT_SPECS:
         raise ValueError(f"Unsupported stage for input staging: {stage!r}")
+    if rerun and stage != "det_to_world":
+        raise ValueError(f"rerun is only supported for det_to_world, not {stage!r}")
     spec = STAGE_INPUT_SPECS[stage]
 
     if spec.readiness_view == "v_batches_needing_raw_to_jpg":
@@ -233,7 +236,9 @@ def _rows_for_stage(
         # _plan_multi_site_requests) checks destination/CERES/JUNO itself,
         # so scoping readiness to one --site would wrongly exclude batches
         # whose data landed somewhere else.
-        return get_batches_needing_det_to_world(conn, site=None, limit=limit, batch_ids=batch_ids)
+        return get_batches_needing_det_to_world(
+            conn, site=None, limit=limit, batch_ids=batch_ids, rerun=rerun
+        )
     if spec.readiness_view == "v_batches_needing_det_to_seg":
         # det_to_seg resolves images, detections, and georeferenced output
         # independently across destination/CERES/JUNO, so readiness must not
@@ -550,9 +555,14 @@ def plan_input_staging(
     site: Optional[str] = "JUNO",
     limit: int = 200,
     batch_ids: Optional[Sequence[str]] = None,
+    rerun: bool = False,
 ) -> List[StagingRequest]:
     """
     Build input staging requests from SQLite readiness rows and config.
+
+    ``rerun`` (det_to_world only, requires ``batch_ids``) plans the named
+    batches even if they already have georeferenced output or a successful
+    run, which the readiness view would otherwise exclude.
 
     The config contract matches the existing submit config:
     ``paths.input_staging_root`` is the 90daydata destination root and
@@ -574,7 +584,9 @@ def plan_input_staging(
     # When targeting specific batches, don't let the default/passed limit
     # truncate the readiness query before the batch_id filter is applied.
     effective_limit = max(limit, len(wanted)) if wanted else limit
-    rows = _rows_for_stage(conn, stage, site=site, limit=effective_limit, batch_ids=batch_ids)
+    rows = _rows_for_stage(
+        conn, stage, site=site, limit=effective_limit, batch_ids=batch_ids, rerun=rerun
+    )
     wanted_rows = [row for row in rows if not wanted or row["batch_id"] in wanted]
 
     if spec.subdirs:
