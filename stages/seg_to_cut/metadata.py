@@ -25,6 +25,7 @@ from .contracts import AreaMetricInput, PixelBoundingBox, WorldBoundingBox
 
 SIDES = ("top", "bottom", "left", "right")
 BLUR_H_SIZE = 11
+LOCAL_CRS = "LOCAL"
 
 
 def measurement_provenance(config: SegToCutConfig) -> dict[str, Any]:
@@ -108,7 +109,7 @@ def _segments_intersect(
 
 
 def calculate_bbox_area_cm2(world_bbox: WorldBoundingBox | None) -> float | None:
-    """Calculate planar quadrilateral area in cm² for a supported projected CRS."""
+    """Calculate planar quadrilateral area in cm² for a projected CRS or ``LOCAL`` (metres)."""
 
     return _bbox_area_with_reason(world_bbox)[0]
 
@@ -132,19 +133,24 @@ def _bbox_area_with_reason(
         points[1], points[2], points[3], points[0]
     ):
         return None, "world box has intersecting or collinear edges"
-    try:
-        crs = CRS.from_user_input(world_bbox.crs)
-    except (CRSError, TypeError, ValueError):
-        return None, "CRS could not be parsed"
-    if not crs.is_projected or len(crs.axis_info) < 2:
-        return None, "CRS is not projected or lacks two coordinate axes"
-    x_factor = crs.axis_info[0].unit_conversion_factor
-    y_factor = crs.axis_info[1].unit_conversion_factor
-    if not all(
-        factor is not None and math.isfinite(factor) and factor > 0
-        for factor in (x_factor, y_factor)
-    ):
-        return None, "CRS axis units cannot be converted to metres"
+    if world_bbox.crs == LOCAL_CRS:
+        # LOCAL is the pipeline's project frame; it is not a pyproj CRS but its
+        # coordinates are already in metres.
+        x_factor = y_factor = 1.0
+    else:
+        try:
+            crs = CRS.from_user_input(world_bbox.crs)
+        except (CRSError, TypeError, ValueError):
+            return None, "CRS could not be parsed"
+        if not crs.is_projected or len(crs.axis_info) < 2:
+            return None, "CRS is not projected or lacks two coordinate axes"
+        x_factor = crs.axis_info[0].unit_conversion_factor
+        y_factor = crs.axis_info[1].unit_conversion_factor
+        if not all(
+            factor is not None and math.isfinite(factor) and factor > 0
+            for factor in (x_factor, y_factor)
+        ):
+            return None, "CRS axis units cannot be converted to metres"
     # Translate near the origin before the shoelace sum to avoid cancellation
     # for large UTM eastings/northings surrounding a small plant box.
     origin_x, origin_y = points[0]

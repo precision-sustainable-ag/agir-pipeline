@@ -197,7 +197,7 @@ Unavailable values are written as `null`. This includes missing capture metadata
 
 For cultivar cutouts, use `category.cultivar_class_id` as the mask value. For species-only cutouts, use `category.class_id`.
 
-## Configuration
+The `bbox_area.source` configuration selects `georeferenced_csv` or `camera`. The CSV source calculates `bbox_area_cm2` from a complete valid world-coordinate box in a supported projected CRS, or in the pipeline's `LOCAL` project frame, whose coordinates are metres. Camera mode returns `null` until the future authoritative XYZ camera-location input and area model are defined; consequently, its batch sample size is `0` and the mean, ratio, and abnormal-size flag are `null`.
 
 Stage settings live in [`stages/seg_to_cut/configs/default.yaml`](../stages/seg_to_cut/configs/default.yaml). Pass another settings file with `--config` to override them.
 
