@@ -81,7 +81,7 @@ MD:
     note: ""
   weeds_2026:
     start: "2026-06-15"
-    end: "2026-07-30"
+    end: "2026-08-24"
     bbot_version: 3.1
     crs: 32618
     pipeline_season: summer_weeds_2026
@@ -161,7 +161,7 @@ NC:
     gh_reviewer: map0425
     note: "No reconstruction necessary, all instances are labeled as soybean."
   zoysia 2025:
-    start: "2025-08-25"
+    start: "2025-08-21"
     end: "2025-09-27"
     bbot_version: 3.1
     crs: 32617
@@ -178,7 +178,7 @@ NC:
     note: ""
   peanuts 2026:
     start: "2026-06-04"
-    end: "2026-09-01"
+    end: "2026-09-04"
     bbot_version: 3.1
     crs: 32617
     pipeline_season: peanuts_2026
