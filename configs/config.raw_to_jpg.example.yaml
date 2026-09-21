@@ -24,7 +24,7 @@ visualization:
   args:
     images: '"$RUN_DIR/artifacts"'
     output: '"$VIZ_DIR"'
-    sample_size: 50
+    sample_size: 100
     scale: 0.15
 
 # ── Render template ───────────────────────────────────────────────────────────
@@ -36,7 +36,7 @@ paths:
   # Root of the agir-pipeline repository on the cluster.
   agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
 
-  uv_env: /project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/activate
+  uv_env: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/.venv/bin/activate
 
   # Camera config YAML passed to raw_to_jpg --c.
   stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/configs/config.raw_to_jpg.example.yaml
