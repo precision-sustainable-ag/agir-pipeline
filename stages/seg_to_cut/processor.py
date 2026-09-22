@@ -47,6 +47,7 @@ from .contracts import (
     WorldBoundingBox,
 )
 from .errors import SegToCutInputError
+from .fov_area import FovAreaReference, estimate_fov_bbox_area_cm2, load_fov_references
 from .metadata import (
     calculate_area_properties,
     calculate_cutout_properties,
@@ -68,15 +69,6 @@ REQUIRED_CSV_COLUMNS = (
     "ymax",
     "species_id",
     "is_primary",
-    "world_tl_x",
-    "world_tl_y",
-    "world_tr_x",
-    "world_tr_y",
-    "world_bl_x",
-    "world_bl_y",
-    "world_br_x",
-    "world_br_y",
-    "crs",
 )
 
 NO_DETECTIONS_ASSIGNMENT_METHOD = "no_detections"
@@ -871,6 +863,7 @@ def _process_image_outputs(
     season: str | None,
     bbot_version: str | None,
     lens_model: str | None,
+    fov_reference: FovAreaReference | None,
 ) -> tuple[CutoutProcessingResult, ...]:
     eligible = set(eligible_identities)
     early_results = {result.identity: result for result in image_early_results}
@@ -919,7 +912,19 @@ def _process_image_outputs(
                 image_height=image.height,
                 config=config,
                 world_bbox=detection.world_bbox,
+                normalized_bbox=detection.normalized_bbox,
+                fov_reference=fov_reference,
             )
+            if properties["bbox_area_cm2"] is None and properties["estimated_bbox_area_cm2"] is not None:
+                method = estimate_fov_bbox_area_cm2(detection.normalized_bbox, fov_reference)[1]
+                logger.info(
+                    "Estimated bbox area: image_id=%s bounding_box_id=%s method=%s area_cm2=%.6f%s",
+                    detection.image_id, detection.bounding_box_id, method,
+                    properties["estimated_bbox_area_cm2"],
+                    f" fallback_reason={fov_reference.homography_issue}"
+                    if method == "fov_dimensions" and fov_reference and fov_reference.homography_issue
+                    else "",
+                )
             cutout_id = make_cutout_id(detection.image_id, detection.bounding_box_id)
             metadata = _cutout_metadata(
                 detection=detection,
@@ -953,7 +958,8 @@ def _process_image_outputs(
                     status=ITEM_OK,
                     artifacts=artifacts,
                     null_metadata_reasons=null_metadata_reasons(
-                        metadata, world_bbox=detection.world_bbox, config=config
+                        metadata, world_bbox=detection.world_bbox, config=config,
+                        normalized_bbox=detection.normalized_bbox, fov_reference=fov_reference,
                     ),
                 )
             )
@@ -995,6 +1001,11 @@ def process_validated_batch(
 ) -> tuple[CutoutProcessingResult, ...]:
     """Create cutouts with a bounded-memory, deterministic two-pass flow."""
 
+    reference_root = (
+        validation.images[0].image_path.parent.parent / "primary_references"
+        if validation.images else None
+    )
+    fov_references = load_fov_references(reference_root)
     workers = _bounded_worker_count(max_workers, len(validation.images))
     if fail_stop and max_workers > 1:
         raise ValueError("fail_stop cannot be combined with parallel image processing")
@@ -1082,6 +1093,7 @@ def process_validated_batch(
                     season,
                     bbot_version,
                     lens_model,
+                    fov_references.get(task[0].image_id),
                 ): index
                 for index, task in enumerate(output_tasks)
             }
@@ -1121,6 +1133,7 @@ def process_validated_batch(
                 season,
                 bbot_version,
                 lens_model,
+                fov_references.get(image.image_id),
             )
             results.extend(image_results)
             _log_cutout_progress(completed, total, image.image_id, image_results)

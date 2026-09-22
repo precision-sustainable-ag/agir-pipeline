@@ -10,7 +10,7 @@ edge_threshold: 0.05
 cutout_version: "2.0"
 
 bbox_area:
-  source: georeferenced_csv  # Use georeferenced_csv now; camera support awaits XYZ camera data.
+  source: georeferenced_csv  # Valid world boxes are authoritative; staged primary_references supply estimates when unavailable.
 
 camera:
   manufacturer: SVS-Vistek
@@ -29,4 +29,4 @@ camera:
   lens_height_above_pot_surface_cm: 170
 
 species_bbox_min_sample_size: 5  # Require this many valid areas before calculating a group mean.
-abnormal_bbox_size_threshold: 0.25  # Flag areas that differ from the group mean by more than 50%.
+abnormal_bbox_size_threshold: 0.25  # Flag areas that differ from the group mean by more than 25%.

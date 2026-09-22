@@ -22,10 +22,22 @@ from skimage.morphology import convex_hull_image
 
 from .config import SegToCutConfig, parse_config
 from .contracts import AreaMetricInput, PixelBoundingBox, WorldBoundingBox
+from .fov_area import FovAreaReference, estimate_fov_bbox_area_cm2
 
 SIDES = ("top", "bottom", "left", "right")
 BLUR_H_SIZE = 11
 LOCAL_CRS = "LOCAL"
+AREA_BIN_EDGES = (1.0, 10.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0)
+AREA_BIN_LABELS = (
+    "0-1", "1-10", "10-100", "100-500", "500-1000", "1000-5000", "5000-10000", "10000+"
+)
+
+
+def area_bin(area_cm2: float | None) -> str | None:
+    """Assign a positive physical area to lower-inclusive cm² ranges."""
+    if area_cm2 is None or not math.isfinite(area_cm2) or area_cm2 <= 0:
+        return None
+    return AREA_BIN_LABELS[sum(area_cm2 >= edge for edge in AREA_BIN_EDGES)]
 
 
 def measurement_provenance(config: SegToCutConfig) -> dict[str, Any]:
@@ -73,6 +85,10 @@ def measurement_provenance(config: SegToCutConfig) -> dict[str, Any]:
             "world_area_algorithm": "planar_shoelace",
             "world_area_output_unit": "cm2",
             "camera_area_status": "unavailable_pending_xyz_camera_source",
+            "estimated_area_order": ("world_bbox", "fov_homography", "fov_dimensions"),
+            "fov_area_output_unit": "cm2",
+            "fov_units_assumption": "metres",
+            "area_bin_edges_cm2": AREA_BIN_EDGES,
             "species_bbox_grouping": "resolved_category",
             "species_bbox_min_sample_size": config.species_bbox_min_sample_size,
             "abnormal_bbox_size_threshold": config.abnormal_bbox_size_threshold,
@@ -170,9 +186,11 @@ def _bbox_area_with_reason(
 
 
 def null_metadata_reasons(
-    metadata: dict[str, Any], *, world_bbox: WorldBoundingBox | None, config: SegToCutConfig
+    metadata: dict[str, Any], *, world_bbox: WorldBoundingBox | None, config: SegToCutConfig,
+    normalized_bbox: tuple[float, float, float, float] | None = None,
+    fov_reference: FovAreaReference | None = None,
 ) -> dict[str, str]:
-    """Explain unavailable fields without changing the cutout metadata contract."""
+    """Explain unavailable fields in cutout metadata for run logs."""
 
     reasons: dict[str, str] = {}
     props = metadata["cutout_props"]
@@ -182,6 +200,14 @@ def null_metadata_reasons(
             if config.bbox_area_source == "camera"
             else _bbox_area_with_reason(world_bbox)[1] or "physical area unavailable"
         )
+    if props["area_bin"] is None:
+        reasons["area_bin"] = "bbox_area_cm2 is unavailable"
+    if props["estimated_bbox_area_cm2"] is None:
+        reasons["estimated_bbox_area_cm2"] = estimate_fov_bbox_area_cm2(
+            normalized_bbox, fov_reference
+        )[2] or "physical area estimate unavailable"
+    if props["estimated_area_bin"] is None:
+        reasons["estimated_area_bin"] = "estimated_bbox_area_cm2 is unavailable"
     if props["species_mean_bbox_area_cm2"] is None:
         reasons["species_mean_bbox_area_cm2"] = (
             f"category has {props['species_bbox_sample_size']} valid area samples; "
@@ -208,19 +234,28 @@ def null_metadata_reasons(
 
 
 def calculate_area_properties(
-    world_bbox: WorldBoundingBox | None, *, config: SegToCutConfig
-) -> dict[str, float | None]:
-    """Return the configured physical bounding-box area."""
+    world_bbox: WorldBoundingBox | None, *, config: SegToCutConfig,
+    normalized_bbox: tuple[float, float, float, float] | None = None,
+    fov_reference: FovAreaReference | None = None,
+) -> dict[str, float | str | None]:
+    """Keep verified world area separate from an FOV-based estimate."""
 
     if config.bbox_area_source == "georeferenced_csv":
         area = calculate_bbox_area_cm2(world_bbox)
     elif config.bbox_area_source == "camera":
-        # The future camera calculation will consume the authoritative XYZ
-        # camera-location input. Until that contract exists, the value is null.
+        # Camera pose is not used. FOV references can still provide an estimate.
         area = None
     else:
         raise ValueError(f"unsupported bbox area source: {config.bbox_area_source!r}")
-    return {"bbox_area_cm2": area}
+    estimated = area
+    if estimated is None:
+        estimated = estimate_fov_bbox_area_cm2(normalized_bbox, fov_reference)[0]
+    return {
+        "bbox_area_cm2": area,
+        "area_bin": area_bin(area),
+        "estimated_bbox_area_cm2": estimated,
+        "estimated_area_bin": area_bin(estimated),
+    }
 
 
 def _valid_area(value: float | None) -> bool:
@@ -437,6 +472,8 @@ def calculate_cutout_properties(
     image_height: int,
     config: SegToCutConfig,
     world_bbox: WorldBoundingBox | None = None,
+    normalized_bbox: tuple[float, float, float, float] | None = None,
+    fov_reference: FovAreaReference | None = None,
 ) -> dict[str, Any]:
     """Combine mask and appearance fields for a validated, cleaned cutout."""
     properties = calculate_mask_properties(
@@ -447,7 +484,9 @@ def calculate_cutout_properties(
         image_height=image_height,
         config=config,
     )
-    area = calculate_area_properties(world_bbox, config=config)
+    area = calculate_area_properties(
+        world_bbox, config=config, normalized_bbox=normalized_bbox, fov_reference=fov_reference
+    )
     if rgb_crop.shape[:2] != cleaned_mask.shape:
         raise ValueError("RGB crop and cleaned mask dimensions must agree")
     appearance = calculate_crop_properties(rgb_crop, cleaned_mask)
