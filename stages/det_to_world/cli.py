@@ -33,7 +33,7 @@ from . import (
     ERROR_UNKNOWN_SPECIES_CODE,
     ERROR_PRIMARY_SELECTION_FAILED,
 )
-from .primary_inputs import select_with_references
+from .primary_inputs import select_with_references, write_combined_references
 from .remapper import (
     GEO_COLUMNS,
     GridCache,
@@ -133,10 +133,6 @@ def main() -> int:
         f"zone polygon may fall back to its nearest zone before the run fails (default: {DEFAULT_MAX_NEAREST_DISTANCE_M}).",
     )
     parser.add_argument("--bbot-version", type=str, required=True, help="BBot version string.")
-    parser.add_argument(
-        "--reference-root", type=Path, default=None,
-        help="Directory of camera_reference.csv/fov.csv pairs; defaults to the grid batch tree.",
-    )
     parser.add_argument(
         "--species-catalog", type=Path, default=DEFAULT_SPECIES_CATALOG,
         help="Flat species/cultivar reference catalog (see orchestrator/species_catalog.py). "
@@ -306,12 +302,12 @@ def main() -> int:
         return EXIT_FAILURE
 
     try:
-        mapped_rows, reference_paths = select_with_references(
-            mapped_rows, grid_cache, args.reference_root
-        )
+        mapped_rows, combined_references = select_with_references(mapped_rows, grid_cache)
         n_primary = sum(bool(row["is_primary"]) for row in mapped_rows)
         report.set_extra(
-            primary_reference_paths=reference_paths,
+            primary_reference_paths=list(combined_references.source_paths),
+            combined_camera_reference_rows=len(combined_references.camera_rows),
+            combined_fov_rows=len(combined_references.fov_rows),
             n_primary_detections=n_primary,
             n_non_primary_detections=len(mapped_rows) - n_primary,
         )
@@ -420,6 +416,9 @@ def main() -> int:
         output_rows = []
 
     write_georeferenced_csv(output_rows, output_fieldnames, output_csv_path)
+    camera_reference_path, fov_reference_path = write_combined_references(
+        combined_references, artifacts_dir, batch_id
+    )
 
     num_succeeded = 0
     num_failed = 0
@@ -428,6 +427,12 @@ def main() -> int:
     csv_rel = str(output_csv_path.relative_to(artifacts_dir))
     csv_checksum = calculate_sha256(output_csv_path)
     csv_size = output_csv_path.stat().st_size
+    camera_rel = str(camera_reference_path.relative_to(artifacts_dir))
+    camera_checksum = calculate_sha256(camera_reference_path)
+    camera_size = camera_reference_path.stat().st_size
+    fov_rel = str(fov_reference_path.relative_to(artifacts_dir))
+    fov_checksum = calculate_sha256(fov_reference_path)
+    fov_size = fov_reference_path.stat().st_size
 
     # parse results and populate manifest + report
     for result in image_results:
@@ -444,9 +449,21 @@ def main() -> int:
             num_succeeded += 1
             manifest.add_ok_item(
                 image_id=result.image_id,
-                artifacts={"georeferenced_csv_path": csv_rel},
-                checksum={"georeferenced_csv_path": csv_checksum},
-                size_bytes={"georeferenced_csv_path": csv_size},
+                artifacts={
+                    "georeferenced_csv_path": csv_rel,
+                    "camera_reference_csv_path": camera_rel,
+                    "fov_csv_path": fov_rel,
+                },
+                checksum={
+                    "georeferenced_csv_path": csv_checksum,
+                    "camera_reference_csv_path": camera_checksum,
+                    "fov_csv_path": fov_checksum,
+                },
+                size_bytes={
+                    "georeferenced_csv_path": csv_size,
+                    "camera_reference_csv_path": camera_size,
+                    "fov_csv_path": fov_size,
+                },
             )
             continue
 
@@ -498,6 +515,16 @@ def main() -> int:
     report.add_artifact_type(
         artifact_type="georeferenced_csv",
         path=str(output_csv_path),
+        n_files=1,
+    )
+    report.add_artifact_type(
+        artifact_type="camera_reference_csv",
+        path=str(camera_reference_path),
+        n_files=1,
+    )
+    report.add_artifact_type(
+        artifact_type="fov_csv",
+        path=str(fov_reference_path),
         n_files=1,
     )
     report.set_pointers(logs_path=str(log_path))
