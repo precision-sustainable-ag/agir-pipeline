@@ -10,7 +10,7 @@ edge_threshold: 0.05
 cutout_version: "2.0"
 
 bbox_area:
-  source: georeferenced_csv  # Valid world boxes are authoritative; staged primary_references supply estimates when unavailable.
+  source: georeferenced_csv  # Valid world boxes are authoritative; camera geometry estimates missing world areas.
 
 camera:
   manufacturer: SVS-Vistek
@@ -20,7 +20,7 @@ camera:
   image_height_px: 9528
   sensor_manufacturer: Sony
   sensor_model: IMX661LQA
-  sensor_size_mm: 56.73  # Type 3.6 sensor size reported in the camera documentation.
+  sensor_size_mm: 56.73  # Assumed active sensor diagonal in mm.
   chroma: color
   mount: M72x0.75
   interface: 10GigE
