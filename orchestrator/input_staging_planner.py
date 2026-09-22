@@ -8,6 +8,7 @@ state; callers can persist requests through orchestrator.sqlite_db.
 
 from __future__ import annotations
 
+import logging
 import random
 import sqlite3
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ from orchestrator.sqlite_db import (
     get_batches_needing_raw_to_jpg,
     get_batches_needing_seg_to_cut,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -206,6 +209,67 @@ def _plan_primary_reference_request(
         f"No indexed paired primary-selection references for {batch_id}; "
         "configure reference_source_sites/source_root_references_<site> and index the CSVs"
     )
+
+
+def _plan_optional_fov_reference_request(
+    conn: sqlite3.Connection, cfg: Dict, *, batch_id: str, priority: int
+) -> StagingRequest | None:
+    """Stage indexed FOV CSVs for seg_to_cut without making them a gate."""
+    route = cfg["transfer"]["routes"]["seg_to_cut"]
+    transfer = cfg["transfer"]
+    dst_site = route.get("destination_site", "CERES")
+    dst_endpoint = _endpoint_for_site(transfer, dst_site)
+    dst_root = route.get("destination_root") or cfg["paths"]["input_staging_root"]
+    dst_path = _join_posix(dst_root, batch_id, "primary_references")
+    sites = route.get("reference_source_sites", [dst_site, "ATLAS", "CERES", "JUNO"])
+    for site in dict.fromkeys(sites):
+        indexed = conn.execute(
+            """SELECT full_path FROM globus_file_index
+               WHERE site = ? AND batch_id = ? AND is_current = 1
+                 AND entry_type = 'file' AND file_name = 'fov.csv'
+               ORDER BY full_path""",
+            (site, batch_id),
+        ).fetchall()
+        # Developed-images references are already under primary_references/;
+        # ASFM references are nested directly under the batch root.
+        candidates = ([dst_path] if site == dst_site else []) + [
+            _join_posix(route[f"source_root_{site.lower()}"], batch_id, "primary_references")
+            if route.get(f"source_root_{site.lower()}") else None,
+            _join_posix(route[f"source_root_references_{site.lower()}"], batch_id)
+            if route.get(f"source_root_references_{site.lower()}") else None,
+        ]
+        for src_path in dict.fromkeys(path for path in candidates if path):
+            names = set()
+            for record in indexed:
+                try:
+                    relative = PurePosixPath(record[0]).relative_to(src_path)
+                except ValueError:
+                    continue
+                if relative.parts and ".." not in relative.parts:
+                    names.add(str(relative))
+            if not names:
+                continue
+            src_endpoint = _endpoint_for_site(transfer, site)
+            logger.info(
+                "FOV references available for seg_to_cut batch_id=%s site=%s files=%d",
+                batch_id, site, len(names),
+            )
+            return StagingRequest(
+                batch_id=batch_id,
+                stage="seg_to_cut",
+                src_endpoint=src_endpoint,
+                dst_endpoint=dst_endpoint,
+                src_path=src_path,
+                dst_path=dst_path,
+                priority=priority,
+                file_names=tuple(sorted(names)),
+                already_satisfied=src_endpoint == dst_endpoint and src_path == dst_path,
+            )
+    logger.warning(
+        "FOV references unavailable for seg_to_cut batch_id=%s; "
+        "continuing with required inputs only", batch_id,
+    )
+    return None
 
 
 def _rows_for_stage(
@@ -614,6 +678,12 @@ def plan_input_staging(
                         conn, cfg, batch_id=batch_id, priority=spec.default_priority
                     )
                 )
+            elif stage == "seg_to_cut":
+                fov_request = _plan_optional_fov_reference_request(
+                    conn, cfg, batch_id=batch_id, priority=spec.default_priority
+                )
+                if fov_request is not None:
+                    requests.append(fov_request)
         return requests
 
     paths = cfg["paths"]
