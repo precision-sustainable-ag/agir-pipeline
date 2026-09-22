@@ -397,12 +397,16 @@ def main() -> int:
 
     timing_summary = {
         "decode_seconds": _summarize([r.decode_seconds for r in results if r.decode_seconds]),
-        "inference_seconds": _summarize([r.inference_seconds for r in results if r.inference_seconds]),
+        "inference_seconds": _summarize(
+            [r.inference_seconds for r in results if r.inference_seconds]
+        ),
         "write_seconds": _summarize([r.write_seconds for r in results if r.write_seconds]),
         "forward_calls_total": sum(r.n_forward_calls for r in results),
     }
     if is_cuda:
-        timing_summary["peak_gpu_memory_mb"] = torch.cuda.max_memory_allocated(args.device) / (1024 * 1024)
+        timing_summary["peak_gpu_memory_mb"] = torch.cuda.max_memory_allocated(args.device) / (
+            1024 * 1024
+        )
 
     logger.info(
         "Timing | decode mean=%.3fs p90=%.3fs | inference mean=%.3fs p90=%.3fs | "

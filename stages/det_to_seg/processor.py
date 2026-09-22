@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 import cv2
+import numpy as np
 import yaml
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
@@ -54,6 +57,24 @@ class SegmentationResult:
     inference_seconds: float = 0.0
     write_seconds: float = 0.0
     n_forward_calls: int = 0
+
+
+@dataclass
+class _PreparedImage:
+    """CPU-only prep output for one image: either a finished result (mask
+    already exists, or decode/parse failed) or a decoded image ready for
+    GPU inference. Produced by Processor._prepare, which never touches the
+    model/GPU, so it's safe to run on a background thread."""
+
+    image_id: str
+    mask_path: Path
+    early_result: SegmentationResult | None = None
+    im_rgb: np.ndarray | None = None
+    detections: list[DetectionBox] | None = None
+    n_fallback_detections: int = 0
+    decode_seconds: float = 0.0
+    height: int = 0
+    width: int = 0
 
 
 _REQUIRED_CONFIG_KEYS = [
@@ -205,17 +226,21 @@ class Processor:
         except Exception as e:
             raise RuntimeError(f"{ERROR_MODEL_LOAD_FAILED}: {e}") from e
 
-    def process_image(self, txt_path: Path, jpg_path: Path, output_dir: Path) -> SegmentationResult:
-        txt_path = Path(txt_path)
-        jpg_path = Path(jpg_path)
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
+    def _prepare(self, txt_path: Path, jpg_path: Path, output_dir: Path) -> _PreparedImage:
+        """CPU-only: idempotent skip check, JPEG decode, detection parsing.
+        Never touches the model or GPU -- safe to call from a background
+        thread while the main thread runs GPU inference for another image."""
         image_id = txt_path.stem
         mask_path = output_dir / f"{image_id}.png"
 
         if mask_path.exists():
-            return SegmentationResult(image_id=image_id, status=ITEM_OK, mask_path=mask_path)
+            return _PreparedImage(
+                image_id=image_id,
+                mask_path=mask_path,
+                early_result=SegmentationResult(
+                    image_id=image_id, status=ITEM_OK, mask_path=mask_path
+                ),
+            )
 
         decode_start = time.perf_counter()
         try:
@@ -225,12 +250,16 @@ class Processor:
             im_rgb = cv2.cvtColor(im_bgr, cv2.COLOR_BGR2RGB)
             height, width = im_rgb.shape[:2]
         except Exception as e:
-            return SegmentationResult(
+            return _PreparedImage(
                 image_id=image_id,
-                status=ITEM_FAILED,
-                error_code=ERROR_IMAGE_READ_FAILED,
-                error_type=type(e).__name__,
-                error_message=str(e),
+                mask_path=mask_path,
+                early_result=SegmentationResult(
+                    image_id=image_id,
+                    status=ITEM_FAILED,
+                    error_code=ERROR_IMAGE_READ_FAILED,
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                ),
             )
         decode_seconds = time.perf_counter() - decode_start
 
@@ -247,35 +276,56 @@ class Processor:
             else:
                 n_fallback_detections = len(detections)
         except Exception as e:
-            return SegmentationResult(
+            return _PreparedImage(
                 image_id=image_id,
-                status=ITEM_FAILED,
-                error_code=ERROR_DET_READ_FAILED,
-                error_type=type(e).__name__,
-                error_message=str(e),
-                decode_seconds=decode_seconds,
+                mask_path=mask_path,
+                early_result=SegmentationResult(
+                    image_id=image_id,
+                    status=ITEM_FAILED,
+                    error_code=ERROR_DET_READ_FAILED,
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                    decode_seconds=decode_seconds,
+                ),
             )
+
+        return _PreparedImage(
+            image_id=image_id,
+            mask_path=mask_path,
+            im_rgb=im_rgb,
+            detections=detections,
+            n_fallback_detections=n_fallback_detections,
+            decode_seconds=decode_seconds,
+            height=height,
+            width=width,
+        )
+
+    def _infer_and_write(self, prepared: _PreparedImage) -> SegmentationResult:
+        """GPU + disk write. Must run on the thread that owns the model
+        (the main thread), unlike _prepare."""
+        if prepared.early_result is not None:
+            return prepared.early_result
 
         reset_forward_call_count()
         inference_start = time.perf_counter()
         try:
             class_mask = composite_bbox_masks(
                 model=self.model,
-                image_rgb=im_rgb,
-                detections=detections,
+                image_rgb=prepared.im_rgb,
+                detections=prepared.detections,
                 config=self.config,
                 device=self.device,
             )
         except Exception as e:
             return SegmentationResult(
-                image_id=image_id,
+                image_id=prepared.image_id,
                 status=ITEM_FAILED,
-                n_detections=len(detections),
-                n_fallback_detections=n_fallback_detections,
+                n_detections=len(prepared.detections),
+                n_fallback_detections=prepared.n_fallback_detections,
                 error_code=ERROR_INFERENCE_FAILED,
                 error_type=type(e).__name__,
                 error_message=str(e),
-                decode_seconds=decode_seconds,
+                decode_seconds=prepared.decode_seconds,
                 inference_seconds=time.perf_counter() - inference_start,
                 n_forward_calls=get_forward_call_count(),
             )
@@ -284,33 +334,45 @@ class Processor:
 
         write_start = time.perf_counter()
         try:
-            write_mask_png(class_mask, mask_path, expected_shape=(height, width))
+            write_mask_png(
+                class_mask,
+                prepared.mask_path,
+                expected_shape=(prepared.height, prepared.width),
+            )
         except Exception as e:
             return SegmentationResult(
-                image_id=image_id,
+                image_id=prepared.image_id,
                 status=ITEM_FAILED,
-                n_detections=len(detections),
-                n_fallback_detections=n_fallback_detections,
+                n_detections=len(prepared.detections),
+                n_fallback_detections=prepared.n_fallback_detections,
                 error_code=ERROR_EXPORT_FAILED,
                 error_type=type(e).__name__,
                 error_message=str(e),
-                decode_seconds=decode_seconds,
+                decode_seconds=prepared.decode_seconds,
                 inference_seconds=inference_seconds,
                 n_forward_calls=n_forward_calls,
             )
         write_seconds = time.perf_counter() - write_start
 
         return SegmentationResult(
-            image_id=image_id,
+            image_id=prepared.image_id,
             status=ITEM_OK,
-            mask_path=mask_path,
-            n_detections=len(detections),
-            n_fallback_detections=n_fallback_detections,
-            decode_seconds=decode_seconds,
+            mask_path=prepared.mask_path,
+            n_detections=len(prepared.detections),
+            n_fallback_detections=prepared.n_fallback_detections,
+            decode_seconds=prepared.decode_seconds,
             inference_seconds=inference_seconds,
             write_seconds=write_seconds,
             n_forward_calls=n_forward_calls,
         )
+
+    def process_image(self, txt_path: Path, jpg_path: Path, output_dir: Path) -> SegmentationResult:
+        txt_path = Path(txt_path)
+        jpg_path = Path(jpg_path)
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        prepared = self._prepare(txt_path, jpg_path, output_dir)
+        return self._infer_and_write(prepared)
 
     def process_batch(
         self,
@@ -325,43 +387,99 @@ class Processor:
         total = len(pairs)
 
         logger.info(
-            "Execution plan | device=%s | mode=sequential | workers=1 | model_copies=1",
+            "Execution plan | device=%s | mode=sequential+prefetch | workers=1 | model_copies=1",
             self.device,
         )
-        with logging_redirect_tqdm():
-            progress = tqdm(pairs, total=total, desc="det_to_seg", unit="img")
-            for idx, (txt_path, jpg_path) in enumerate(progress, start=1):
-                image_id = txt_path.stem
-                progress.set_postfix_str(image_id)
-                logger.info("[%d/%d] Processing image %s", idx, total, image_id)
+        if total == 0:
+            return results
 
-                result = self.process_image(txt_path, jpg_path, output_dir)
-                results.append(result)
+        # A single background thread prepares (decodes JPG, parses
+        # detections for) the next image while the main thread runs GPU
+        # inference + disk write for the current one. The thread only ever
+        # calls _prepare, which never touches the model/CUDA, so this can't
+        # hit the fork+CUDA problems that ruled out process-level
+        # parallelism here (see _prepare/_infer_and_write docstrings). A
+        # 1-deep queue is enough to overlap decode with GPU work; it isn't a
+        # general worker pool.
+        stop_event = threading.Event()
+        prepared_queue: queue.Queue[_PreparedImage] = queue.Queue(maxsize=1)
 
-                if result.status == ITEM_OK:
-                    logger.info(
-                        "[%d/%d] Image %s OK -> %s (detections=%d, fallback=%d, "
-                        "decode=%.3fs, inference=%.3fs, forward_calls=%d, write=%.3fs)",
-                        idx,
-                        total,
-                        image_id,
-                        result.mask_path,
-                        result.n_detections,
-                        result.n_fallback_detections,
-                        result.decode_seconds,
-                        result.inference_seconds,
-                        result.n_forward_calls,
-                        result.write_seconds,
+        def _producer() -> None:
+            for txt_path, jpg_path in pairs:
+                if stop_event.is_set():
+                    return
+                try:
+                    prepared = self._prepare(txt_path, jpg_path, output_dir)
+                except Exception as e:
+                    image_id = txt_path.stem
+                    prepared = _PreparedImage(
+                        image_id=image_id,
+                        mask_path=output_dir / f"{image_id}.png",
+                        early_result=SegmentationResult(
+                            image_id=image_id,
+                            status=ITEM_FAILED,
+                            error_code=ERROR_IMAGE_READ_FAILED,
+                            error_type=type(e).__name__,
+                            error_message=f"Unexpected error during prepare: {e}",
+                        ),
                     )
-                else:
-                    logger.error(
-                        "[%d/%d] Image %s FAILED [%s]: %s",
-                        idx,
-                        total,
-                        image_id,
-                        result.error_code,
-                        result.error_message,
-                    )
-                    if fail_stop:
-                        return results
+                # Poll instead of blocking indefinitely on put() so a
+                # fail_stop return on the consumer side is noticed quickly
+                # instead of leaving this thread blocked forever on a queue
+                # nothing will drain again.
+                while not stop_event.is_set():
+                    try:
+                        prepared_queue.put(prepared, timeout=0.5)
+                        break
+                    except queue.Full:
+                        continue
+
+        loader = threading.Thread(target=_producer, name="det_to_seg-prefetch", daemon=True)
+        loader.start()
+
+        try:
+            with (
+                logging_redirect_tqdm(),
+                tqdm(total=total, desc="det_to_seg", unit="img") as progress,
+            ):
+                for idx in range(1, total + 1):
+                    prepared = prepared_queue.get()
+                    progress.set_postfix_str(prepared.image_id)
+                    progress.update(1)
+                    logger.info("[%d/%d] Processing image %s", idx, total, prepared.image_id)
+
+                    result = self._infer_and_write(prepared)
+                    results.append(result)
+
+                    if result.status == ITEM_OK:
+                        logger.info(
+                            "[%d/%d] Image %s OK -> %s (detections=%d, fallback=%d, "
+                            "decode=%.3fs, inference=%.3fs, forward_calls=%d, write=%.3fs)",
+                            idx,
+                            total,
+                            prepared.image_id,
+                            result.mask_path,
+                            result.n_detections,
+                            result.n_fallback_detections,
+                            result.decode_seconds,
+                            result.inference_seconds,
+                            result.n_forward_calls,
+                            result.write_seconds,
+                        )
+                    else:
+                        logger.error(
+                            "[%d/%d] Image %s FAILED [%s]: %s",
+                            idx,
+                            total,
+                            prepared.image_id,
+                            result.error_code,
+                            result.error_message,
+                        )
+                        if fail_stop:
+                            return results
+        finally:
+            stop_event.set()
+            loader.join(timeout=30)
+            if loader.is_alive():
+                logger.warning("det_to_seg prefetch thread did not exit within 30s")
         return results
