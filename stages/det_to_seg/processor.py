@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -27,7 +28,13 @@ from . import (
     ERROR_INFERENCE_FAILED,
     ERROR_MODEL_LOAD_FAILED,
 )
-from .segmentor import build_seg_model, composite_bbox_masks, write_mask_png
+from .segmentor import (
+    build_seg_model,
+    composite_bbox_masks,
+    get_forward_call_count,
+    reset_forward_call_count,
+    write_mask_png,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +50,10 @@ class SegmentationResult:
     error_type: str | None = None
     error_message: str | None = None
     retryable: bool = False
+    decode_seconds: float = 0.0
+    inference_seconds: float = 0.0
+    write_seconds: float = 0.0
+    n_forward_calls: int = 0
 
 
 _REQUIRED_CONFIG_KEYS = [
@@ -206,6 +217,7 @@ class Processor:
         if mask_path.exists():
             return SegmentationResult(image_id=image_id, status=ITEM_OK, mask_path=mask_path)
 
+        decode_start = time.perf_counter()
         try:
             im_bgr = cv2.imread(str(jpg_path))
             if im_bgr is None:
@@ -220,6 +232,7 @@ class Processor:
                 error_type=type(e).__name__,
                 error_message=str(e),
             )
+        decode_seconds = time.perf_counter() - decode_start
 
         try:
             detections = parse_yolo_detections(txt_path, width=width, height=height)
@@ -240,8 +253,11 @@ class Processor:
                 error_code=ERROR_DET_READ_FAILED,
                 error_type=type(e).__name__,
                 error_message=str(e),
+                decode_seconds=decode_seconds,
             )
 
+        reset_forward_call_count()
+        inference_start = time.perf_counter()
         try:
             class_mask = composite_bbox_masks(
                 model=self.model,
@@ -259,8 +275,14 @@ class Processor:
                 error_code=ERROR_INFERENCE_FAILED,
                 error_type=type(e).__name__,
                 error_message=str(e),
+                decode_seconds=decode_seconds,
+                inference_seconds=time.perf_counter() - inference_start,
+                n_forward_calls=get_forward_call_count(),
             )
+        inference_seconds = time.perf_counter() - inference_start
+        n_forward_calls = get_forward_call_count()
 
+        write_start = time.perf_counter()
         try:
             write_mask_png(class_mask, mask_path, expected_shape=(height, width))
         except Exception as e:
@@ -272,7 +294,11 @@ class Processor:
                 error_code=ERROR_EXPORT_FAILED,
                 error_type=type(e).__name__,
                 error_message=str(e),
+                decode_seconds=decode_seconds,
+                inference_seconds=inference_seconds,
+                n_forward_calls=n_forward_calls,
             )
+        write_seconds = time.perf_counter() - write_start
 
         return SegmentationResult(
             image_id=image_id,
@@ -280,6 +306,10 @@ class Processor:
             mask_path=mask_path,
             n_detections=len(detections),
             n_fallback_detections=n_fallback_detections,
+            decode_seconds=decode_seconds,
+            inference_seconds=inference_seconds,
+            write_seconds=write_seconds,
+            n_forward_calls=n_forward_calls,
         )
 
     def process_batch(
@@ -310,13 +340,18 @@ class Processor:
 
                 if result.status == ITEM_OK:
                     logger.info(
-                        "[%d/%d] Image %s OK -> %s (detections=%d, fallback=%d)",
+                        "[%d/%d] Image %s OK -> %s (detections=%d, fallback=%d, "
+                        "decode=%.3fs, inference=%.3fs, forward_calls=%d, write=%.3fs)",
                         idx,
                         total,
                         image_id,
                         result.mask_path,
                         result.n_detections,
                         result.n_fallback_detections,
+                        result.decode_seconds,
+                        result.inference_seconds,
+                        result.n_forward_calls,
+                        result.write_seconds,
                     )
                 else:
                     logger.error(
