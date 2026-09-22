@@ -87,7 +87,7 @@ class TestDetParsing:
     def test_parse_yolo_detections(self, fake_txt):
         boxes = parse_yolo_detections(fake_txt, width=100, height=50)
         assert len(boxes) == 1
-        x1, y1, x2, y2 = boxes[0]
+        x1, y1, x2, y2 = boxes[0].xyxy
         assert 0 <= x1 < x2 <= 100
         assert 0 <= y1 < y2 <= 50
 
@@ -109,7 +109,7 @@ class TestProcessor:
             result = proc.process_image(fake_txt, fake_jpg, out_dir)
 
         assert result.status == ITEM_OK
-        assert result.mask_path.name == "img001_mask.png"
+        assert result.mask_path.name == "img001.png"
         assert result.n_detections == 1
         mock_write.assert_called_once()
 
@@ -170,7 +170,7 @@ class TestProcessor:
         proc = _make_processor(config_file)
         out_dir = tmp_path / "out"
         out_dir.mkdir()
-        existing = out_dir / "img001_mask.png"
+        existing = out_dir / "img001.png"
         existing.write_bytes(b"already there")
 
         with patch("stages.det_to_seg.processor.composite_bbox_masks") as mock_compose:

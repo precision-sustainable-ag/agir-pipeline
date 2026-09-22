@@ -22,6 +22,21 @@ DEFAULT_BATCH_SIZE = 16
 TILE_TRIGGER_SIDE = 1024
 TILE_TRIGGER_AREA = 1024 * 1024
 
+# Counts calls to _predict_probabilities, the single chokepoint every
+# inference path (single-crop, batched-crop, tiled) funnels through. Used to
+# measure real GPU forward-call counts for perf baselining; not read by any
+# inference logic itself.
+_forward_call_count = 0
+
+
+def reset_forward_call_count() -> None:
+    global _forward_call_count
+    _forward_call_count = 0
+
+
+def get_forward_call_count() -> int:
+    return _forward_call_count
+
 
 # ---------------------------------------------------------------------------
 # Weight loading (mirrors infer_bbox.py)
@@ -89,6 +104,8 @@ def _predict_probabilities(
     tensor: torch.Tensor,
     device: str,
 ) -> torch.Tensor:
+    global _forward_call_count
+    _forward_call_count += 1
     with torch.inference_mode():
         if str(device).startswith("cuda"):
             with torch.amp.autocast(device_type="cuda"):
