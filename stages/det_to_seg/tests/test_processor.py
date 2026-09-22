@@ -1,5 +1,7 @@
 """Tests for det_to_seg processor with model inference mocked."""
 
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -180,6 +182,27 @@ class TestProcessor:
         assert result.mask_path == existing
         mock_compose.assert_not_called()
 
+    # _prepare is what runs on the prefetch background thread; the skip
+    # check must happen there, before any decode, or prefetching would
+    # regress today's "skip already-done images without reading the JPG"
+    # behavior.
+    def test_prepare_skips_decode_when_mask_already_exists(
+        self, config_file, fake_jpg, fake_txt, tmp_path
+    ):
+        proc = _make_processor(config_file)
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        existing = out_dir / "img001.png"
+        existing.write_bytes(b"already there")
+
+        with patch("stages.det_to_seg.processor.cv2.imread") as mock_imread:
+            prepared = proc._prepare(fake_txt, fake_jpg, out_dir)
+
+        mock_imread.assert_not_called()
+        assert prepared.early_result is not None
+        assert prepared.early_result.status == ITEM_OK
+        assert prepared.early_result.mask_path == existing
+
     # test instance where model fails to load
     def test_model_load_failure_wrapped(self, config_file):
         with patch("stages.det_to_seg.processor._load_model_from_config", side_effect=RuntimeError("bad ckpt")):
@@ -199,9 +222,13 @@ class TestBatch:
             error_type="RuntimeError",
             error_message="no image",
         )
-        ok = SegmentationResult(image_id="b", status=ITEM_OK, mask_path=tmp_path / "b_mask.png")
+        ok = SegmentationResult(image_id="b", status=ITEM_OK, mask_path=tmp_path / "b.png")
 
-        with patch.object(proc, "process_image", side_effect=[fail, ok]):
+        # process_batch dispatches through _prepare (background thread) and
+        # _infer_and_write (main thread), not process_image directly -- patch
+        # _infer_and_write so this test controls the outcome without needing
+        # real image/detection files on disk.
+        with patch.object(proc, "_infer_and_write", side_effect=[fail, ok]):
             pairs = [(tmp_path / "a.txt", tmp_path / "a.jpg"), (tmp_path / "b.txt", tmp_path / "b.jpg")]
             results = proc.process_batch(pairs, tmp_path / "out", fail_stop=True)
 
@@ -219,12 +246,60 @@ class TestBatch:
             error_type="RuntimeError",
             error_message="no image",
         )
-        ok = SegmentationResult(image_id="b", status=ITEM_OK, mask_path=tmp_path / "b_mask.png")
+        ok = SegmentationResult(image_id="b", status=ITEM_OK, mask_path=tmp_path / "b.png")
 
-        with patch.object(proc, "process_image", side_effect=[fail, ok]):
+        with patch.object(proc, "_infer_and_write", side_effect=[fail, ok]):
             pairs = [(tmp_path / "a.txt", tmp_path / "a.jpg"), (tmp_path / "b.txt", tmp_path / "b.jpg")]
             results = proc.process_batch(pairs, tmp_path / "out", fail_stop=False)
 
         assert len(results) == 2
         assert results[0].status == ITEM_FAILED
         assert results[1].status == ITEM_OK
+
+    # fail_stop must not leave the prefetch thread blocked forever trying to
+    # hand off work nothing will ever consume again, and must not burn time
+    # preparing pairs process_batch is about to discard.
+    def test_fail_stop_stops_prefetch_thread_promptly(
+        self, config_file, fake_jpg, fake_txt, tmp_path
+    ):
+        proc = _make_processor(config_file)
+        out_dir = tmp_path / "out"
+
+        fail = SegmentationResult(
+            image_id="x",
+            status=ITEM_FAILED,
+            error_code=ERROR_IMAGE_READ_FAILED,
+            error_type="RuntimeError",
+            error_message="boom",
+        )
+        pairs = [(fake_txt, fake_jpg) for _ in range(20)]
+
+        with patch.object(proc, "_infer_and_write", return_value=fail):
+            start = time.perf_counter()
+            results = proc.process_batch(pairs, out_dir, fail_stop=True)
+            elapsed = time.perf_counter() - start
+
+        assert len(results) == 1
+        assert results[0].status == ITEM_FAILED
+        assert elapsed < 5, "fail_stop should return after the first pair, not prepare all 20"
+        assert not any(t.name == "det_to_seg-prefetch" for t in threading.enumerate())
+
+    # a real (not mocked) decode failure happening on the background prepare
+    # thread must still come back as a normal failed SegmentationResult, not
+    # hang process_batch or crash the thread silently.
+    def test_process_batch_surfaces_prepare_failures_from_prefetch_thread(
+        self, config_file, tmp_path
+    ):
+        proc = _make_processor(config_file)
+        out_dir = tmp_path / "out"
+
+        missing_jpg = tmp_path / "missing.jpg"
+        txt = tmp_path / "img001.txt"
+        txt.write_text("0 0.5 0.5 0.4 0.5 0.9\n")
+
+        results = proc.process_batch([(txt, missing_jpg)], out_dir, fail_stop=True)
+
+        assert len(results) == 1
+        assert results[0].status == ITEM_FAILED
+        assert results[0].error_code == ERROR_IMAGE_READ_FAILED
+        assert not any(t.name == "det_to_seg-prefetch" for t in threading.enumerate())
