@@ -37,6 +37,8 @@ from .primary_inputs import select_with_references, write_combined_references
 from .remapper import (
     GEO_COLUMNS,
     GridCache,
+    NO_DETECTIONS_ASSIGNMENT_METHOD,
+    is_no_detection_row,
     load_detection_rows,
     remap_rows,
     resolve_detection_source,
@@ -109,6 +111,28 @@ def _to_output_rows(df: pd.DataFrame, fieldnames: list[str]) -> list[dict[str, A
     reindexed = df.reindex(columns=fieldnames)
     reindexed = reindexed.where(reindexed.notna(), "")
     return reindexed.to_dict("records")
+
+
+def _append_no_detection_rows(
+    output_rows: list[dict[str, Any]],
+    fieldnames: list[str],
+    input_rows: list[dict[str, str]],
+) -> None:
+    """Add one identifiable, otherwise blank output row for each empty TXT file."""
+    seen: set[str] = set()
+    for input_row in input_rows:
+        if not is_no_detection_row(input_row):
+            continue
+        image_id = str(input_row["image_id"])
+        if image_id in seen:
+            continue
+        seen.add(image_id)
+        placeholder = dict.fromkeys(fieldnames, "")
+        placeholder["image_id"] = image_id
+        # Downstream readers use this sentinel to distinguish a deliberate
+        # zero-detection row from a malformed detection row.
+        placeholder["assignment_method"] = NO_DETECTIONS_ASSIGNMENT_METHOD
+        output_rows.append(placeholder)
 
 
 def main() -> int:
@@ -415,6 +439,7 @@ def main() -> int:
         output_fieldnames = _build_output_fieldnames(input_fieldnames, SPECIES_COLUMNS)
         output_rows = []
 
+    _append_no_detection_rows(output_rows, output_fieldnames, rows)
     write_georeferenced_csv(output_rows, output_fieldnames, output_csv_path)
     camera_reference_path, fov_reference_path = write_combined_references(
         combined_references, artifacts_dir, batch_id

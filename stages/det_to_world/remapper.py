@@ -47,6 +47,8 @@ REQUIRED_INPUT_COLUMNS = [
 # Full column set of jpg_to_det's batch CSV; the .txt fallback compiles to this shape.
 DETECTION_COLUMNS = REQUIRED_INPUT_COLUMNS + ["conf", "class", "classname"]
 
+NO_DETECTIONS_ASSIGNMENT_METHOD = "no_detections"
+
 GEO_COLUMNS = [
     "world_tl_x",
     "world_tl_y",
@@ -339,11 +341,38 @@ def load_detection_rows(source: Path) -> tuple[list[str], list[dict[str, str]]]:
             raise ValueError(f"Detection CSV missing required columns: {', '.join(missing)}")
         rows = list(reader)
 
+    # The batch CSV has no row for images with zero detections. Preserve those
+    # image identities from their empty sibling TXT files without recompiling
+    # non-empty TXT files or overriding the CSV as the detection source.
+    _append_empty_txt_placeholders(rows, source.parent)
+
     return fieldnames, rows
 
 
 def _clamp01(value: float) -> float:
     return min(max(value, 0.0), 1.0)
+
+
+def _placeholder_row(image_id: str) -> dict[str, str]:
+    return {
+        column: image_id if column == "image_id" else ""
+        for column in DETECTION_COLUMNS
+    }
+
+
+def _append_empty_txt_placeholders(
+    rows: list[dict[str, str]], txt_dir: Path
+) -> None:
+    """Append image-only rows for empty TXT files not represented in *rows*."""
+    existing_image_ids = {row.get("image_id", "") for row in rows}
+    for txt_path in sorted(txt_dir.glob("*.txt")):
+        if txt_path.stem in existing_image_ids:
+            continue
+        with open(txt_path) as txt_file:
+            if any(line.strip() for line in txt_file):
+                continue
+        rows.append(_placeholder_row(txt_path.stem))
+        existing_image_ids.add(txt_path.stem)
 
 
 def _load_detection_txt_dir(txt_dir: Path) -> tuple[list[str], list[dict[str, str]]]:
@@ -352,9 +381,10 @@ def _load_detection_txt_dir(txt_dir: Path) -> tuple[list[str], list[dict[str, st
     Older batches predate the batch CSV and only have these files, one line per box:
     ``cls xc yc w h [conf]``, normalized. ``conf`` is blank for the 5-column form and
     ``classname`` is always blank (the files don't record class names). Empty files
-    (images with no detections) contribute no rows, same as the CSV. Corners are
-    clamped to [0, 1]: the files store center/size at 6 decimals, so an edge-touching
-    box can round to a corner ~5e-7 outside the image, which primary selection rejects.
+    contribute an image-only placeholder row so the image remains represented in the
+    georeferenced CSV. Corners are clamped to [0, 1]: the files store center/size at
+    6 decimals, so an edge-touching box can round to a corner ~5e-7 outside the image,
+    which primary selection rejects.
     """
     txt_paths = [p for p in sorted(txt_dir.iterdir()) if p.suffix.lower() == ".txt"]
     if not txt_paths:
@@ -364,6 +394,9 @@ def _load_detection_txt_dir(txt_dir: Path) -> tuple[list[str], list[dict[str, st
     for txt_path in txt_paths:
         with open(txt_path) as f:
             boxes = [(n, line.split()) for n, line in enumerate(f, start=1) if line.strip()]
+        if not boxes:
+            rows.append(_placeholder_row(txt_path.stem))
+            continue
         for bounding_box_id, (line_number, parts) in enumerate(boxes):
             if len(parts) not in (5, 6):
                 raise ValueError(
@@ -389,6 +422,15 @@ def _load_detection_txt_dir(txt_dir: Path) -> tuple[list[str], list[dict[str, st
             )
 
     return list(DETECTION_COLUMNS), rows
+
+
+def is_no_detection_row(row: dict[str, Any]) -> bool:
+    """Return whether *row* is the image-only placeholder for zero detections."""
+    return bool(str(row.get("image_id") or "").strip()) and all(
+        not str(row.get(column) or "").strip()
+        for column in REQUIRED_INPUT_COLUMNS
+        if column != "image_id"
+    )
 
 
 def write_georeferenced_csv(
@@ -426,6 +468,17 @@ def remap_rows(
         rows_by_image.setdefault(row["image_id"], []).append(row)
 
     for image_id, image_rows in rows_by_image.items():
+        if len(image_rows) == 1 and is_no_detection_row(image_rows[0]):
+            results.append(
+                ImageRemapResult(
+                    image_id=image_id,
+                    status=ITEM_OK,
+                    n_input_rows=0,
+                    n_output_rows=0,
+                )
+            )
+            continue
+
         try:
             # check cache
             grid = cache.get(image_id)

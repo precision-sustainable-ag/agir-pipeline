@@ -31,7 +31,7 @@ The georeferenced CSV contains all input detection columns plus the following ap
 | `crs` | Coordinate reference system of the world coordinates (e.g. `EPSG:32617`) |
 | `is_primary` | Whether this is the selected detection among overlapping views |
 | `species_id` | Species code assigned to the detection |
-| `assignment_method` | How the species was assigned: `spatial_join`, `nearest_polygon`, or `monoculture_config` |
+| `assignment_method` | How the species was assigned: `spatial_join`, `nearest_polygon`, or `monoculture_config`; `no_detections` identifies an image-only placeholder row |
 
 The other two artifacts combine every paired `camera_reference.csv` and
 `fov.csv` found in the batch's ASFM tree. They use a flat batch-level schema
@@ -158,9 +158,9 @@ Entry point. Parses arguments, validates inputs, coordinates the full run consis
 Picks what to read from `--i`. A file is returned as given. A directory resolves to its `<batch_id>.csv` when that exists (CSV preferred), otherwise to the directory itself.
 
 ### `load_detection_rows(source)`
-Given a CSV, validates that all required columns are present (`image_id`, `bounding_box_id`, `xmin`, `ymin`, `xmax`, `ymax`) and returns the fieldnames and rows.
+Given a CSV, validates that all required columns are present (`image_id`, `bounding_box_id`, `xmin`, `ymin`, `xmax`, `ymax`) and returns the fieldnames and rows. Empty sibling `.txt` files missing from the batch CSV are added as image-only placeholders.
 
-Given a directory, compiles every `*.txt` file into rows with the same columns as jpg_to_det's batch CSV (`image_id`, `bounding_box_id`, `xmin`, `ymin`, `xmax`, `ymax`, `conf`, `class`, `classname`), so nothing downstream depends on which input was used. Each line is YOLO `cls xc yc w h [conf]` (normalized): `image_id` is the file stem, `bounding_box_id` the line index within the file, corners are `xc ± w/2`, `yc ± h/2` clamped to [0, 1] (the files store center/size at 6 decimals, so edge-touching boxes can round ~5e-7 outside the image), and `conf` is blank for the older 5-column form. `classname` is always blank because the files don't record class names, and the `class` values of older batches are that model's own ids, not jpg_to_det's `0 = plant`, `1 = color_checker`. Empty files (images with no detections) contribute no rows, same as the CSV. The run report records which was used as `detection_source` (`csv` or `txt_dir`).
+Given a directory, compiles every `*.txt` file into rows with the same columns as jpg_to_det's batch CSV (`image_id`, `bounding_box_id`, `xmin`, `ymin`, `xmax`, `ymax`, `conf`, `class`, `classname`), so nothing downstream depends on which input was used. Each line is YOLO `cls xc yc w h [conf]` (normalized): `image_id` is the file stem, `bounding_box_id` the line index within the file, corners are `xc ± w/2`, `yc ± h/2` clamped to [0, 1] (the files store center/size at 6 decimals, so edge-touching boxes can round ~5e-7 outside the image), and `conf` is blank for the older 5-column form. `classname` is always blank because the files don't record class names, and the `class` values of older batches are that model's own ids, not jpg_to_det's `0 = plant`, `1 = color_checker`. Each empty file contributes one output row containing its `image_id` and `assignment_method=no_detections`; every detection and georeferencing field is blank. The run report records which was used as `detection_source` (`csv` or `txt_dir`).
 
 ### `remap_rows(rows, grid_dir)`
 Groups rows by `image_id` and processes each image. Loads the grid as `GridCache` object, calls `map_bbox` (below) for each detection, and stores each image's results and warnings.
@@ -204,7 +204,7 @@ Writes the mapped rows to a CSV, preserving original input columns and appending
 | Test | Description |
 |---|---|
 | `test_load_detection_rows_validates_required_columns` | Confirms that a CSV missing required columns raises a `ValueError` with a descriptive message |
-| `test_load_detection_rows_compiles_txt_dir_like_batch_csv` | Checks a directory of YOLO `.txt` files compiles to CSV-shaped rows (corners, per-image box ids, 5- vs 6-column `conf`, empty files skipped) |
+| `test_load_detection_rows_compiles_txt_dir_like_batch_csv` | Checks a directory of YOLO `.txt` files compiles to CSV-shaped rows (corners, per-image box ids, 5- vs 6-column `conf`, empty-file placeholders) |
 | `test_load_detection_rows_txt_dir_clamps_rounding_at_image_edges` | Confirms corners that round just outside [0, 1] from 6-decimal center/size are clamped |
 | `test_load_detection_rows_txt_dir_reports_bad_lines` | Confirms a malformed `.txt` line raises a `ValueError` naming the file and line |
 | `test_load_detection_rows_dir_without_csv_or_txt_raises` | Confirms a directory with neither a batch CSV nor `.txt` files is an error |
