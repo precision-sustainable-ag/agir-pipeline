@@ -15,6 +15,8 @@ Species assignment was originally a separate `assign_species` stage; it was fold
       logs/
       artifacts/
         <batch_id>_georeferenced.csv
+        <batch_id>_camera_reference.csv
+        <batch_id>_fov.csv
 ```
 
 The georeferenced CSV contains all input detection columns plus the following appended columns:
@@ -27,8 +29,16 @@ The georeferenced CSV contains all input detection columns plus the following ap
 | `world_br_x` / `world_br_y` | Bottom-right corner in world coordinates |
 | `world_centroid_x` / `world_centroid_y` | Midpoint of TL and BR corners in world coordinates |
 | `crs` | Coordinate reference system of the world coordinates (e.g. `EPSG:32617`) |
+| `is_primary` | Whether this is the selected detection among overlapping views |
 | `species_id` | Species code assigned to the detection |
 | `assignment_method` | How the species was assigned: `spatial_join`, `nearest_polygon`, or `monoculture_config` |
+
+The other two artifacts combine every paired `camera_reference.csv` and
+`fov.csv` found in the batch's ASFM tree. They use a flat batch-level schema
+and retain the source row order. When an image label occurs in more than one
+reconstruction, the first complete camera/FOV occurrence in sorted source-path
+order is retained. Camera and FOV rows are selected together from the same
+source directory.
 
 Zone shapefiles carry at most one of two optional human-readable attributes (never both, in practice):
 
@@ -128,9 +138,13 @@ cli.main()
   |           |
   |           `-- _construct_global_coords()   assemble output row with all corners + centroid
   |
+  |-- combine_reference_pairs()    merge paired camera/FOV tables from the ASFM batch tree
+  |-- select_primary_rows()        mark the preferred detection among overlapping views
+  |
   |     `-- assign_spatial()       spatial-join the successfully remapped rows against --shp
   |
-  `-- write_georeferenced_csv()    write the (species-assigned) rows to the output CSV
+  |-- write_georeferenced_csv()    write the species-assigned rows
+  `-- write_combined_references()  write the two flat batch reference CSVs
 ```
 
 
@@ -229,28 +243,32 @@ Globus endpoint (`atlas_endpoint`/`ceres_endpoint`/`juno_endpoint`) is used
 as the destination — see `_endpoint_for_site()` in
 `orchestrator/input_staging_planner.py`.
 
-### Three independent input pieces
+### Three staged input pieces
 
 Unlike `raw_to_jpg`/`jpg_to_det` (one fixed JUNO → compute route),
-`det_to_world` needs three pieces that are each resolved independently
-against whichever site already has them:
+`det_to_world` needs images, detections, and one ASFM bundle. Images and
+detections are resolved independently. The ASFM bundle keeps each
+reconstruction's NPZ grids, `camera_reference.csv`, and `fov.csv` together:
 
 | Piece | Source root(s) | Destination layout |
 |---|---|---|
 | Images | `source_root_atlas`/`source_root_ceres`/`source_root_juno` | `<input_staging_root>/<batch_id>/images/` |
 | Detections | same roots as images | `<input_staging_root>/<batch_id>/detections/<batch_id>.csv` |
-| Pixel-to-world grids | `source_root_grids_ceres`/`source_root_grids_juno` | `<grid_root>/<batch_id>/` (nested per-time-range sub-batch dirs preserved) |
+| ASFM grid and reference bundle | `source_root_grids_ceres`/`source_root_grids_juno` | `<grid_root>/<batch_id>/` (nested reconstruction paths preserved) |
 
 For each piece, the resolver checks (in order): the destination cluster
 itself, then the other non-destination compute cluster (ATLAS/CERES,
 whichever isn't the destination), then JUNO LTS — see
 `_resolve_fallback_source()` / `_INTERMEDIATE_FALLBACK_SITES` in
 `orchestrator/input_staging_planner.py`. Images/detections are planned by
-`_plan_multi_site_requests()`; grids are planned separately by
+`_plan_multi_site_requests()`; the ASFM bundle is planned separately by
 `_plan_grid_request()`, since they live under a different `data_state`
 (`semifield-asfm`) and are read directly off shared storage at job time
 (`stage.cli_args`' `--g` argument points at `paths.grid_root` directly, not
-`$TMPDIR`) rather than being copied into job scratch.
+`$TMPDIR`) rather than being copied into job scratch. A site satisfies this
+piece only when it has at least one NPZ grid and at least one directory with a
+paired `camera_reference.csv` and `fov.csv`; there is no separate
+`primary_references/` transfer.
 
 ### Image sampling
 
@@ -279,6 +297,9 @@ entire batch of images it has no use for.
   answers "does this batch's data exist somewhere" — it requires current
   images, detections, and grids (anywhere, any site) and excludes batches
   that already have georeferenced output. It does **not** check locality.
+- The staging planner additionally requires paired camera/FOV references at
+  the same source site as the grids. Missing references produce a clear
+  planning error before submission.
 - `scripts/job/submit.py`'s `filter_det_to_world_staged_ready()` is the
   locality/submission gate: it requires all three pieces'
   `staged_inputs` rows to show `status='completed'` for a batch
