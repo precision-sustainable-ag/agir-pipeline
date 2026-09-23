@@ -19,6 +19,7 @@ from orchestrator.sqlite_db import (
     get_batches_needing_det_to_world,
     get_batches_needing_jpg_to_det,
     get_batches_needing_raw_to_jpg,
+    get_batches_needing_seg_to_cut,
 )
 
 
@@ -98,6 +99,12 @@ STAGE_INPUT_SPECS: Dict[str, StageInputSpec] = {
         subdirs=("images", "detections", "georeferenced"),
         require_all_staged_inputs=True,
     ),
+    "seg_to_cut": StageInputSpec(
+        stage_name="seg_to_cut",
+        readiness_view="v_batches_needing_seg_to_cut",
+        subdirs=("images", "segmentations", "georeferenced"),
+        require_all_staged_inputs=True,
+    ),
 }
 
 # data_state/parent_dir matched when checking whether a site already has a
@@ -107,6 +114,7 @@ _DEVELOPED_IMAGES_DATA_STATE = "semifield-developed-images"
 _DEVELOPED_IMAGES_PARENT_DIRS = {
     "images": "parent_dir = 'images'",
     "detections": "parent_dir IN ('detections', 'plant-detections', 'metadata')",
+    "segmentations": "parent_dir = 'segmentations' AND file_ext = 'png'",
     "georeferenced": (
         "parent_dir = 'georeferenced' AND file_ext = 'csv' "
         "AND file_name = batch_id || '_georeferenced.csv'"
@@ -135,9 +143,12 @@ def _rows_for_stage(
     site: Optional[str],
     limit: int,
     batch_ids: Optional[Sequence[str]] = None,
+    rerun: bool = False,
 ) -> List[Dict]:
     if stage not in STAGE_INPUT_SPECS:
         raise ValueError(f"Unsupported stage for input staging: {stage!r}")
+    if rerun and stage != "det_to_world":
+        raise ValueError(f"rerun is only supported for det_to_world, not {stage!r}")
     spec = STAGE_INPUT_SPECS[stage]
 
     if spec.readiness_view == "v_batches_needing_raw_to_jpg":
@@ -153,12 +164,18 @@ def _rows_for_stage(
         # _plan_multi_site_requests) checks destination/CERES/JUNO itself,
         # so scoping readiness to one --site would wrongly exclude batches
         # whose data landed somewhere else.
-        return get_batches_needing_det_to_world(conn, site=None, limit=limit, batch_ids=batch_ids)
+        return get_batches_needing_det_to_world(
+            conn, site=None, limit=limit, batch_ids=batch_ids, rerun=rerun
+        )
     if spec.readiness_view == "v_batches_needing_det_to_seg":
         # det_to_seg resolves images, detections, and georeferenced output
         # independently across destination/CERES/JUNO, so readiness must not
         # be restricted to whichever site the operator passed on the CLI.
         return get_batches_needing_det_to_seg(conn, site=None, limit=limit, batch_ids=batch_ids)
+    if spec.readiness_view == "v_batches_needing_seg_to_cut":
+        # Each required input is resolved independently to CERES, so the
+        # inventory-level readiness query must remain site-agnostic.
+        return get_batches_needing_seg_to_cut(conn, limit=limit, batch_ids=batch_ids)
     raise ValueError(f"Unsupported readiness view: {spec.readiness_view!r}")
 
 
@@ -229,6 +246,34 @@ def _site_has_grids(conn: sqlite3.Connection, batch_id: str, site: str) -> bool:
         conn, batch_id, site,
         data_state=_GRIDS_DATA_STATE,
         parent_dir_sql=_GRIDS_PARENT_DIR_SQL,
+    )
+
+
+def _site_has_grid_references(conn: sqlite3.Connection, batch_id: str, site: str) -> bool:
+    """Return whether an indexed ASFM batch has a paired camera/FOV directory."""
+    rows = conn.execute(
+        """SELECT full_path, file_name
+           FROM globus_file_index
+           WHERE data_state = ?
+             AND entry_type = 'file'
+             AND is_current = 1
+             AND site = ?
+             AND batch_id = ?
+             AND file_name IN ('camera_reference.csv', 'fov.csv')""",
+        (_GRIDS_DATA_STATE, site, batch_id),
+    ).fetchall()
+    by_parent: dict[str, set[str]] = {}
+    for row in rows:
+        by_parent.setdefault(str(PurePosixPath(row["full_path"]).parent), set()).add(
+            row["file_name"]
+        )
+    return any(names == {"camera_reference.csv", "fov.csv"} for names in by_parent.values())
+
+
+def _site_has_grid_bundle(conn: sqlite3.Connection, batch_id: str, site: str) -> bool:
+    """A usable det_to_world ASFM input has grids and primary-selection references."""
+    return _site_has_grids(conn, batch_id, site) and _site_has_grid_references(
+        conn, batch_id, site
     )
 
 
@@ -314,16 +359,16 @@ def _plan_grid_request(
     conn: sqlite3.Connection, cfg: Dict, *, batch_id: str, priority: int
 ) -> StagingRequest:
     """
-    Plan a request to fetch ASFM pixel-to-world NPZ grids for one batch.
+    Plan a request to fetch one ASFM grid-and-reference bundle for a batch.
 
-    Grids live under a different data_state/root (semifield-asfm) than
-    images/detections and are transferred whole-batch-directory (they're
-    nested under per-time-range sub-batch dirs — see
-    stages/det_to_world/remapper.py's GridCache — rather than one flat
-    subdir), so this is planned separately from _plan_multi_site_requests.
+    Grids and their paired camera/FOV reference files live under a different
+    data_state/root (semifield-asfm) than images/detections. The whole batch
+    directory is transferred because both grids and references can be nested
+    under per-time-range reconstruction directories. This is planned
+    separately from _plan_multi_site_requests.
 
-    Always returns a request, even when grids are already resident at the
-    destination — see StagingRequest.already_satisfied.
+    Always returns a request, even when the complete bundle is already
+    resident at the destination — see StagingRequest.already_satisfied.
     """
     paths = cfg["paths"]
     transfer = cfg["transfer"]
@@ -336,7 +381,7 @@ def _plan_grid_request(
     dst_endpoint = _endpoint_for_site(transfer, dst_site)
     dst_path = _join_posix(dst_root, batch_id)
 
-    if _site_has_grids(conn, batch_id, dst_site):
+    if _site_has_grid_bundle(conn, batch_id, dst_site):
         return StagingRequest(
             batch_id=batch_id,
             stage="det_to_world",
@@ -354,8 +399,13 @@ def _plan_grid_request(
         dst_site=dst_site,
         root_key_prefix="source_root_grids",
         juno_root_key="source_root_grids_juno",
-        site_has_data=lambda site: _site_has_grids(conn, batch_id, site),
+        site_has_data=lambda site: _site_has_grid_bundle(conn, batch_id, site),
     )
+
+    if not _site_has_grid_bundle(conn, batch_id, _src_site):
+        raise ValueError(
+            f"No indexed ASFM grid bundle with paired camera/FOV references for {batch_id}"
+        )
 
     return StagingRequest(
         batch_id=batch_id,
@@ -466,9 +516,14 @@ def plan_input_staging(
     site: Optional[str] = "JUNO",
     limit: int = 200,
     batch_ids: Optional[Sequence[str]] = None,
+    rerun: bool = False,
 ) -> List[StagingRequest]:
     """
     Build input staging requests from SQLite readiness rows and config.
+
+    ``rerun`` (det_to_world only, requires ``batch_ids``) plans the named
+    batches even if they already have georeferenced output or a successful
+    run, which the readiness view would otherwise exclude.
 
     The config contract matches the existing submit config:
     ``paths.input_staging_root`` is the 90daydata destination root and
@@ -476,9 +531,10 @@ def plan_input_staging(
     ``transfer.routes.<stage>.input_subdir`` is optionally appended to both
     paths for single-route stages (e.g. raw_to_jpg). Use ``source_subdir``
     when the source subdirectory differs from the destination. Stages with
-    ``StageInputSpec.subdirs`` set (jpg_to_det, det_to_world, det_to_seg) instead resolve
-    each subdir independently via ``_plan_multi_site_requests`` — see there
-    for that config shape (``destination_site``, ``source_root_<site>``).
+    ``StageInputSpec.subdirs`` set (jpg_to_det, det_to_world, det_to_seg,
+    seg_to_cut) instead resolve each subdir independently via
+    ``_plan_multi_site_requests`` — see there for that config shape
+    (``destination_site``, ``source_root_<site>``).
     """
     if stage not in STAGE_INPUT_SPECS:
         raise ValueError(f"Unsupported stage for input staging: {stage!r}")
@@ -489,7 +545,9 @@ def plan_input_staging(
     # When targeting specific batches, don't let the default/passed limit
     # truncate the readiness query before the batch_id filter is applied.
     effective_limit = max(limit, len(wanted)) if wanted else limit
-    rows = _rows_for_stage(conn, stage, site=site, limit=effective_limit, batch_ids=batch_ids)
+    rows = _rows_for_stage(
+        conn, stage, site=site, limit=effective_limit, batch_ids=batch_ids, rerun=rerun
+    )
     wanted_rows = [row for row in rows if not wanted or row["batch_id"] in wanted]
 
     if spec.subdirs:

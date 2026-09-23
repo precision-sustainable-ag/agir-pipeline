@@ -8,7 +8,7 @@ paths:
   db_read_mode: direct  # direct | snapshot
   # Used only when db_read_mode is "snapshot".
   db_temp_dir: /90daydata/dash_agir/tmp/db
-  uv_env: /project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/activate
+  uv_env: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/.venv/bin/activate
   locks_root: /90daydata/dash_agir/locks
 
   agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline

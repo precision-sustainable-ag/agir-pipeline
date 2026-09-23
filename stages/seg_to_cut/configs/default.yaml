@@ -1,0 +1,32 @@
+image_extensions:
+  - .jpg
+  - .jpeg
+mask_extension: .png
+
+# Increase to widen the border band and remove more intruder components.
+# Decrease to narrow the border band and keep more components.
+border_band_fraction: 0.10
+edge_threshold: 0.05
+cutout_version: "2.0"
+
+bbox_area:
+  source: georeferenced_csv  # Valid world boxes are authoritative; camera geometry estimates missing world areas.
+
+camera:
+  manufacturer: SVS-Vistek
+  model: shr661CXGE
+  megapixels: 127.6
+  image_width_px: 13392
+  image_height_px: 9528
+  sensor_manufacturer: Sony
+  sensor_model: IMX661LQA
+  sensor_size_mm: 56.73  # Assumed active sensor diagonal in mm.
+  chroma: color
+  mount: M72x0.75
+  interface: 10GigE
+  lens_model: Linos Inspect XL
+  focal_length_mm: 60
+  lens_height_above_pot_surface_cm: 170
+
+species_bbox_min_sample_size: 5  # Require this many valid areas before calculating a group mean.
+abnormal_bbox_size_threshold: 0.25  # Flag areas that differ from the group mean by more than 25%.

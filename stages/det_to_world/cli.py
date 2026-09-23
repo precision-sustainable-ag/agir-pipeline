@@ -31,11 +31,17 @@ from . import (
     ERROR_SPATIAL_JOIN_FAILED,
     ERROR_ZONE_TOO_FAR,
     ERROR_UNKNOWN_SPECIES_CODE,
+    ERROR_PRIMARY_SELECTION_FAILED,
 )
+from .primary_inputs import select_with_references, write_combined_references
 from .remapper import (
     GEO_COLUMNS,
+    GridCache,
+    NO_DETECTIONS_ASSIGNMENT_METHOD,
+    is_no_detection_row,
     load_detection_rows,
     remap_rows,
+    resolve_detection_source,
     write_georeferenced_csv,
 )
 from .species import (
@@ -85,11 +91,13 @@ EXTRA_COLUMNS = (
 
 
 def _build_output_fieldnames(input_fieldnames: list[str], present_columns) -> list[str]:
-    """Input columns + GEO_COLUMNS + whichever of EXTRA_COLUMNS are actually
+    """Input columns + GEO_COLUMNS + is_primary + whichever EXTRA_COLUMNS are actually
     present in the species-assignment result, preserving that fixed order.
     """
     fieldnames = list(input_fieldnames)
     fieldnames += [column for column in GEO_COLUMNS if column not in fieldnames]
+    if "is_primary" not in fieldnames:
+        fieldnames.append("is_primary")
     fieldnames += [column for column in EXTRA_COLUMNS if column in present_columns and column not in fieldnames]
     return fieldnames
 
@@ -105,18 +113,44 @@ def _to_output_rows(df: pd.DataFrame, fieldnames: list[str]) -> list[dict[str, A
     return reindexed.to_dict("records")
 
 
+def _append_no_detection_rows(
+    output_rows: list[dict[str, Any]],
+    fieldnames: list[str],
+    input_rows: list[dict[str, str]],
+) -> None:
+    """Add one identifiable, otherwise blank output row for each empty TXT file."""
+    seen: set[str] = set()
+    for input_row in input_rows:
+        if not is_no_detection_row(input_row):
+            continue
+        image_id = str(input_row["image_id"])
+        if image_id in seen:
+            continue
+        seen.add(image_id)
+        placeholder = dict.fromkeys(fieldnames, "")
+        placeholder["image_id"] = image_id
+        # Downstream readers use this sentinel to distinguish a deliberate
+        # zero-detection row from a malformed detection row.
+        placeholder["assignment_method"] = NO_DETECTIONS_ASSIGNMENT_METHOD
+        output_rows.append(placeholder)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Remap jpg_to_det detections into world coordinates using ASFM NPZ "
         "grids, then assign species via shapefile zone or monoculture config."
     )
-    parser.add_argument("--i", type=Path, required=True, help="Input detection CSV from jpg_to_det.")
+    parser.add_argument(
+        "--i", type=Path, required=True,
+        help="Detection CSV from jpg_to_det, or a detections directory: its <batch_id>.csv is "
+        "used if present, otherwise the per-image .txt files (older batches without a CSV).",
+    )
     parser.add_argument("--g", type=Path, required=True, help="Directory containing per-image NPZ grids.")
     parser.add_argument("--o", type=Path, required=True, help="Output directory.")
     parser.add_argument("--batch-id", type=str, default=None, help="Batch ID. Auto-inferred from input path if omitted.")
-    parser.add_argument("--skip-remap", action="store_true", help="Skip remapping for monoculture batches.")
-    parser.add_argument("--shp", type=Path, default=None, help="Species zone shapefile. Required unless --skip-remap.")
-    parser.add_argument("--species", type=str, default=None, help="Species code for monoculture batches. Required with --skip-remap.")
+    parser.add_argument("--skip-remap", action="store_true", help="Unsupported: primary selection requires world mapping. Use --species without this flag.")
+    parser.add_argument("--shp", type=Path, default=None, help="Species zone shapefile. Required unless --species is supplied.")
+    parser.add_argument("--species", type=str, default=None, help="Species code for monoculture batches; assigned after mapping and primary selection.")
     parser.add_argument(
         "--max-nearest-distance-m", type=float, default=DEFAULT_MAX_NEAREST_DISTANCE_M,
         help="Max distance (zone shapefile CRS units, meters for UTM) a detection outside every "
@@ -131,22 +165,28 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    if args.skip_remap:
+        logger.error(
+            "Primary selection requires world mapping. Remove --skip-remap; "
+            "use --species to assign monoculture species after mapping."
+        )
+        return EXIT_CONFIG_ERROR
+
     batch_id = args.batch_id or parse_batch_id(str(args.i))
     if not batch_id:
         logger.error("Could not determine batch_id. Pass --batch-id or use a path containing XX_YYYY-MM-DD.")
         return EXIT_CONFIG_ERROR
 
     if not args.i.exists():
-        logger.error("Input detection CSV does not exist: %s", args.i)
+        logger.error("Input detection path does not exist: %s", args.i)
+        if args.i.suffix == ".csv":
+            logger.error("For batches without a CSV, pass the detections directory as --i to use its .txt files.")
         return EXIT_CONFIG_ERROR
-    if not args.skip_remap and not args.g.exists():
+    if not args.g.exists():
         logger.error("Grid directory does not exist: %s", args.g)
         return EXIT_CONFIG_ERROR
-    if args.skip_remap and args.species is None:
-        logger.error("Monoculture batch (--skip-remap) requires --species.")
-        return EXIT_CONFIG_ERROR
-    if not args.skip_remap and (args.shp is None or not args.shp.exists()):
-        logger.error("Spatial-join batch requires --shp pointing to an existing shapefile: %s", args.shp)
+    if args.species is None and (args.shp is None or not args.shp.exists()):
+        logger.error("Species assignment requires --species or an existing --shp: %s", args.shp)
         return EXIT_CONFIG_ERROR
 
     try:
@@ -204,15 +244,20 @@ def main() -> int:
 
     report.set_provenance(
         code_commit=get_git_commit(logger),
-        deps_id="scipy,geopandas,packaging",
+        deps_id="scipy,geopandas,packaging,shapely",
     )
 
+    # a directory input is its own root; a CSV's root is the folder holding it
+    input_root = args.i if args.i.is_dir() else args.i.parent
+
     try:
-        # load csv input
-        input_fieldnames, rows = load_detection_rows(args.i)
+        # load csv input (or per-image .txt files when a directory has no batch csv)
+        det_source = resolve_detection_source(args.i, batch_id)
+        logger.info("Reading detections from %s", det_source)
+        input_fieldnames, rows = load_detection_rows(det_source)
     except Exception as exc:
-        logger.error("Invalid detection CSV: %s", exc)
-        report.set_stage_error(f"Invalid detection CSV: {exc}")
+        logger.error("Invalid detection input: %s", exc)
+        report.set_stage_error(f"Invalid detection input: {exc}")
         report.add_error(
             unit_id="__stage__",
             code=ERROR_CSV_INVALID,
@@ -221,7 +266,7 @@ def main() -> int:
         )
         report.stop(EXIT_CONFIG_ERROR)
         report.set_inputs(
-            input_root=str(args.i.parent),
+            input_root=str(input_root),
             n_units_discovered=0,
         )
         report.set_outputs(
@@ -247,108 +292,17 @@ def main() -> int:
 
 
     report.set_inputs(
-        input_root=str(args.i.parent),
+        input_root=str(input_root),
         n_units_discovered=len(image_ids),
-        inputs_manifest_path=str(args.i),
+        inputs_manifest_path=str(det_source),
     )
 
     output_csv_path = artifacts_dir / f"{batch_id}_georeferenced.csv"
 
-    # monoculture batches: skip remapping, assign the configured species code
-    # directly to the original detection rows.
-    if args.skip_remap:
-        try:
-            species_df = assign_monoculture(pd.DataFrame(rows), args.species)
-        except Exception as exc:
-            logger.error("Monoculture species assignment failed: %s", exc)
-            report.set_stage_error(f"Monoculture species assignment failed: {exc}")
-            report.add_error(
-                unit_id="__stage__",
-                code=ERROR_CSV_INVALID,
-                error_type=type(exc).__name__,
-                message=str(exc),
-            )
-            report.stop(EXIT_FAILURE)
-            report.set_outputs(
-                output_root=str(args.o),
-                run_root=str(run_dir),
-                artifacts_dir=str(artifacts_dir),
-                n_succeeded=0,
-                n_failed=len(image_ids),
-            )
-            report.set_pointers(logs_path=str(log_path))
-            report.write(run_dir / "run_report.json")
-            manifest.write(run_dir / "manifest.json")
-            return EXIT_FAILURE
-
-        if species_catalog is not None:
-            try:
-                species_df = enrich_with_catalog(species_df, species_catalog)
-            except UnknownSpeciesCodeError as exc:
-                logger.error("Species catalog enrichment failed: %s", exc)
-                report.set_stage_error(f"Species catalog enrichment failed: {exc}")
-                report.add_error(
-                    unit_id="__stage__",
-                    code=ERROR_UNKNOWN_SPECIES_CODE,
-                    error_type=type(exc).__name__,
-                    message=str(exc),
-                )
-                report.stop(EXIT_FAILURE)
-                report.set_outputs(
-                    output_root=str(args.o),
-                    run_root=str(run_dir),
-                    artifacts_dir=str(artifacts_dir),
-                    n_succeeded=0,
-                    n_failed=len(image_ids),
-                )
-                report.set_pointers(logs_path=str(log_path))
-                report.write(run_dir / "run_report.json")
-                manifest.write(run_dir / "manifest.json")
-                return EXIT_FAILURE
-
-        output_fieldnames = _build_output_fieldnames(input_fieldnames, species_df.columns)
-        output_rows = _to_output_rows(species_df, output_fieldnames)
-        write_georeferenced_csv(output_rows, output_fieldnames, output_csv_path)
-
-        csv_rel = str(output_csv_path.relative_to(artifacts_dir))
-        csv_checksum = calculate_sha256(output_csv_path)
-        csv_size = output_csv_path.stat().st_size
-
-        for image_id in image_ids:
-            manifest.add_ok_item(
-                image_id=image_id,
-                artifacts={"georeferenced_csv_path": csv_rel},
-                checksum={"georeferenced_csv_path": csv_checksum},
-                size_bytes={"georeferenced_csv_path": csv_size},
-            )
-
-        report.set_skip(True, "monoculture_batch")
-        report.set_extra(
-            assignment_mode="monoculture_config",
-            species_override=args.species,
-            bbot_version=args.bbot_version,
-        )
-        report.stop(EXIT_SUCCESS)
-        report.set_outputs(
-            output_root=str(args.o),
-            run_root=str(run_dir),
-            artifacts_dir=str(artifacts_dir),
-            n_succeeded=len(image_ids),
-            n_failed=0,
-        )
-        report.add_artifact_type(
-            artifact_type="georeferenced_csv",
-            path=str(output_csv_path),
-            n_files=1,
-        )
-        report.set_pointers(logs_path=str(log_path))
-        report.write(run_dir / "run_report.json")
-        manifest.write(run_dir / "manifest.json")
-        return EXIT_SUCCESS
-
     # remap rows and handle errors
+    grid_cache = GridCache(args.g)
     try:
-        mapped_rows, image_results = remap_rows(rows, args.g)
+        mapped_rows, image_results = remap_rows(rows, args.g, cache=grid_cache)
     except Exception as exc:
         logger.error("Batch remapping failed: %s", exc)
         report.set_stage_error(f"Batch remapping failed: {exc}")
@@ -371,19 +325,59 @@ def main() -> int:
         manifest.write(run_dir / "manifest.json")
         return EXIT_FAILURE
 
-    # spatial-join species assignment on whichever rows remapped successfully.
+    try:
+        mapped_rows, combined_references = select_with_references(mapped_rows, grid_cache)
+        n_primary = sum(bool(row["is_primary"]) for row in mapped_rows)
+        report.set_extra(
+            primary_reference_paths=list(combined_references.source_paths),
+            combined_camera_reference_rows=len(combined_references.camera_rows),
+            combined_fov_rows=len(combined_references.fov_rows),
+            n_primary_detections=n_primary,
+            n_non_primary_detections=len(mapped_rows) - n_primary,
+        )
+        logger.info(
+            "Primary selection: %s/%s detections primary",
+            n_primary,
+            len(mapped_rows),
+        )
+    except Exception as exc:
+        logger.error("Primary selection failed: %s", exc)
+        report.set_stage_error(f"Primary selection failed: {exc}")
+        report.add_error(
+            unit_id="__stage__",
+            code=ERROR_PRIMARY_SELECTION_FAILED,
+            error_type=type(exc).__name__,
+            message=str(exc),
+        )
+        report.stop(EXIT_FAILURE)
+        report.set_outputs(
+            output_root=str(args.o),
+            run_root=str(run_dir),
+            artifacts_dir=str(artifacts_dir),
+            n_succeeded=0,
+            n_failed=len(image_ids),
+        )
+        report.set_pointers(logs_path=str(log_path))
+        report.write(run_dir / "run_report.json")
+        manifest.write(run_dir / "manifest.json")
+        return EXIT_FAILURE
+
+    # Assign species on whichever rows remapped successfully.
     # A failure here (bad/missing shapefile, spatial join error) fails the
     # whole run regardless of remap success, since the single shared CSV is
     # unusable without species columns.
     if mapped_rows:
         try:
-            species_df = assign_spatial(
-                pd.DataFrame(mapped_rows), str(args.shp),
-                max_nearest_distance_m=args.max_nearest_distance_m,
-            )
+            if args.species is not None:
+                species_df = assign_monoculture(pd.DataFrame(mapped_rows), args.species)
+            else:
+                species_df = assign_spatial(
+                    pd.DataFrame(mapped_rows), str(args.shp),
+                    max_nearest_distance_m=args.max_nearest_distance_m,
+                )
         except Exception as exc:
-            logger.error("Spatial species assignment failed: %s", exc)
-            report.set_stage_error(f"Spatial species assignment failed: {exc}")
+            logger.error("Species assignment failed: %s", exc)
+            report.set_stage_error(f"Species assignment failed: {exc}")
             if isinstance(exc, ZoneTooFarError):
                 error_code = ERROR_ZONE_TOO_FAR
             elif "shapefile" in str(exc).lower():
@@ -445,7 +439,11 @@ def main() -> int:
         output_fieldnames = _build_output_fieldnames(input_fieldnames, SPECIES_COLUMNS)
         output_rows = []
 
+    _append_no_detection_rows(output_rows, output_fieldnames, rows)
     write_georeferenced_csv(output_rows, output_fieldnames, output_csv_path)
+    camera_reference_path, fov_reference_path = write_combined_references(
+        combined_references, artifacts_dir, batch_id
+    )
 
     num_succeeded = 0
     num_failed = 0
@@ -454,6 +452,12 @@ def main() -> int:
     csv_rel = str(output_csv_path.relative_to(artifacts_dir))
     csv_checksum = calculate_sha256(output_csv_path)
     csv_size = output_csv_path.stat().st_size
+    camera_rel = str(camera_reference_path.relative_to(artifacts_dir))
+    camera_checksum = calculate_sha256(camera_reference_path)
+    camera_size = camera_reference_path.stat().st_size
+    fov_rel = str(fov_reference_path.relative_to(artifacts_dir))
+    fov_checksum = calculate_sha256(fov_reference_path)
+    fov_size = fov_reference_path.stat().st_size
 
     # parse results and populate manifest + report
     for result in image_results:
@@ -470,9 +474,21 @@ def main() -> int:
             num_succeeded += 1
             manifest.add_ok_item(
                 image_id=result.image_id,
-                artifacts={"georeferenced_csv_path": csv_rel},
-                checksum={"georeferenced_csv_path": csv_checksum},
-                size_bytes={"georeferenced_csv_path": csv_size},
+                artifacts={
+                    "georeferenced_csv_path": csv_rel,
+                    "camera_reference_csv_path": camera_rel,
+                    "fov_csv_path": fov_rel,
+                },
+                checksum={
+                    "georeferenced_csv_path": csv_checksum,
+                    "camera_reference_csv_path": camera_checksum,
+                    "fov_csv_path": fov_checksum,
+                },
+                size_bytes={
+                    "georeferenced_csv_path": csv_size,
+                    "camera_reference_csv_path": camera_size,
+                    "fov_csv_path": fov_size,
+                },
             )
             continue
 
@@ -509,7 +525,8 @@ def main() -> int:
         exit_code = EXIT_SUCCESS
 
     report.set_extra(
-        assignment_mode="spatial_join",
+        assignment_mode="monoculture_config" if args.species is not None else "spatial_join",
+        detection_source="txt_dir" if det_source.is_dir() else "csv",
         bbot_version=args.bbot_version,
     )
     report.stop(exit_code)
@@ -523,6 +540,16 @@ def main() -> int:
     report.add_artifact_type(
         artifact_type="georeferenced_csv",
         path=str(output_csv_path),
+        n_files=1,
+    )
+    report.add_artifact_type(
+        artifact_type="camera_reference_csv",
+        path=str(camera_reference_path),
+        n_files=1,
+    )
+    report.add_artifact_type(
+        artifact_type="fov_csv",
+        path=str(fov_reference_path),
         n_files=1,
     )
     report.set_pointers(logs_path=str(log_path))

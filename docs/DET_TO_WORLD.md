@@ -15,6 +15,8 @@ Species assignment was originally a separate `assign_species` stage; it was fold
       logs/
       artifacts/
         <batch_id>_georeferenced.csv
+        <batch_id>_camera_reference.csv
+        <batch_id>_fov.csv
 ```
 
 The georeferenced CSV contains all input detection columns plus the following appended columns:
@@ -27,8 +29,16 @@ The georeferenced CSV contains all input detection columns plus the following ap
 | `world_br_x` / `world_br_y` | Bottom-right corner in world coordinates |
 | `world_centroid_x` / `world_centroid_y` | Midpoint of TL and BR corners in world coordinates |
 | `crs` | Coordinate reference system of the world coordinates (e.g. `EPSG:32617`) |
+| `is_primary` | Whether this is the selected detection among overlapping views |
 | `species_id` | Species code assigned to the detection |
-| `assignment_method` | How the species was assigned: `spatial_join`, `nearest_polygon`, or `monoculture_config` |
+| `assignment_method` | How the species was assigned: `spatial_join`, `nearest_polygon`, or `monoculture_config`; `no_detections` identifies an image-only placeholder row |
+
+The other two artifacts combine every paired `camera_reference.csv` and
+`fov.csv` found in the batch's ASFM tree. They use a flat batch-level schema
+and retain the source row order. When an image label occurs in more than one
+reconstruction, the first complete camera/FOV occurrence in sorted source-path
+order is retained. Camera and FOV rows are selected together from the same
+source directory.
 
 Zone shapefiles carry at most one of two optional human-readable attributes (never both, in practice):
 
@@ -58,7 +68,7 @@ A species-assignment failure (bad/missing shapefile, spatial join error) always 
 
 | Code | Scope | Meaning |
 |---|---|---|
-| `E_CSV_INVALID` | Stage | Input detection CSV is missing required columns or cannot be read |
+| `E_CSV_INVALID` | Stage | Detection input is unusable: CSV missing required columns or unreadable, a malformed line in a `.txt` file, or a directory with neither a batch CSV nor `.txt` files |
 | `E_GRID_NOT_FOUND` | Per-image | No NPZ grid file found for the image |
 | `E_REMAP_FAILED` | Per-image | Unexpected failure while remapping bounding boxes for an image |
 | `E_SHAPEFILE_UNREADABLE` | Stage | Shapefile not found or could not be read |
@@ -94,7 +104,7 @@ python3 -m stages.det_to_world.cli \
 
 | Flag | Description |
 |---|---|
-| `--i` | Input detection CSV with `image_id` and normalized bounding box columns |
+| `--i` | Detection CSV with `image_id` and normalized bounding box columns, **or** a detections directory. For a directory, `<batch_id>.csv` inside it is used if present; otherwise the per-image YOLO `.txt` files are compiled into the same row shape (older batches that predate the batch CSV). A CSV path that doesn't exist is an error — it doesn't fall back to its parent directory |
 | `--g` | Directory containing per-image NPZ pixel-to-world grid files |
 | `--shp` | Species zone shapefile with polygon geometries and species codes. Required unless `--skip-remap` |
 | `--species` | Species code to assign to all detections. Required when `--skip-remap` |
@@ -109,7 +119,8 @@ python3 -m stages.det_to_world.cli \
 ```
 cli.main()
   |
-  |-- load_detection_rows()        read + validate the combined detection CSV (image_id + bbox coords)
+  |-- resolve_detection_source()   directory -> its <batch_id>.csv if present, else the directory
+  |-- load_detection_rows()        read + validate the detection CSV, or compile per-image .txt files into CSV-shaped rows
   |
   |-- [--skip-remap]  assign_monoculture()    assign --species to every loaded row directly
   |
@@ -127,9 +138,13 @@ cli.main()
   |           |
   |           `-- _construct_global_coords()   assemble output row with all corners + centroid
   |
+  |-- combine_reference_pairs()    merge paired camera/FOV tables from the ASFM batch tree
+  |-- select_primary_rows()        mark the preferred detection among overlapping views
+  |
   |     `-- assign_spatial()       spatial-join the successfully remapped rows against --shp
   |
-  `-- write_georeferenced_csv()    write the (species-assigned) rows to the output CSV
+  |-- write_georeferenced_csv()    write the species-assigned rows
+  `-- write_combined_references()  write the two flat batch reference CSVs
 ```
 
 
@@ -139,8 +154,13 @@ cli.main()
 Entry point. Parses arguments, validates inputs, coordinates the full run consisting of loading the CSV, remapping rows, assigning species, writing output, and writing the run report and manifest.
 
 ### Remapper
-### `load_detection_rows(csv_path)`
-Reads the input detection CSV and validates that all required columns are present (`image_id`, `bounding_box_id`, `xmin`, `ymin`, `xmax`, `ymax`). Returns the fieldnames and rows.
+### `resolve_detection_source(path, batch_id)`
+Picks what to read from `--i`. A file is returned as given. A directory resolves to its `<batch_id>.csv` when that exists (CSV preferred), otherwise to the directory itself.
+
+### `load_detection_rows(source)`
+Given a CSV, validates that all required columns are present (`image_id`, `bounding_box_id`, `xmin`, `ymin`, `xmax`, `ymax`) and returns the fieldnames and rows. Empty sibling `.txt` files missing from the batch CSV are added as image-only placeholders.
+
+Given a directory, compiles every `*.txt` file into rows with the same columns as jpg_to_det's batch CSV (`image_id`, `bounding_box_id`, `xmin`, `ymin`, `xmax`, `ymax`, `conf`, `class`, `classname`), so nothing downstream depends on which input was used. Each line is YOLO `cls xc yc w h [conf]` (normalized): `image_id` is the file stem, `bounding_box_id` the line index within the file, corners are `xc ± w/2`, `yc ± h/2` clamped to [0, 1] (the files store center/size at 6 decimals, so edge-touching boxes can round ~5e-7 outside the image), and `conf` is blank for the older 5-column form. `classname` is always blank because the files don't record class names, and the `class` values of older batches are that model's own ids, not jpg_to_det's `0 = plant`, `1 = color_checker`. Each empty file contributes one output row containing its `image_id` and `assignment_method=no_detections`; every detection and georeferencing field is blank. The run report records which was used as `detection_source` (`csv` or `txt_dir`).
 
 ### `remap_rows(rows, grid_dir)`
 Groups rows by `image_id` and processes each image. Loads the grid as `GridCache` object, calls `map_bbox` (below) for each detection, and stores each image's results and warnings.
@@ -184,6 +204,12 @@ Writes the mapped rows to a CSV, preserving original input columns and appending
 | Test | Description |
 |---|---|
 | `test_load_detection_rows_validates_required_columns` | Confirms that a CSV missing required columns raises a `ValueError` with a descriptive message |
+| `test_load_detection_rows_compiles_txt_dir_like_batch_csv` | Checks a directory of YOLO `.txt` files compiles to CSV-shaped rows (corners, per-image box ids, 5- vs 6-column `conf`, empty-file placeholders) |
+| `test_load_detection_rows_txt_dir_clamps_rounding_at_image_edges` | Confirms corners that round just outside [0, 1] from 6-decimal center/size are clamped |
+| `test_load_detection_rows_txt_dir_reports_bad_lines` | Confirms a malformed `.txt` line raises a `ValueError` naming the file and line |
+| `test_load_detection_rows_dir_without_csv_or_txt_raises` | Confirms a directory with neither a batch CSV nor `.txt` files is an error |
+| `test_resolve_detection_source_prefers_batch_csv` | Confirms a directory containing `<batch_id>.csv` resolves to it, and to the directory itself when it doesn't |
+| `test_remap_rows_from_txt_dir_matches_csv_input` | Runs txt-compiled rows through `remap_rows` and checks the world coordinates
 | `test_map_bbox_maps_all_corners` | Verifies that all four corners and the centroid are correctly interpolated for a simple linear grid |
 | `test_remap_rows_handles_warnings_and_missing_grids` | Checks that out-of-bounds corners produce a `W_SURFACE_MISS` warning and that images with no grid file produce an `E_GRID_NOT_FOUND` failure |
 | `test_map_bbox_applies_inward_nudges` | Confirms that a bbox corner falling outside the grid boundary is nudged inward and snapped to the nearest valid grid point |
@@ -217,28 +243,32 @@ Globus endpoint (`atlas_endpoint`/`ceres_endpoint`/`juno_endpoint`) is used
 as the destination — see `_endpoint_for_site()` in
 `orchestrator/input_staging_planner.py`.
 
-### Three independent input pieces
+### Three staged input pieces
 
 Unlike `raw_to_jpg`/`jpg_to_det` (one fixed JUNO → compute route),
-`det_to_world` needs three pieces that are each resolved independently
-against whichever site already has them:
+`det_to_world` needs images, detections, and one ASFM bundle. Images and
+detections are resolved independently. The ASFM bundle keeps each
+reconstruction's NPZ grids, `camera_reference.csv`, and `fov.csv` together:
 
 | Piece | Source root(s) | Destination layout |
 |---|---|---|
 | Images | `source_root_atlas`/`source_root_ceres`/`source_root_juno` | `<input_staging_root>/<batch_id>/images/` |
 | Detections | same roots as images | `<input_staging_root>/<batch_id>/detections/<batch_id>.csv` |
-| Pixel-to-world grids | `source_root_grids_ceres`/`source_root_grids_juno` | `<grid_root>/<batch_id>/` (nested per-time-range sub-batch dirs preserved) |
+| ASFM grid and reference bundle | `source_root_grids_ceres`/`source_root_grids_juno` | `<grid_root>/<batch_id>/` (nested reconstruction paths preserved) |
 
 For each piece, the resolver checks (in order): the destination cluster
 itself, then the other non-destination compute cluster (ATLAS/CERES,
 whichever isn't the destination), then JUNO LTS — see
 `_resolve_fallback_source()` / `_INTERMEDIATE_FALLBACK_SITES` in
 `orchestrator/input_staging_planner.py`. Images/detections are planned by
-`_plan_multi_site_requests()`; grids are planned separately by
+`_plan_multi_site_requests()`; the ASFM bundle is planned separately by
 `_plan_grid_request()`, since they live under a different `data_state`
 (`semifield-asfm`) and are read directly off shared storage at job time
 (`stage.cli_args`' `--g` argument points at `paths.grid_root` directly, not
-`$TMPDIR`) rather than being copied into job scratch.
+`$TMPDIR`) rather than being copied into job scratch. A site satisfies this
+piece only when it has at least one NPZ grid and at least one directory with a
+paired `camera_reference.csv` and `fov.csv`; there is no separate
+`primary_references/` transfer.
 
 ### Image sampling
 
@@ -267,6 +297,9 @@ entire batch of images it has no use for.
   answers "does this batch's data exist somewhere" — it requires current
   images, detections, and grids (anywhere, any site) and excludes batches
   that already have georeferenced output. It does **not** check locality.
+- The staging planner additionally requires paired camera/FOV references at
+  the same source site as the grids. Missing references produce a clear
+  planning error before submission.
 - `scripts/job/submit.py`'s `filter_det_to_world_staged_ready()` is the
   locality/submission gate: it requires all three pieces'
   `staged_inputs` rows to show `status='completed'` for a batch

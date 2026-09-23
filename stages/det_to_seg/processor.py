@@ -14,6 +14,11 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 
 from stages import ITEM_FAILED, ITEM_OK
 from stages.common import resolve_path
+from stages.common.class_ids import (
+    ClassIdIndex,
+    DetectionBox,
+    resolve_detection_class_ids,
+)
 
 from . import (
     ERROR_DET_READ_FAILED,
@@ -21,11 +26,6 @@ from . import (
     ERROR_IMAGE_READ_FAILED,
     ERROR_INFERENCE_FAILED,
     ERROR_MODEL_LOAD_FAILED,
-)
-from .class_ids import (
-    ClassIdIndex,
-    DetectionBox,
-    resolve_detection_class_ids,
 )
 from .segmentor import build_seg_model, composite_bbox_masks, write_mask_png
 

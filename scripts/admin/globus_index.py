@@ -28,6 +28,7 @@ import argparse
 import json
 import logging
 import re
+import shlex
 import sqlite3
 import subprocess
 from collections import deque
@@ -97,6 +98,12 @@ class EndpointConfig:
     namespace: str
     storage_root: str
     data_state: str
+    # Optional SSH escape hatch for directories Globus's interactive `ls` can't
+    # list (ExternalError.DirListingFailed.SizeLimit, >100k entries). When set,
+    # ls_worker() falls back to `ssh ssh_fallback_user@ssh_fallback_host find ...`
+    # for just the directories that hit that specific error.
+    ssh_fallback_host: Optional[str] = None
+    ssh_fallback_user: Optional[str] = None
 
 
 @dataclass
@@ -693,6 +700,12 @@ def vacuum_db(conn: sqlite3.Connection, logger: logging.Logger) -> None:
 # ============================================================
 
 
+class GlobusSizeLimitError(RuntimeError):
+    """Raised when Globus refuses an interactive `ls` because the directory
+    has more than its ~100k-entry listing cap (ExternalError.DirListingFailed.SizeLimit).
+    The directory can still be crawled; only the interactive listing is capped."""
+
+
 def globus_ls(endpoint: str, path: str) -> List[dict]:
     target = f"{endpoint}:{path}"
     proc = subprocess.run(
@@ -701,15 +714,59 @@ def globus_ls(endpoint: str, path: str) -> List[dict]:
         text=True,
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"globus ls failed for {target}: {proc.stderr[:500]}")
+        detail = proc.stderr[:500] or proc.stdout[:500]
+        if "DirListingFailed.SizeLimit" in detail:
+            raise GlobusSizeLimitError(f"globus ls hit directory size limit for {target}: {detail}")
+        raise RuntimeError(f"globus ls failed for {target}: {detail}")
 
     obj = json.loads(proc.stdout)
     return obj.get("DATA") or []
 
 
-def ls_worker(args: Tuple[str, str]) -> Tuple[str, List[dict]]:
-    endpoint, path = args
-    return path, globus_ls(endpoint, path)
+def ssh_ls_fallback(host: str, user: Optional[str], path: str, timeout: int = 300) -> List[dict]:
+    """List one directory level over SSH via `find`, for directories too large
+    for Globus's interactive `ls` (see GlobusSizeLimitError). Returns entries in
+    the same shape as globus_ls() so callers don't need to know which path was used.
+    """
+    target = f"{user}@{host}" if user else host
+    remote_dir = shlex.quote(path.rstrip("/") + "/")
+    remote_cmd = f"find {remote_dir} -mindepth 1 -maxdepth 1 -printf '%f\\t%y\\t%s\\t%T@\\t%m\\n'"
+    proc = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", target, remote_cmd],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"ssh find fallback failed for {target}:{path}: {proc.stderr[:500]}")
+
+    entries: List[dict] = []
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        name, ftype, size_str, mtime_epoch_str, mode = line.split("\t")
+        entry_type = "dir" if ftype == "d" else "file"
+        mtime_dt = epoch_to_datetime(int(float(mtime_epoch_str)))
+        entries.append(
+            {
+                "name": name,
+                "type": entry_type,
+                "size": int(size_str) if entry_type == "file" else None,
+                "last_modified": mtime_dt.strftime("%Y-%m-%d %H:%M:%S+00:00") if mtime_dt else None,
+                "permissions": mode,
+            }
+        )
+    return entries
+
+
+def ls_worker(args: Tuple[str, str, Optional[str], Optional[str]]) -> Tuple[str, List[dict]]:
+    endpoint, path, ssh_fallback_host, ssh_fallback_user = args
+    try:
+        return path, globus_ls(endpoint, path)
+    except GlobusSizeLimitError:
+        if not ssh_fallback_host:
+            raise
+        return path, ssh_ls_fallback(ssh_fallback_host, ssh_fallback_user, path)
 
 
 def check_globus_path_exists(endpoint: str, path: str, logger: logging.Logger) -> bool:
@@ -751,7 +808,10 @@ def crawl_tree_mp(
             while dir_queue or futures:
                 while dir_queue and len(futures) < max_inflight:
                     current = dir_queue.popleft()
-                    future = executor.submit(ls_worker, (cfg.endpoint, current))
+                    future = executor.submit(
+                        ls_worker,
+                        (cfg.endpoint, current, cfg.ssh_fallback_host, cfg.ssh_fallback_user),
+                    )
                     futures[future] = current
                     logger.info("Submitted ls for directory: %s", current)
 
@@ -909,8 +969,13 @@ def read_endpoint_configs(path: str, logger: logging.Logger) -> List[EndpointCon
             namespace: 90daydata
             storage_root: /90daydata/dash_agir
             data_state: semifield-upload
+            ssh_fallback:
+              host: nal-dtn.scinet.usda.gov
+              user: matthew.kutugata
 
     `enabled` defaults to true when omitted.
+    `ssh_fallback` is optional; set it for endpoints/roots with directories
+    too large for Globus's interactive `ls` (see GlobusSizeLimitError).
     """
     data = _load_yaml(path)
     endpoint_rows = data.get("endpoints", [])
@@ -934,6 +999,10 @@ def read_endpoint_configs(path: str, logger: logging.Logger) -> List[EndpointCon
         if missing:
             raise ValueError(f"Endpoint entry #{idx} missing keys {sorted(missing)} in {path}")
 
+        ssh_fallback = row.get("ssh_fallback") or {}
+        if not isinstance(ssh_fallback, dict):
+            raise ValueError(f"Endpoint entry #{idx} 'ssh_fallback' must be a mapping in {path}")
+
         cfg = EndpointConfig(
             endpoint=str(row["endpoint"]).strip(),
             site=str(row["site"]).strip(),
@@ -941,6 +1010,8 @@ def read_endpoint_configs(path: str, logger: logging.Logger) -> List[EndpointCon
             namespace=str(row["namespace"]).strip(),
             storage_root=str(row["storage_root"]).strip().rstrip("/"),
             data_state=str(row["data_state"]).strip(),
+            ssh_fallback_host=str(ssh_fallback["host"]).strip() if ssh_fallback.get("host") else None,
+            ssh_fallback_user=str(ssh_fallback["user"]).strip() if ssh_fallback.get("user") else None,
         )
         validate_endpoint_config(cfg)
         configs.append(cfg)
@@ -1055,6 +1126,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--namespace", help="Logical namespace tag.")
     parser.add_argument("--storage-root", help="Logical storage root path.")
     parser.add_argument("--state", choices=sorted(VALID_DATA_STATES), help="Logical data-state label for this tree.")
+    parser.add_argument(
+        "--ssh-fallback-host",
+        help="SSH host to fall back to for directories too large for Globus's interactive ls "
+        "(ExternalError.DirListingFailed.SizeLimit).",
+    )
+    parser.add_argument("--ssh-fallback-user", help="SSH user for --ssh-fallback-host.")
 
     # Multi-scope mode.
     parser.add_argument(
@@ -1117,6 +1194,8 @@ def configs_from_args(args: argparse.Namespace, logger: logging.Logger) -> List[
         namespace=args.namespace,
         storage_root=args.storage_root.rstrip("/"),
         data_state=args.state,
+        ssh_fallback_host=args.ssh_fallback_host,
+        ssh_fallback_user=args.ssh_fallback_user,
     )
     validate_endpoint_config(cfg)
     return [cfg]

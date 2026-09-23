@@ -21,10 +21,10 @@
 #      planned separately by that module's _plan_grid_request(), since
 #      GridCache reads them directly off local disk rather than through
 #      $TMPDIR (see stage.cli_args --g below, and grid_root's comment).
-#   2. Submission readiness is gated on live inventory state (images,
-#      detections, AND grids all currently indexed at destination_site),
-#      not on a single "staged_inputs row completed" flag — see
-#      filter_locally_ready_det_to_world() in scripts/job/submit.py.
+#      Legacy primary selection adds paired camera/FOV CSVs as a fourth
+#      input, staged separately with their reconstruction directories intact.
+#   2. Submission readiness requires completed staged_inputs records for
+#      every configured input destination, including legacy references.
 # ============================================================
 
 # ── Stage identity ────────────────────────────────────────────────────────────
@@ -38,7 +38,7 @@
 # skips that lookup entirely.
 #
 # Monoculture seasons (no shapefile) need a *separate* config using
-# `--skip-remap --species <code>` instead of `--shp $SHAPEFILE_PATH` —
+# `--species <code>` instead of `--shp $SHAPEFILE_PATH` —
 # cli_args is one static string applied to every batch submitted with this
 # file, so one config can't serve both modes at once. Which config to use
 # for a given batch is still a manual/operator choice (see
@@ -49,7 +49,7 @@ stage:
   cli_module: stages.det_to_world.cli
   cli_args: >-
     --i $TMPDIR/input/detections/$BATCH_ID.csv
-    --g /90daydata/dash_agir/semifield-asfm/$BATCH_ID
+    --g "$GRID_ROOT/$BATCH_ID"
     --o $TMPDIR/output
     --batch-id $BATCH_ID
     --shp $SHAPEFILE_PATH
@@ -97,12 +97,10 @@ render:
 paths:
   agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
 
-  uv_env: /project/dash_agir/matthew.kutugata/software/uv/venvs/agir_pipeline/bin/activate
+  uv_env: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/.venv/bin/activate
 
-  # Not read by stages/det_to_world/cli.py (it has no --c flag) — present
-  # only because orchestrator/submit_jobs.py always reads paths.stage_config
-  # to populate $CONFIG_PATH in the generated job script. Points at this
-  # file for traceability.
+  # Used by the orchestrator for job traceability; the stage receives paths
+  # through its CLI arguments.
   stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/configs/config.det_to_world.yaml
 
   # Both images/ and detections/ subdirs for a batch are staged here (see
@@ -125,12 +123,15 @@ paths:
   # from here at job time rather than staged into $TMPDIR.
   grid_root: /90daydata/dash_agir/semifield-asfm
 
-  # Per-run artifacts (run_report.json, manifest.json, georeferenced CSV)
+  # Per-run artifacts (run_report.json, manifest.json, georeferenced CSV,
+  # combined camera reference CSV, and combined FOV CSV)
   # saved here after the run completes.
   output_stage_runs: /90daydata/dash_agir/tmp/stage_runs/det_to_world
 
-  # Root under which final promoted georeferenced CSVs are written as:
+  # Root under which the three batch-level CSVs are written as:
   #   <final_dest_root>/<batch_id>/georeferenced/<batch_id>_georeferenced.csv
+  #   <final_dest_root>/<batch_id>/georeferenced/<batch_id>_camera_reference.csv
+  #   <final_dest_root>/<batch_id>/georeferenced/<batch_id>_fov.csv
   final_dest_root: /90daydata/dash_agir/semifield-developed-images
 
   # SLURM job stdout/stderr logs.
@@ -205,9 +206,9 @@ transfer:
       # stays a small whole-directory transfer.
       image_sample_size: 100
 
-      # ASFM pixel-to-world NPZ grids (semifield-asfm) — separate root,
-      # transferred as a whole <batch_id> directory since grids are nested
-      # under per-time-range sub-batch folders (see paths.grid_root below).
+      # ASFM pixel-to-world grids and paired camera/FOV references. The whole
+      # <batch_id> tree is transferred so det_to_world can combine references
+      # across time-range reconstructions into flat batch-level output CSVs.
       source_root_grids_ceres: /90daydata/dash_agir/semifield-asfm
       source_root_grids_juno: /LTS/project/dash_agir/semifield-asfm
 

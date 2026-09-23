@@ -20,6 +20,14 @@ STAGE="det_to_world"
 SITE="CERES"
 POLL_SECONDS=60
 
+# Set DET_TO_WORLD_RERUN=1 when submitting (sbatch exports the caller's
+# environment) to re-stage batches that already have a successful run or
+# georeferenced output, which stage_inputs.py otherwise skips.
+RERUN_ARGS=()
+if [[ "${DET_TO_WORLD_RERUN:-0}" == "1" ]]; then
+    RERUN_ARGS+=(--rerun)
+fi
+
 GROUP_FILE="${1:?Usage: sbatch run_det_to_world_group.sbatch <group-file>}"
 
 GROUP_START_EPOCH=$(date +%s)
@@ -136,7 +144,8 @@ while IFS= read -r batch_id || [[ -n "${batch_id}" ]]; do
         --stage "${STAGE}" \
         --config "${CONFIG_FILE}" \
         --batches "${batch_file}" \
-        --site "${SITE}"
+        --site "${SITE}" \
+        "${RERUN_ARGS[@]}"
 
     python scripts/job/poll_stage_inputs.py \
         --stage "${STAGE}" \

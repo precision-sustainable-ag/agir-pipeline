@@ -44,6 +44,11 @@ REQUIRED_INPUT_COLUMNS = [
     "ymax",
 ]
 
+# Full column set of jpg_to_det's batch CSV; the .txt fallback compiles to this shape.
+DETECTION_COLUMNS = REQUIRED_INPUT_COLUMNS + ["conf", "class", "classname"]
+
+NO_DETECTIONS_ASSIGNMENT_METHOD = "no_detections"
+
 GEO_COLUMNS = [
     "world_tl_x",
     "world_tl_y",
@@ -140,6 +145,13 @@ class GridCache:
 
         self._cache[image_id] = grid
         return grid
+
+    def path_for(self, image_id: str) -> Path:
+        """Return the same indexed grid path used by get(), for reference matching."""
+        path = self._index().get(image_id)
+        if path is None:
+            raise FileNotFoundError(f"Grid file not found for image_id={image_id}")
+        return path
 
     # load npz data as a grid object
     def _load_grid(self, image_id: str, data: Any) -> GridData:
@@ -301,13 +313,26 @@ def map_bbox(row: dict[str, str], grid: GridData) -> tuple[dict[str, Any] | None
     return _construct_global_coords(row, mapped, grid.crs), None
 
 
-def load_detection_rows(csv_path: Path) -> tuple[list[str], list[dict[str, str]]]:
-    """ reads detection CSV and validates required columns, returns fieldnames and rows """
-    csv_path = Path(csv_path)
-    if not csv_path.exists():
-        raise FileNotFoundError(f"Detection CSV does not exist: {csv_path}")
+def resolve_detection_source(path: Path, batch_id: str) -> Path:
+    """Pick the detection input to read: a file as given, or for a directory its
+    ``<batch_id>.csv`` when present, else the directory itself (per-image .txt files)."""
+    path = Path(path)
+    if path.is_dir():
+        batch_csv = path / f"{batch_id}.csv"
+        if batch_csv.is_file():
+            return batch_csv
+    return path
 
-    with open(csv_path, newline="") as f:
+
+def load_detection_rows(source: Path) -> tuple[list[str], list[dict[str, str]]]:
+    """ reads detection CSV (or a directory of per-image .txt files) and returns fieldnames and rows """
+    source = Path(source)
+    if source.is_dir():
+        return _load_detection_txt_dir(source)
+    if not source.exists():
+        raise FileNotFoundError(f"Detection CSV does not exist: {source}")
+
+    with open(source, newline="") as f:
         reader = csv.DictReader(f)
         fieldnames = reader.fieldnames or []
         # find missing columns
@@ -316,7 +341,96 @@ def load_detection_rows(csv_path: Path) -> tuple[list[str], list[dict[str, str]]
             raise ValueError(f"Detection CSV missing required columns: {', '.join(missing)}")
         rows = list(reader)
 
+    # The batch CSV has no row for images with zero detections. Preserve those
+    # image identities from their empty sibling TXT files without recompiling
+    # non-empty TXT files or overriding the CSV as the detection source.
+    _append_empty_txt_placeholders(rows, source.parent)
+
     return fieldnames, rows
+
+
+def _clamp01(value: float) -> float:
+    return min(max(value, 0.0), 1.0)
+
+
+def _placeholder_row(image_id: str) -> dict[str, str]:
+    return {
+        column: image_id if column == "image_id" else ""
+        for column in DETECTION_COLUMNS
+    }
+
+
+def _append_empty_txt_placeholders(
+    rows: list[dict[str, str]], txt_dir: Path
+) -> None:
+    """Append image-only rows for empty TXT files not represented in *rows*."""
+    existing_image_ids = {row.get("image_id", "") for row in rows}
+    for txt_path in sorted(txt_dir.glob("*.txt")):
+        if txt_path.stem in existing_image_ids:
+            continue
+        with open(txt_path) as txt_file:
+            if any(line.strip() for line in txt_file):
+                continue
+        rows.append(_placeholder_row(txt_path.stem))
+        existing_image_ids.add(txt_path.stem)
+
+
+def _load_detection_txt_dir(txt_dir: Path) -> tuple[list[str], list[dict[str, str]]]:
+    """Compile per-image YOLO .txt files into rows shaped like a jpg_to_det batch CSV.
+
+    Older batches predate the batch CSV and only have these files, one line per box:
+    ``cls xc yc w h [conf]``, normalized. ``conf`` is blank for the 5-column form and
+    ``classname`` is always blank (the files don't record class names). Empty files
+    contribute an image-only placeholder row so the image remains represented in the
+    georeferenced CSV. Corners are clamped to [0, 1]: the files store center/size at
+    6 decimals, so an edge-touching box can round to a corner ~5e-7 outside the image,
+    which primary selection rejects.
+    """
+    txt_paths = [p for p in sorted(txt_dir.iterdir()) if p.suffix.lower() == ".txt"]
+    if not txt_paths:
+        raise ValueError(f"No detection CSV or .txt files found in {txt_dir}")
+
+    rows: list[dict[str, str]] = []
+    for txt_path in txt_paths:
+        with open(txt_path) as f:
+            boxes = [(n, line.split()) for n, line in enumerate(f, start=1) if line.strip()]
+        if not boxes:
+            rows.append(_placeholder_row(txt_path.stem))
+            continue
+        for bounding_box_id, (line_number, parts) in enumerate(boxes):
+            if len(parts) not in (5, 6):
+                raise ValueError(
+                    f"{txt_path.name} line {line_number}: expected 5 or 6 fields, got {len(parts)}"
+                )
+            try:
+                class_id = int(parts[0])
+                xc, yc, width, height = (float(value) for value in parts[1:5])
+            except ValueError as exc:
+                raise ValueError(f"{txt_path.name} line {line_number}: {exc}") from exc
+            rows.append(
+                {
+                    "image_id": txt_path.stem,
+                    "bounding_box_id": str(bounding_box_id),
+                    "xmin": f"{_clamp01(xc - width / 2):.6f}",
+                    "ymin": f"{_clamp01(yc - height / 2):.6f}",
+                    "xmax": f"{_clamp01(xc + width / 2):.6f}",
+                    "ymax": f"{_clamp01(yc + height / 2):.6f}",
+                    "conf": parts[5] if len(parts) == 6 else "",
+                    "class": str(class_id),
+                    "classname": "",
+                }
+            )
+
+    return list(DETECTION_COLUMNS), rows
+
+
+def is_no_detection_row(row: dict[str, Any]) -> bool:
+    """Return whether *row* is the image-only placeholder for zero detections."""
+    return bool(str(row.get("image_id") or "").strip()) and all(
+        not str(row.get(column) or "").strip()
+        for column in REQUIRED_INPUT_COLUMNS
+        if column != "image_id"
+    )
 
 
 def write_georeferenced_csv(
@@ -338,11 +452,13 @@ def write_georeferenced_csv(
 def remap_rows(
     rows: list[dict[str, str]],
     grid_dir: Path,
+    *,
+    cache: GridCache | None = None,
 ) -> tuple[list[dict[str, Any]], list[ImageRemapResult]]:
     """Remap detection rows to world coordinates, returning mapped rows and per-image results."""
 
     # cache image results to avoid redundant grid loads
-    cache = GridCache(grid_dir)
+    cache = cache if cache is not None else GridCache(grid_dir)
 
     output_rows: list[dict[str, Any]] = []
     results: list[ImageRemapResult] = []
@@ -352,6 +468,17 @@ def remap_rows(
         rows_by_image.setdefault(row["image_id"], []).append(row)
 
     for image_id, image_rows in rows_by_image.items():
+        if len(image_rows) == 1 and is_no_detection_row(image_rows[0]):
+            results.append(
+                ImageRemapResult(
+                    image_id=image_id,
+                    status=ITEM_OK,
+                    n_input_rows=0,
+                    n_output_rows=0,
+                )
+            )
+            continue
+
         try:
             # check cache
             grid = cache.get(image_id)

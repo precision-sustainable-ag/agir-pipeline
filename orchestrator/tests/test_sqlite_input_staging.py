@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from orchestrator.input_staging_planner import (
     DEFAULT_IMAGE_SAMPLE_SIZE,
     STAGE_INPUT_SPECS,
@@ -318,6 +320,79 @@ def test_readiness_view_requires_images_detections_and_grids(tmp_path: Path) -> 
         file_ext="csv", parent_dir="georeferenced",
     )
     assert get_batches_needing_det_to_world(conn, batch_ids=["NC_2025-06-01"]) == []
+
+
+def _insert_processed_det_to_world_batch(conn: sqlite3.Connection, batch_id: str) -> None:
+    for data_state, file_ext, parent_dir in (
+        ("semifield-developed-images", "jpg", "images"),
+        ("semifield-developed-images", "txt", "detections"),
+        ("semifield-asfm", "npz", "pixel_world_grids"),
+        ("semifield-developed-images", "csv", "georeferenced"),
+    ):
+        insert_indexed_file(
+            conn, batch_id=batch_id, data_state=data_state,
+            file_ext=file_ext, parent_dir=parent_dir,
+        )
+    conn.execute(
+        """
+        INSERT INTO stage_runs (run_id, batch_id, stage, status, exit_code, started_at, ended_at)
+        VALUES ('run-1', ?, 'det_to_world', 'success', 0,
+                '2026-09-16T00:00:00Z', '2026-09-16T00:01:00Z')
+        """,
+        (batch_id,),
+    )
+    conn.commit()
+
+
+def test_rerun_returns_batches_the_readiness_view_excludes(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    _insert_processed_det_to_world_batch(conn, "NC_2025-06-01")
+
+    assert get_batches_needing_det_to_world(conn, batch_ids=["NC_2025-06-01"]) == []
+
+    rows = get_batches_needing_det_to_world(conn, batch_ids=["NC_2025-06-01"], rerun=True)
+    assert len(rows) == 1
+    assert rows[0]["batch_id"] == "NC_2025-06-01"
+    assert rows[0]["batch_date"] == "2025-01-01"
+    assert (rows[0]["img_count"], rows[0]["det_count"], rows[0]["grid_count"]) == (1, 1, 1)
+    assert rows[0]["georef_count"] == 1
+
+
+def test_rerun_still_requires_inputs_and_skips_active_leases(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    _insert_processed_det_to_world_batch(conn, "NC_2025-06-01")
+    for file_ext, parent_dir in (("jpg", "images"), ("txt", "detections")):
+        insert_indexed_file(
+            conn, batch_id="NC_2025-06-02", data_state="semifield-developed-images",
+            file_ext=file_ext, parent_dir=parent_dir,
+        )
+    ids = ["NC_2025-06-01", "NC_2025-06-02"]
+
+    # NC_2025-06-02 has no grids, so only NC_2025-06-01 qualifies.
+    rows = get_batches_needing_det_to_world(conn, batch_ids=ids, rerun=True)
+    assert [r["batch_id"] for r in rows] == ["NC_2025-06-01"]
+
+    conn.execute(
+        """
+        INSERT INTO stage_leases (lease_id, batch_id, stage, orchestrator_id, expires_at)
+        VALUES ('lease-1', 'NC_2025-06-01', 'det_to_world', 'test', '2999-01-01T00:00:00Z')
+        """
+    )
+    conn.commit()
+    assert get_batches_needing_det_to_world(conn, batch_ids=ids, rerun=True) == []
+
+
+def test_rerun_requires_batch_ids_and_det_to_world(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+
+    with pytest.raises(ValueError, match="batch_ids"):
+        get_batches_needing_det_to_world(conn, rerun=True)
+
+    with pytest.raises(ValueError, match="det_to_world"):
+        plan_input_staging(
+            conn, _det_to_world_cfg(), stage="jpg_to_det", site=None,
+            batch_ids=["NC_2025-06-01"], rerun=True,
+        )
 
 
 def test_det_to_world_expected_dst_paths() -> None:
