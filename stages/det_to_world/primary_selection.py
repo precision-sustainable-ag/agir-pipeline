@@ -13,10 +13,8 @@ and pipeline wiring belong to the caller; no Metashape project is needed.
 
 from __future__ import annotations
 
-import csv
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -342,25 +340,6 @@ def _reference_coordinates(row: Mapping[str, Any], context: str) -> BoxCoordinat
             for corner in ["top_left", "top_right", "bottom_left", "bottom_right"]
         ]
     )
-
-
-def load_reference_rows(path: str | Path) -> dict[str, dict[str, str]]:
-    """Load one camera/FOV CSV by label; reject ambiguous image references.
-
-    Call separately for camera_reference.csv and fov.csv. For split ASFM
-    reconstructions, the caller must match each image to its grid's references.
-    """
-    with Path(path).open(newline="", encoding="utf-8-sig") as handle:
-        reader = csv.DictReader(handle)
-        if not reader.fieldnames or "label" not in reader.fieldnames:
-            raise ValueError(f"Reference CSV has no label column: {path}")
-        result = {}
-        for row in reader:
-            label = row["label"]
-            if not label or label in result:
-                raise ValueError(f"Missing or duplicate reference label {label!r}: {path}")
-            result[label] = row
-    return result
 
 
 def build_primary_images(

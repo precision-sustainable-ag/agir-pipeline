@@ -314,7 +314,6 @@ def main(argv: list[str] | None = None) -> int:
     report.set_extra(
         segmentations_path=str(args.segmentations),
         georeferenced_csv_path=str(args.georeferenced_csv),
-        fov_references_path=str(args.images.parent / "primary_references"),
         species_catalog_path=str(args.species_catalog),
         measurement_provenance=measurement_provenance(config),
     )

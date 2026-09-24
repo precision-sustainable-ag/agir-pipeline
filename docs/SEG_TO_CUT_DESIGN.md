@@ -136,8 +136,7 @@ This example shows the current output fields. Values are illustrative. `category
       }
     },
     "bbox_area_cm2": 120.0,
-    "area_bin": "100-500",
-    "estimated_bbox_area_cm2": 120.0,
+    "estimated_bbox_area_cm2": null,
     "estimated_area_bin": "100-500",
     "species_mean_bbox_area_cm2": 100.0,
     "species_bbox_sample_size": 10,
@@ -186,8 +185,9 @@ This example shows the current output fields. Values are illustrative. `category
 | `is_primary` | Primary-detection flag copied from the CSV; both primary and non-primary detections are processed. |
 | `intruder_cleanup` | Border-band settings and counts of removed/remaining regions and removed pixels. |
 | `extends_border`, `edge_cut` | Whether the plant touches the crop edges and where it can be placed. |
-| `bbox_area_cm2`, `area_bin` | Physical area of the detection box from complete valid world coordinates and its cm² size bin. Both are null if that calculation is unavailable. This measures the box, not the plant silhouette. |
-| `estimated_bbox_area_cm2`, `estimated_area_bin` | Equal to the world-coordinate area and bin when available. Otherwise the area is estimated from the matching `fov.csv` image footprint; the world-coordinate fields remain null. Both estimated fields are null if neither source is usable. |
+| `bbox_area_cm2` | Physical area of the detection box from complete valid world coordinates; null when that calculation is unavailable. This measures the box, not the plant silhouette. |
+| `estimated_bbox_area_cm2` | Camera-geometry estimate when world area is unavailable; null when `bbox_area_cm2` is populated. |
+| `estimated_area_bin` | Size bin of whichever area field is populated; null if neither area can be calculated. |
 | `species_mean_bbox_area_cm2`, `species_bbox_sample_size` | Average box area and number of valid area samples in the same batch/category. Groups use cultivar when present, otherwise species. |
 | `species_bbox_area_ratio`, `abnormal_bbox_size` | Current area divided by the group average, and whether the difference exceeds the configured limit. |
 | `solidity` | How much of the plant's enclosing convex shape is filled by plant pixels. |
@@ -201,11 +201,11 @@ Unavailable values are written as `null`. This includes missing capture metadata
 
 For cultivar cutouts, use `category.cultivar_class_id` as the mask value. For species-only cutouts, use `category.class_id`.
 
-The `bbox_area.source` configuration selects `georeferenced_csv` or `camera`. The CSV source calculates `bbox_area_cm2` from a complete valid world-coordinate box in a supported projected CRS, or in the pipeline's `LOCAL` project frame, whose coordinates are metres. A blank or missing CRS does not default to `LOCAL`; world-coordinate columns may be omitted when only FOV estimation is possible. Camera mode leaves `bbox_area_cm2` null until an authoritative camera area model exists.
+The `bbox_area.source` setting remains `georeferenced_csv`. A complete valid world-coordinate box in a supported projected CRS, or in the pipeline's metre-based `LOCAL` frame, populates `bbox_area_cm2`. A blank or missing CRS does not default to `LOCAL`. World-coordinate columns may be omitted; the detection CSV itself remains required.
 
-The stage looks for `primary_references/` beside the batch's `images/` directory, including nested per-reconstruction `fov.csv` files. In orchestrated runs, seg-to-cut stages indexed FOV references from Ceres, Atlas, or Juno when available; missing references are logged and do not block submission. When the world-coordinate calculation is unavailable, a matching FOV row is selected by image `label`. Four valid footprint corners are used to fit a perspective mapping from normalized image coordinates; the projected detection box's quadrilateral area gives `estimated_bbox_area_cm2`. If the corners are invalid but positive `width` and `height` are present, the estimate uses `(xmax - xmin) × (ymax - ymin) × width × height × 10,000`. The FOV coordinates and dimensions are assumed to be metres on one surface plane. The FOV calculation does not use detection world coordinates, CRS, or the YAML camera specifications. Duplicate image labels are ignored with a warning. Without a matching valid FOV row, the estimate is null and the reason is logged. Species mean and abnormal-size metrics continue to use only valid world-coordinate areas.
+When valid world area is unavailable, the stage estimates area from the configured camera focal length, sensor diagonal, and lens height above the pot surface. The actual JPG aspect ratio splits the sensor diagonal into horizontal and vertical sensor dimensions. The estimated image footprint is `height × sensor width ÷ focal length` by `height × sensor height ÷ focal length`. Multiplying that footprint by the normalized detection-box width and height gives `estimated_bbox_area_cm2`. This assumes a perpendicular camera and a flat surface at the configured height. The calculation does not read `fov.csv`, `camera_reference.csv`, detection world coordinates, or CRS. Missing or invalid camera inputs are logged. Species mean and abnormal-size metrics continue to use only valid world-coordinate areas.
 
-Both bins use lower-inclusive cm² thresholds: `0-1`, `1-10`, `10-100`, `100-500`, `500-1000`, `1000-5000`, `5000-10000`, and `10000+`. For example, exactly 100 cm² is `100-500`.
+Only one numeric area field is populated: world area fills `bbox_area_cm2`, while camera fallback fills `estimated_bbox_area_cm2`. `estimated_area_bin` uses whichever area is available. Its lower-inclusive cm² thresholds are `0-1`, `1-10`, `10-100`, `100-500`, `500-1000`, `1000-5000`, `5000-10000`, and `10000+`. For example, exactly 100 cm² is `100-500`.
 
 Stage settings live in [`stages/seg_to_cut/configs/default.yaml`](../stages/seg_to_cut/configs/default.yaml). Pass another settings file with `--config` to override them.
 
@@ -216,13 +216,16 @@ Stage settings live in [`stages/seg_to_cut/configs/default.yaml`](../stages/seg_
 | `border_band_fraction` | `0.10` | Larger values widen the cleanup band and can remove more border regions. Must be greater than 0 and less than 0.5. |
 | `edge_threshold` | `0.05` | Larger values require more plant coverage before an edge is flagged. Allowed range: 0–1. |
 | `cutout_version` | `"2.0"` | Sets the version label in the JSON. |
-| `bbox_area.source` | `georeferenced_csv` | Uses world coordinates from the CSV to calculate physical area. |
+| `bbox_area.source` | `georeferenced_csv` | Uses valid world coordinates for authoritative area; this is the only supported value. |
+| `camera.focal_length_mm` | `60` | Focal length used for camera area estimates. |
+| `camera.sensor_size_mm` | `56.73` | Assumed active sensor diagonal used for camera area estimates. |
+| `camera.lens_height_above_pot_surface_cm` | `170` | Assumed lens-to-surface distance used for camera area estimates. |
 | `species_bbox_min_sample_size` | `5` | Requires this many valid areas before calculating a group average. Must be a positive integer. |
 | `abnormal_bbox_size_threshold` | `0.25` | Flags an area more than 25% above or below its group average. Must be nonnegative. |
 
 For example, if the group average is 100 cm², the default size threshold flags areas below 75 cm² or above 125 cm². If the group has fewer than five valid areas, its average, area ratio, and abnormal-size flag are null; the sample count is still recorded.
 
-`bbox_area.source: camera` leaves the world-coordinate area null. The FOV reference can still populate the estimated area in that mode. The YAML's camera specifications are descriptive; they do not calculate either area or supply the metadata's lens model.
+The camera dimensions in YAML determine the estimate; they do not supply the metadata's lens model.
 
 The separate [`Ceres job configuration`](../configs/config.seg_to_cut.ceres.example.yaml) controls input staging, CPU/memory allocation, paths, and publication. Its example uses 8 CPUs, 64 GB of memory, and four hours. `publication_mode: cutout_batch` publishes complete batches, while `result_sync.enabled: false` keeps this stage's outputs on Ceres.
 

@@ -692,7 +692,7 @@ WHERE COALESCE(j.jpg_file_count, 0) = 0   -- no JPGs exist yet
         AND sr.stage    = 'raw_to_jpg'
         AND sr.status   = 'success'
   )
-ORDER BY r.batch_date ASC, r.batch_id ASC;
+ORDER BY r.batch_date DESC, r.batch_id DESC;
 
 
 -- -----------------------------------------------------------------------------
@@ -785,7 +785,7 @@ WHERE COALESCE(d.det_count, 0) = 0   -- no detections exist yet
         AND sr.stage    = 'jpg_to_det'
         AND sr.status   = 'success'
   )
-ORDER BY j.batch_date ASC, j.batch_id ASC, l.site ASC, l.storage_domain ASC, l.namespace ASC;
+ORDER BY j.batch_date DESC, j.batch_id DESC, l.site ASC, l.storage_domain ASC, l.namespace ASC;
 
 
 -- -----------------------------------------------------------------------------
@@ -891,7 +891,7 @@ WHERE COALESCE(w.georef_count, 0) = 0   -- no georeferenced output exists yet
         AND sr.stage    = 'det_to_world'
         AND sr.status   = 'success'
   )
-ORDER BY i.batch_date ASC, i.batch_id ASC;
+ORDER BY i.batch_date DESC, i.batch_id DESC;
 
 
 -- -----------------------------------------------------------------------------
@@ -989,7 +989,7 @@ WHERE COALESCE(s.seg_count, 0) = 0
         AND sr.stage    = 'det_to_seg'
         AND sr.status   = 'success'
   )
-ORDER BY i.batch_date ASC, i.batch_id ASC;
+ORDER BY i.batch_date DESC, i.batch_id DESC;
 
 
 -- -----------------------------------------------------------------------------
@@ -1069,7 +1069,7 @@ WHERE al.batch_id IS NULL
         AND sr.stage    = 'seg_to_cut'
         AND sr.status   = 'success'
   )
-ORDER BY i.batch_date ASC, i.batch_id ASC;
+ORDER BY i.batch_date DESC, i.batch_id DESC;
 
 
 -- =============================================================================

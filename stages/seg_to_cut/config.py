@@ -23,6 +23,9 @@ class SegToCutConfig:
     edge_threshold: float = 0.05
     cutout_version: str = "2.0"
     bbox_area_source: str = "georeferenced_csv"
+    camera_focal_length_mm: float = 60.0
+    camera_sensor_diagonal_mm: float = 56.73
+    camera_height_cm: float = 170.0
     species_bbox_min_sample_size: int = 5
     abnormal_bbox_size_threshold: float = 0.50
 
@@ -64,6 +67,21 @@ def _fraction(value: Any, *, field: str) -> float:
         raise SegToCutConfigError(
             ERROR_CONFIG_INVALID,
             f"{field} must be a finite number in [0, 1]",
+            field=field,
+        )
+    return float(value)
+
+
+def _positive_float(value: Any, *, field: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise SegToCutConfigError(
+            ERROR_CONFIG_INVALID,
+            f"{field} must be a finite positive number",
             field=field,
         )
     return float(value)
@@ -148,12 +166,27 @@ def parse_config(data: Mapping[str, Any]) -> SegToCutConfig:
             "bbox_area must be a YAML object",
             field="bbox_area",
         )
-    if bbox_area_source not in {"georeferenced_csv", "camera"}:
+    if bbox_area_source != "georeferenced_csv":
         raise SegToCutConfigError(
             ERROR_CONFIG_INVALID,
-            "bbox_area.source must be 'georeferenced_csv' or 'camera'",
+            "bbox_area.source must be 'georeferenced_csv'",
             field="bbox_area.source",
         )
+    raw_camera = data.get("camera", {})
+    if not isinstance(raw_camera, Mapping):
+        raise SegToCutConfigError(
+            ERROR_CONFIG_INVALID, "camera must be a YAML object", field="camera"
+        )
+    camera_focal_length_mm = _positive_float(
+        raw_camera.get("focal_length_mm", 60.0), field="camera.focal_length_mm"
+    )
+    camera_sensor_diagonal_mm = _positive_float(
+        raw_camera.get("sensor_size_mm", 56.73), field="camera.sensor_size_mm"
+    )
+    camera_height_cm = _positive_float(
+        raw_camera.get("lens_height_above_pot_surface_cm", 170.0),
+        field="camera.lens_height_above_pot_surface_cm",
+    )
     species_bbox_min_sample_size = _positive_int(
         data.get("species_bbox_min_sample_size", 5),
         field="species_bbox_min_sample_size",
@@ -169,6 +202,9 @@ def parse_config(data: Mapping[str, Any]) -> SegToCutConfig:
         edge_threshold=edge_threshold,
         cutout_version=cutout_version.strip(),
         bbox_area_source=bbox_area_source,
+        camera_focal_length_mm=camera_focal_length_mm,
+        camera_sensor_diagonal_mm=camera_sensor_diagonal_mm,
+        camera_height_cm=camera_height_cm,
         species_bbox_min_sample_size=species_bbox_min_sample_size,
         abnormal_bbox_size_threshold=abnormal_bbox_size_threshold,
     )

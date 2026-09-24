@@ -7,18 +7,20 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Collection
 
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 
 from stages import ITEM_FAILED, ITEM_OK
 
-from . import ERROR_GRID_NOT_FOUND, ERROR_REMAP_FAILED
+from . import ERROR_REMAP_FAILED
 
 logger = logging.getLogger(__name__)
 
 WARNING_SURFACE_MISS = "W_SURFACE_MISS"
+WARNING_GRID_NOT_FOUND = "W_GRID_NOT_FOUND"
+WARNING_NO_CAMERA_REFERENCE = "W_NO_CAMERA_REFERENCE"
 
 # ASFM writes each NPZ's crs field as the str() of its own CRS object rather
 # than a plain identifier, e.g. "<CoordinateSystem 'WGS 84 / UTM zone 18N
@@ -46,6 +48,8 @@ REQUIRED_INPUT_COLUMNS = [
 
 # Full column set of jpg_to_det's batch CSV; the .txt fallback compiles to this shape.
 DETECTION_COLUMNS = REQUIRED_INPUT_COLUMNS + ["conf", "class", "classname"]
+
+NO_DETECTIONS_ASSIGNMENT_METHOD = "no_detections"
 
 GEO_COLUMNS = [
     "world_tl_x",
@@ -81,6 +85,9 @@ class ImageRemapResult:
     error_code: str | None = None
     error_type: str | None = None
     error_message: str | None = None
+    # Detection rows that couldn't be georeferenced (no grid, surface miss, remap
+    # failure). They're still written to the CSV, with blank world coordinates.
+    unmapped_rows: list[dict[str, str]] = field(default_factory=list)
 
 
 # store npz data 
@@ -301,7 +308,7 @@ def map_bbox(row: dict[str, str], grid: GridData) -> tuple[dict[str, Any] | None
                 code=WARNING_SURFACE_MISS,
                 warning_type="SurfaceMissWarning",
                 message=(
-                    f"Skipping detection {bbox_id} for image {image_id}: "
+                    f"Detection {bbox_id} for image {image_id} left un-georeferenced: "
                     "at least one bbox corner failed after inward nudges."
                 ),
                 meta={"image_id": image_id, "bounding_box_id": bbox_id},
@@ -339,11 +346,50 @@ def load_detection_rows(source: Path) -> tuple[list[str], list[dict[str, str]]]:
             raise ValueError(f"Detection CSV missing required columns: {', '.join(missing)}")
         rows = list(reader)
 
+    # The detector emits float32 edges like 1.0000001192092896 for boxes touching
+    # the image border; clamp that rounding noise (only) so validation accepts them.
+    # Genuinely out-of-range boxes are left for remapping to warn on.
+    for row in rows:
+        for column in ("xmin", "ymin", "xmax", "ymax"):
+            try:
+                value = float(row[column])
+            except (TypeError, ValueError):
+                continue
+            if -1e-6 <= value < 0.0 or 1.0 < value <= 1.0 + 1e-6:
+                row[column] = repr(_clamp01(value))
+
+    # The batch CSV has no row for images with zero detections. Preserve those
+    # image identities from their empty sibling TXT files without recompiling
+    # non-empty TXT files or overriding the CSV as the detection source.
+    _append_empty_txt_placeholders(rows, source.parent)
+
     return fieldnames, rows
 
 
 def _clamp01(value: float) -> float:
     return min(max(value, 0.0), 1.0)
+
+
+def _placeholder_row(image_id: str) -> dict[str, str]:
+    return {
+        column: image_id if column == "image_id" else ""
+        for column in DETECTION_COLUMNS
+    }
+
+
+def _append_empty_txt_placeholders(
+    rows: list[dict[str, str]], txt_dir: Path
+) -> None:
+    """Append image-only rows for empty TXT files not represented in *rows*."""
+    existing_image_ids = {row.get("image_id", "") for row in rows}
+    for txt_path in sorted(txt_dir.glob("*.txt")):
+        if txt_path.stem in existing_image_ids:
+            continue
+        with open(txt_path) as txt_file:
+            if any(line.strip() for line in txt_file):
+                continue
+        rows.append(_placeholder_row(txt_path.stem))
+        existing_image_ids.add(txt_path.stem)
 
 
 def _load_detection_txt_dir(txt_dir: Path) -> tuple[list[str], list[dict[str, str]]]:
@@ -352,9 +398,10 @@ def _load_detection_txt_dir(txt_dir: Path) -> tuple[list[str], list[dict[str, st
     Older batches predate the batch CSV and only have these files, one line per box:
     ``cls xc yc w h [conf]``, normalized. ``conf`` is blank for the 5-column form and
     ``classname`` is always blank (the files don't record class names). Empty files
-    (images with no detections) contribute no rows, same as the CSV. Corners are
-    clamped to [0, 1]: the files store center/size at 6 decimals, so an edge-touching
-    box can round to a corner ~5e-7 outside the image, which primary selection rejects.
+    contribute an image-only placeholder row so the image remains represented in the
+    georeferenced CSV. Corners are clamped to [0, 1]: the files store center/size at
+    6 decimals, so an edge-touching box can round to a corner ~5e-7 outside the image,
+    which primary selection rejects.
     """
     txt_paths = [p for p in sorted(txt_dir.iterdir()) if p.suffix.lower() == ".txt"]
     if not txt_paths:
@@ -364,6 +411,9 @@ def _load_detection_txt_dir(txt_dir: Path) -> tuple[list[str], list[dict[str, st
     for txt_path in txt_paths:
         with open(txt_path) as f:
             boxes = [(n, line.split()) for n, line in enumerate(f, start=1) if line.strip()]
+        if not boxes:
+            rows.append(_placeholder_row(txt_path.stem))
+            continue
         for bounding_box_id, (line_number, parts) in enumerate(boxes):
             if len(parts) not in (5, 6):
                 raise ValueError(
@@ -391,6 +441,15 @@ def _load_detection_txt_dir(txt_dir: Path) -> tuple[list[str], list[dict[str, st
     return list(DETECTION_COLUMNS), rows
 
 
+def is_no_detection_row(row: dict[str, Any]) -> bool:
+    """Return whether *row* is the image-only placeholder for zero detections."""
+    return bool(str(row.get("image_id") or "").strip()) and all(
+        not str(row.get(column) or "").strip()
+        for column in REQUIRED_INPUT_COLUMNS
+        if column != "image_id"
+    )
+
+
 def write_georeferenced_csv(
     rows: list[dict[str, Any]],
     fieldnames: list[str],
@@ -412,8 +471,15 @@ def remap_rows(
     grid_dir: Path,
     *,
     cache: GridCache | None = None,
+    referenced_image_ids: Collection[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[ImageRemapResult]]:
-    """Remap detection rows to world coordinates, returning mapped rows and per-image results."""
+    """Remap detection rows to world coordinates, returning mapped rows and per-image results.
+
+    When *referenced_image_ids* is given, an image with a grid but no ASFM
+    camera/FOV reference row is left un-georeferenced (W_NO_CAMERA_REFERENCE):
+    ASFM has written grids for cameras it didn't align, with implausibly small
+    footprints, and primary selection can't run on them without a reference.
+    """
 
     # cache image results to avoid redundant grid loads
     cache = cache if cache is not None else GridCache(grid_dir)
@@ -426,22 +492,40 @@ def remap_rows(
         rows_by_image.setdefault(row["image_id"], []).append(row)
 
     for image_id, image_rows in rows_by_image.items():
-        try:
-            # check cache
-            grid = cache.get(image_id)
-            
-
-        except FileNotFoundError as exc:
-            # cache miss
+        if len(image_rows) == 1 and is_no_detection_row(image_rows[0]):
             results.append(
                 ImageRemapResult(
                     image_id=image_id,
-                    status=ITEM_FAILED,
+                    status=ITEM_OK,
+                    n_input_rows=0,
+                    n_output_rows=0,
+                )
+            )
+            continue
+
+        try:
+            # check cache
+            grid = cache.get(image_id)
+        except FileNotFoundError as exc:
+            # No ASFM grid (e.g. a frame outside every reconstructed flight
+            # window): expected, so the image's detections are kept un-georeferenced.
+            logger.warning(str(exc))
+            results.append(
+                ImageRemapResult(
+                    image_id=image_id,
+                    status=ITEM_OK,
                     n_input_rows=len(image_rows),
                     n_output_rows=0,
-                    error_code=ERROR_GRID_NOT_FOUND,
-                    error_type=type(exc).__name__,
-                    error_message=str(exc),
+                    warnings=[
+                        RemapWarning(
+                            unit_id=image_id,
+                            code=WARNING_GRID_NOT_FOUND,
+                            warning_type="GridNotFoundWarning",
+                            message=str(exc),
+                            meta={"image_id": image_id},
+                        )
+                    ],
+                    unmapped_rows=list(image_rows),
                 )
             )
             continue
@@ -456,14 +540,42 @@ def remap_rows(
                     error_code=ERROR_REMAP_FAILED,
                     error_type=type(exc).__name__,
                     error_message=str(exc),
+                    unmapped_rows=list(image_rows),
+                )
+            )
+            continue
+
+        if referenced_image_ids is not None and image_id not in referenced_image_ids:
+            message = (
+                f"Grid file for image_id={image_id} has no camera/FOV reference row "
+                f"under {cache.grid_dir}; leaving its detections un-georeferenced"
+            )
+            logger.warning(message)
+            results.append(
+                ImageRemapResult(
+                    image_id=image_id,
+                    status=ITEM_OK,
+                    n_input_rows=len(image_rows),
+                    n_output_rows=0,
+                    warnings=[
+                        RemapWarning(
+                            unit_id=image_id,
+                            code=WARNING_NO_CAMERA_REFERENCE,
+                            warning_type="NoCameraReferenceWarning",
+                            message=message,
+                            meta={"image_id": image_id},
+                        )
+                    ],
+                    unmapped_rows=list(image_rows),
                 )
             )
             continue
 
         warnings: list[RemapWarning] = []
+        unmapped_rows: list[dict[str, str]] = []
         n_output_rows = 0
 
-        for row in image_rows:
+        for index, row in enumerate(image_rows):
             try:
                 mapped_row, warning = map_bbox(row, grid)
             except Exception as exc:
@@ -480,6 +592,7 @@ def remap_rows(
                             f"Unexpected remap failure for image_id={image_id}, "
                             f"bounding_box_id={row.get('bounding_box_id')}: {exc}"
                         ),
+                        unmapped_rows=unmapped_rows + list(image_rows[index:]),
                     )
                 )
                 break
@@ -487,6 +600,7 @@ def remap_rows(
             if warning is not None:
                 logger.warning(warning.message)
                 warnings.append(warning)
+                unmapped_rows.append(row)
                 continue
 
             output_rows.append(mapped_row)
@@ -499,6 +613,7 @@ def remap_rows(
                     n_input_rows=len(image_rows),
                     n_output_rows=n_output_rows,
                     warnings=warnings,
+                    unmapped_rows=unmapped_rows,
                 )
             )
 

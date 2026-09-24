@@ -50,7 +50,6 @@ stage:
   cli_args: >-
     --i $TMPDIR/input/detections/$BATCH_ID.csv
     --g "$GRID_ROOT/$BATCH_ID"
-    --reference-root "$TMPDIR/input/primary_references"
     --o $TMPDIR/output
     --batch-id $BATCH_ID
     --shp $SHAPEFILE_PATH
@@ -124,12 +123,15 @@ paths:
   # from here at job time rather than staged into $TMPDIR.
   grid_root: /90daydata/dash_agir/semifield-asfm
 
-  # Per-run artifacts (run_report.json, manifest.json, georeferenced CSV)
+  # Per-run artifacts (run_report.json, manifest.json, georeferenced CSV,
+  # combined camera reference CSV, and combined FOV CSV)
   # saved here after the run completes.
   output_stage_runs: /90daydata/dash_agir/tmp/stage_runs/det_to_world
 
-  # Root under which final promoted georeferenced CSVs are written as:
+  # Root under which the three batch-level CSVs are written as:
   #   <final_dest_root>/<batch_id>/georeferenced/<batch_id>_georeferenced.csv
+  #   <final_dest_root>/<batch_id>/georeferenced/<batch_id>_camera_reference.csv
+  #   <final_dest_root>/<batch_id>/georeferenced/<batch_id>_fov.csv
   final_dest_root: /90daydata/dash_agir/semifield-developed-images
 
   # SLURM job stdout/stderr logs.
@@ -204,28 +206,11 @@ transfer:
       # stays a small whole-directory transfer.
       image_sample_size: 100
 
-      # ASFM pixel-to-world NPZ grids (semifield-asfm) — separate root,
-      # transferred as a whole <batch_id> directory since grids are nested
-      # under per-time-range sub-batch folders (see paths.grid_root below).
+      # ASFM pixel-to-world grids and paired camera/FOV references. The whole
+      # <batch_id> tree is transferred so det_to_world can combine references
+      # across time-range reconstructions into flat batch-level output CSVs.
       source_root_grids_ceres: /90daydata/dash_agir/semifield-asfm
       source_root_grids_juno: /LTS/project/dash_agir/semifield-asfm
-
-      # Stage the paired reference CSVs separately into
-      # <input_staging_root>/<batch_id>/primary_references/, retaining nested
-      # time-range/reference or autosfm/reference directories for grid matching.
-      # Sources must be indexed. Defaults to destination, ATLAS, CERES, JUNO;
-      # each site's grid root is checked before its developed-images root.
-      reference_source_sites: [CERES, ATLAS, JUNO]
-      # Optional overrides: roots containing <batch_id>/.../reference/*.csv.
-      # source_root_references_ceres: /90daydata/dash_agir/semifield-asfm
-      # source_root_references_juno: /LTS/project/dash_agir/semifield-asfm
-      # For Sunny/NCSU transfers add NCSU to reference_source_sites, define
-      # transfer.ncsu_endpoint, and use the Globus-visible source root:
-      # source_root_references_ncsu: /rsstu/users/s/screberg/longterm_images2/semifield-developed-images
-      # For ASFM references nested under staging/<batch_id>/<time-range>:
-      # source_root_references_ncsu: /rsstu/users/s/screberg/longterm_images2/semifield-asfm/staging
-      # Direct Sunny CLI reads instead use its /mnt/research-projects mount
-      # with --reference-root; mount parents never belong in Globus routes.
 
 # ── SLURM job parameters ──────────────────────────────────────────────────────
 # CPU-only stage (scipy RegularGridInterpolator) — no GPU needed.

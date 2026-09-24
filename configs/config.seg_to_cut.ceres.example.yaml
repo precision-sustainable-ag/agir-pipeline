@@ -66,14 +66,6 @@ transfer:
       source_root_atlas: /90daydata/dash_agir/semifield-developed-images
       source_root_ceres: /90daydata/dash_agir/semifield-developed-images
       source_root_juno: /LTS/project/dash_agir/semifield-developed-images
-      # Optional FOV fallback: find indexed fov.csv files on these sites.
-      # Developed-images references are read from <batch>/primary_references/;
-      # ASFM references are read from <batch>/.../reference/ below these roots.
-      # Missing references do not block seg_to_cut submission.
-      reference_source_sites: [CERES, ATLAS, JUNO]
-      source_root_references_ceres: /90daydata/dash_agir/semifield-asfm
-      source_root_references_atlas: /90daydata/dash_agir/semifield-asfm
-      source_root_references_juno: /LTS/project/dash_agir/semifield-asfm
 
 # seg_to_cut runs and publishes on Ceres, so Atlas-to-Ceres result sync is
 # intentionally disabled.
