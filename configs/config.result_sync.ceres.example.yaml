@@ -33,6 +33,7 @@ result_sync:
     stage_suffixes:
       raw_to_jpg: images
       jpg_to_det: detections
+      det_to_seg: segmentations
 
   # One complete Ceres scope refresh runs after any successful promotion.
   # promotion.root must equal <storage_root>/<data_state>.

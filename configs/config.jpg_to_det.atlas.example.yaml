@@ -22,8 +22,9 @@ paths:
   # JPG inputs live here: <input_staging_root>/<batch_id>/images/
   input_staging_root: /90daydata/dash_agir/semifield-developed-images
 
-  # Per-run artifacts saved here after job completes
-  output_stage_runs: /90daydata/dash_agir/tmp/stage_runs
+  # Per-run artifacts saved here after job completes. Must be
+  # <result_sync.atlas_run_root>/<stage> for Ceres result sync to accept it.
+  output_stage_runs: /90daydata/dash_agir/tmp/stage_runs/jpg_to_det
 
   # Promote writes to: <final_dest_root>/<batch_id>/detections/
   final_dest_root: /90daydata/dash_agir/semifield-developed-images

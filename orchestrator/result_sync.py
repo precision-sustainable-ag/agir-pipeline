@@ -446,9 +446,45 @@ def _require_bundle_below_root(bundle_path: str, root_path: str, field: str) -> 
         )
 
 
+def _require_atlas_bundle_path(
+    bundle_path: str,
+    root_path: str,
+    field: str,
+    *,
+    stage: str,
+    allow_flat: bool,
+) -> None:
+    """Require ``<root>/<stage>/<run_id>`` for Atlas run bundles.
+
+    Atlas stages write run bundles below a per-stage directory. The flat
+    ``<root>/<run_id>`` layout jpg_to_det used before that is accepted only
+    when ``allow_flat`` is set, i.e. for runs already registered in
+    ``result_syncs``. The stage directory must match the run's own stage, so
+    a request can't point into another stage's runs.
+    """
+    bundle = PurePosixPath(bundle_path)
+    root = PurePosixPath(root_path)
+    try:
+        relative = bundle.relative_to(root)
+    except ValueError as exc:
+        raise ResultSyncRequestError(
+            f"{field} must be below configured root {root_path!r}"
+        ) from exc
+    if len(relative.parts) == 2 and relative.parts[0] == stage:
+        return
+    if allow_flat and len(relative.parts) == 1:
+        return
+    raise ResultSyncRequestError(
+        f"{field} must be {root_path}/{stage}/<run_id>"
+        + (f" (or {root_path}/<run_id>)" if allow_flat else "")
+    )
+
+
 def validate_request_route(
     request: Mapping[str, Any],
     config: CeresResultSyncConfig,
+    *,
+    allow_flat_src: bool = False,
 ) -> None:
     """Enforce Ceres-owned roots and one-directory-per-run semantics."""
     run_id = str(request["run"]["run_id"])
@@ -456,8 +492,9 @@ def validate_request_route(
     if bundle["recursive"] is not True:
         raise ResultSyncRequestError("run_bundle.recursive must be true")
 
-    _require_bundle_below_root(
-        bundle["src_path"], config.atlas_run_root, "run_bundle.src_path"
+    _require_atlas_bundle_path(
+        bundle["src_path"], config.atlas_run_root, "run_bundle.src_path",
+        stage=str(request["run"]["stage"]), allow_flat=allow_flat_src,
     )
     _require_bundle_below_root(
         bundle["dst_path"], config.ceres_run_root, "run_bundle.dst_path"
@@ -491,6 +528,13 @@ def require_result_sync_schema(conn) -> None:
         )
 
 
+def _is_registered(conn, run_id: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM result_syncs WHERE run_id = ?", (run_id,)
+    ).fetchone()
+    return row is not None
+
+
 def process_inbox_requests(
     conn,
     config: CeresResultSyncConfig,
@@ -522,7 +566,12 @@ def process_inbox_requests(
                 raise ResultSyncRequestError(
                     f"request filename must be {expected_name!r}"
                 )
-            validate_request_route(request, config)
+            # Every sync re-reads the whole inbox, including requests
+            # registered before per-stage Atlas run directories.
+            validate_request_route(
+                request, config,
+                allow_flat_src=_is_registered(conn, run_id),
+            )
 
             if dry_run:
                 status = "would_register"
@@ -604,7 +653,11 @@ def _validate_sync_row_route(
             "result-sync run-bundle transfer must be recursive"
         )
 
-    _require_bundle_below_root(sync["src_path"], config.atlas_run_root, "src_path")
+    # A persisted row was registered under the rules of its time.
+    _require_atlas_bundle_path(
+        sync["src_path"], config.atlas_run_root, "src_path",
+        stage=str(sync["stage"]), allow_flat=True,
+    )
     _require_bundle_below_root(sync["dst_path"], config.ceres_run_root, "dst_path")
     if PurePosixPath(sync["src_path"]).name != run_id:
         raise ResultSyncRequestError("result-sync src_path must end with run_id")
