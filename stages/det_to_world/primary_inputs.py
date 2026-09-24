@@ -155,12 +155,15 @@ def write_combined_references(
 
 
 def select_with_references(
-    rows: list[dict[str, Any]], cache: GridCache
-) -> tuple[list[dict[str, Any]], CombinedReferences]:
-    """Select primary detections using one combined batch-level reference pair."""
-    references = combine_reference_pairs(cache.grid_dir)
+    rows: list[dict[str, Any]], cache: GridCache, references: CombinedReferences
+) -> list[dict[str, Any]]:
+    """Select primary detections using one combined batch-level reference pair.
+
+    Every row's image must have a reference row — remap_rows'
+    referenced_image_ids leaves images without one un-georeferenced.
+    """
     if not rows:
-        return [], references
+        return []
     if len({row.get("crs") for row in rows}) != 1 or not rows[0].get("crs"):
         raise ValueError("Legacy primary selection requires one common, populated CRS")
 
@@ -170,4 +173,4 @@ def select_with_references(
     for image_id in dict.fromkeys(row["image_id"] for row in rows):
         grid = cache.get(image_id)
         dimensions[image_id] = (grid.sensor_width, grid.sensor_height)
-    return select_primary_rows(rows, cameras, fovs, dimensions), references
+    return select_primary_rows(rows, cameras, fovs, dimensions)

@@ -3,10 +3,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from stages import ITEM_FAILED, ITEM_OK
-from stages.det_to_world import ERROR_GRID_NOT_FOUND
+from stages import ITEM_OK
 from stages.det_to_world.remapper import (
     GEO_COLUMNS,
+    WARNING_GRID_NOT_FOUND,
+    WARNING_NO_CAMERA_REFERENCE,
     load_detection_rows,
     map_bbox,
     remap_rows,
@@ -220,7 +221,8 @@ def test_remap_rows_from_txt_dir_matches_csv_input(detection_txt_dir, grid_dir):
 
     assert [r.image_id for r in results] == ["IMG_0001", "IMG_0003"]
     assert results[0].status == ITEM_OK
-    assert results[1].error_code == ERROR_GRID_NOT_FOUND
+    assert results[1].status == ITEM_OK
+    assert results[1].warnings[0].code == WARNING_GRID_NOT_FOUND
     assert len(mapped_rows) == 2
     assert mapped_rows[0]["world_tl_x"] == pytest.approx(10.0)
     assert mapped_rows[0]["world_tl_y"] == pytest.approx(20.0)
@@ -257,7 +259,8 @@ def test_map_bbox_maps_all_corners(grid_dir):
 
 def test_remap_rows_handles_warnings_and_missing_grids(detection_csv, grid_dir):
     # IMG_0001: one detection maps successfully, one is out-of-bounds and becomes a warning.
-    # IMG_0002: no grid file exists, so the whole image fails with E_GRID_NOT_FOUND.
+    # IMG_0002: no grid file exists, so it's OK with a W_GRID_NOT_FOUND warning.
+    # Both un-georeferenced detections are kept as unmapped_rows.
 
 
     _, rows = load_detection_rows(detection_csv)
@@ -269,11 +272,28 @@ def test_remap_rows_handles_warnings_and_missing_grids(detection_csv, grid_dir):
     assert results[0].status == ITEM_OK
     assert results[0].n_output_rows == 1
     assert len(results[0].warnings) == 1
+    assert len(results[0].unmapped_rows) == 1
 
     assert results[1].image_id == "IMG_0002"
-    assert results[1].status == ITEM_FAILED
-    assert results[1].error_code == ERROR_GRID_NOT_FOUND
+    assert results[1].status == ITEM_OK
+    assert [w.code for w in results[1].warnings] == [WARNING_GRID_NOT_FOUND]
+    assert [r["image_id"] for r in results[1].unmapped_rows] == ["IMG_0002"]
 
+
+
+def test_remap_rows_leaves_unreferenced_grid_images_unmapped(detection_csv, grid_dir):
+    # IMG_0001 has a grid but no camera/FOV reference row, so all its
+    # detections are left un-georeferenced with W_NO_CAMERA_REFERENCE.
+    _, rows = load_detection_rows(detection_csv)
+
+    mapped_rows, results = remap_rows(rows, grid_dir, referenced_image_ids=set())
+
+    assert mapped_rows == []
+    assert results[0].image_id == "IMG_0001"
+    assert results[0].status == ITEM_OK
+    assert [w.code for w in results[0].warnings] == [WARNING_NO_CAMERA_REFERENCE]
+    assert [r["bounding_box_id"] for r in results[0].unmapped_rows] == ["0", "1"]
+    assert [w.code for w in results[1].warnings] == [WARNING_GRID_NOT_FOUND]
 
 def test_map_bbox_applies_inward_nudges(nudge_grid_dir):
     # Top-left corner at (0.0, 0.0) is outside the grid

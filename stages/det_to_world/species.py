@@ -13,21 +13,24 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Detections farther than this from every zone polygon (in the shapefile's
-# own CRS units — meters, for the UTM shapefiles this pipeline uses) fail
-# the batch instead of silently taking the nearest polygon's species. A
-# normal boundary case (point just outside a polygon edge due to rounding)
-# lands within a meter or two; anything past this is more likely a wrong
-# shapefile, a georeferencing problem, or a real survey gap that needs a
-# person to look at.
+# own CRS units — meters, for the UTM shapefiles this pipeline uses) get the
+# unknown-plant species instead of the nearest polygon's. A normal boundary
+# case (point just outside a polygon edge due to rounding) lands within a
+# meter or two; anything past this is more likely a wrong shapefile, a
+# georeferencing problem, or a real survey gap, so it's logged as a warning.
 DEFAULT_MAX_NEAREST_DISTANCE_M = 5.0
+
+# species_catalog keys for the fallback labels.
+UNKNOWN_SPECIES_ID = "PLANT"
+COLOR_CHECKER_SPECIES_ID = "COLORCHECKER"
+
+UNKNOWN_TOO_FAR_METHOD = "unknown_too_far"
+UNKNOWN_NOT_GEOREFERENCED_METHOD = "unknown_not_georeferenced"
+COLOR_CHECKER_METHOD = "color_checker_class"
 
 
 class SpeciesAssignmentError(Exception):
     """Base class for species-assignment failures that should fail the batch."""
-
-
-class ZoneTooFarError(SpeciesAssignmentError):
-    """Raised when a detection has no zone polygon within max_nearest_distance_m."""
 
 
 class UnknownSpeciesCodeError(SpeciesAssignmentError):
@@ -63,7 +66,8 @@ def assign_spatial(
 
     Detections outside every zone polygon fall back to the nearest one, but
     only within max_nearest_distance_m — see DEFAULT_MAX_NEAREST_DISTANCE_M.
-    Raises ZoneTooFarError if any detection's nearest zone is farther than that.
+    Detections farther than that get UNKNOWN_SPECIES_ID with
+    assignment_method UNKNOWN_TOO_FAR_METHOD, and a logged warning.
     """
     zones = gpd.read_file(shapefile)
 
@@ -92,21 +96,23 @@ def assign_spatial(
         # keep only the first match per point so the assignment aligns 1:1.
         nearest = nearest[~nearest.index.duplicated(keep="first")]
 
-        too_far = nearest[nearest["nearest_distance_m"] > max_nearest_distance_m]
-        if not too_far.empty:
-            offenders = ", ".join(
-                f"{row.image_id}:{row.bounding_box_id} ({row.nearest_distance_m:.2f}m)"
-                for row in too_far.itertuples()
-            )
-            raise ZoneTooFarError(
-                f"{len(too_far)} detection(s) fall more than {max_nearest_distance_m}m outside "
-                f"every zone polygon in {shapefile}: {offenders}"
-            )
-
         joined.loc[nearest.index, "species"] = nearest["species"]
         joined.loc[nearest.index, "assignment_method"] = "nearest_polygon"
         for column in present_attrs:
             joined.loc[nearest.index, column] = nearest[column]
+
+        too_far = nearest[nearest["nearest_distance_m"] > max_nearest_distance_m]
+        for row in too_far.itertuples():
+            logger.warning(
+                "Detection %s:%s is %.2fm outside every zone polygon in %s (max %sm); "
+                "assigning %s",
+                row.image_id, row.bounding_box_id, row.nearest_distance_m, shapefile,
+                max_nearest_distance_m, UNKNOWN_SPECIES_ID,
+            )
+        joined.loc[too_far.index, "species"] = UNKNOWN_SPECIES_ID
+        joined.loc[too_far.index, "assignment_method"] = UNKNOWN_TOO_FAR_METHOD
+        for column in present_attrs:
+            joined.loc[too_far.index, column] = None
 
     rename_map = {"species": "species_id", **{c: _OPTIONAL_ZONE_ATTRS[c] for c in present_attrs}}
     return joined.rename(columns=rename_map)
@@ -117,6 +123,58 @@ def assign_monoculture(dets: pd.DataFrame, species_code: str) -> pd.DataFrame:
     dets = dets.copy()
     dets["species_id"] = species_code
     dets["assignment_method"] = "monoculture_config"
+    return dets
+
+
+# The detection model's color-checker class. TXT-sourced rows have a blank
+# classname, so the class id is matched as well.
+COLOR_CHECKER_DETECTION_CLASS = "1"
+COLOR_CHECKER_DETECTION_CLASSNAME = "color_checker"
+
+
+def _is_color_checker(dets: pd.DataFrame) -> pd.Series:
+    blank = pd.Series("", index=dets.index)
+    return (
+        dets.get("classname", blank).astype(str) == COLOR_CHECKER_DETECTION_CLASSNAME
+    ) | (dets.get("class", blank).astype(str) == COLOR_CHECKER_DETECTION_CLASS)
+
+
+def _set_catalog_label(
+    dets: pd.DataFrame, mask: pd.Series, species_id: str, catalog: Dict[str, Any] | None
+) -> None:
+    """Point *mask* rows at *species_id*, overwriting the zone-sourced labels:
+    species_name/class_id come from its catalog entry (blank without a catalog)
+    and cultivar columns are cleared."""
+    entry = (catalog or {}).get("species", {}).get(species_id, {})
+    dets.loc[mask, "species_id"] = species_id
+    if "species_name" in dets.columns:
+        dets.loc[mask, "species_name"] = entry.get("common_name")
+    if "class_id" in dets.columns:
+        # A shapefile with a text class_id field reads in as pandas 3's str
+        # dtype, which rejects the catalog's int; the caller normalizes to Int64.
+        dets["class_id"] = dets["class_id"].astype(object)
+        dets.loc[mask, "class_id"] = entry.get("class_id")
+    for column in ("cultivar_id", "cultivar_name"):
+        if column in dets.columns:
+            dets.loc[mask, column] = None
+
+
+def assign_fallback_labels(dets: pd.DataFrame, catalog: Dict[str, Any] | None) -> pd.DataFrame:
+    """Apply the labels that don't come from the zone/monoculture assignment.
+
+    - Color-checker detections get COLORCHECKER / color_checker_class, whatever
+      zone they fall in and whether or not they were georeferenced.
+    - Unknown-plant rows (unknown_too_far, unknown_not_georeferenced) get the
+      PLANT entry's species_name/class_id.
+    """
+    dets = dets.copy()
+    is_checker = _is_color_checker(dets)
+    is_unknown = (dets["species_id"] == UNKNOWN_SPECIES_ID) & ~is_checker
+    if is_unknown.any():
+        _set_catalog_label(dets, is_unknown, UNKNOWN_SPECIES_ID, catalog)
+    if is_checker.any():
+        _set_catalog_label(dets, is_checker, COLOR_CHECKER_SPECIES_ID, catalog)
+        dets.loc[is_checker, "assignment_method"] = COLOR_CHECKER_METHOD
     return dets
 
 

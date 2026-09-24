@@ -7,18 +7,20 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Collection
 
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 
 from stages import ITEM_FAILED, ITEM_OK
 
-from . import ERROR_GRID_NOT_FOUND, ERROR_REMAP_FAILED
+from . import ERROR_REMAP_FAILED
 
 logger = logging.getLogger(__name__)
 
 WARNING_SURFACE_MISS = "W_SURFACE_MISS"
+WARNING_GRID_NOT_FOUND = "W_GRID_NOT_FOUND"
+WARNING_NO_CAMERA_REFERENCE = "W_NO_CAMERA_REFERENCE"
 
 # ASFM writes each NPZ's crs field as the str() of its own CRS object rather
 # than a plain identifier, e.g. "<CoordinateSystem 'WGS 84 / UTM zone 18N
@@ -83,6 +85,9 @@ class ImageRemapResult:
     error_code: str | None = None
     error_type: str | None = None
     error_message: str | None = None
+    # Detection rows that couldn't be georeferenced (no grid, surface miss, remap
+    # failure). They're still written to the CSV, with blank world coordinates.
+    unmapped_rows: list[dict[str, str]] = field(default_factory=list)
 
 
 # store npz data 
@@ -303,7 +308,7 @@ def map_bbox(row: dict[str, str], grid: GridData) -> tuple[dict[str, Any] | None
                 code=WARNING_SURFACE_MISS,
                 warning_type="SurfaceMissWarning",
                 message=(
-                    f"Skipping detection {bbox_id} for image {image_id}: "
+                    f"Detection {bbox_id} for image {image_id} left un-georeferenced: "
                     "at least one bbox corner failed after inward nudges."
                 ),
                 meta={"image_id": image_id, "bounding_box_id": bbox_id},
@@ -340,6 +345,18 @@ def load_detection_rows(source: Path) -> tuple[list[str], list[dict[str, str]]]:
         if missing:
             raise ValueError(f"Detection CSV missing required columns: {', '.join(missing)}")
         rows = list(reader)
+
+    # The detector emits float32 edges like 1.0000001192092896 for boxes touching
+    # the image border; clamp that rounding noise (only) so validation accepts them.
+    # Genuinely out-of-range boxes are left for remapping to warn on.
+    for row in rows:
+        for column in ("xmin", "ymin", "xmax", "ymax"):
+            try:
+                value = float(row[column])
+            except (TypeError, ValueError):
+                continue
+            if -1e-6 <= value < 0.0 or 1.0 < value <= 1.0 + 1e-6:
+                row[column] = repr(_clamp01(value))
 
     # The batch CSV has no row for images with zero detections. Preserve those
     # image identities from their empty sibling TXT files without recompiling
@@ -454,8 +471,15 @@ def remap_rows(
     grid_dir: Path,
     *,
     cache: GridCache | None = None,
+    referenced_image_ids: Collection[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[ImageRemapResult]]:
-    """Remap detection rows to world coordinates, returning mapped rows and per-image results."""
+    """Remap detection rows to world coordinates, returning mapped rows and per-image results.
+
+    When *referenced_image_ids* is given, an image with a grid but no ASFM
+    camera/FOV reference row is left un-georeferenced (W_NO_CAMERA_REFERENCE):
+    ASFM has written grids for cameras it didn't align, with implausibly small
+    footprints, and primary selection can't run on them without a reference.
+    """
 
     # cache image results to avoid redundant grid loads
     cache = cache if cache is not None else GridCache(grid_dir)
@@ -482,19 +506,26 @@ def remap_rows(
         try:
             # check cache
             grid = cache.get(image_id)
-            
-
         except FileNotFoundError as exc:
-            # cache miss
+            # No ASFM grid (e.g. a frame outside every reconstructed flight
+            # window): expected, so the image's detections are kept un-georeferenced.
+            logger.warning(str(exc))
             results.append(
                 ImageRemapResult(
                     image_id=image_id,
-                    status=ITEM_FAILED,
+                    status=ITEM_OK,
                     n_input_rows=len(image_rows),
                     n_output_rows=0,
-                    error_code=ERROR_GRID_NOT_FOUND,
-                    error_type=type(exc).__name__,
-                    error_message=str(exc),
+                    warnings=[
+                        RemapWarning(
+                            unit_id=image_id,
+                            code=WARNING_GRID_NOT_FOUND,
+                            warning_type="GridNotFoundWarning",
+                            message=str(exc),
+                            meta={"image_id": image_id},
+                        )
+                    ],
+                    unmapped_rows=list(image_rows),
                 )
             )
             continue
@@ -509,14 +540,42 @@ def remap_rows(
                     error_code=ERROR_REMAP_FAILED,
                     error_type=type(exc).__name__,
                     error_message=str(exc),
+                    unmapped_rows=list(image_rows),
+                )
+            )
+            continue
+
+        if referenced_image_ids is not None and image_id not in referenced_image_ids:
+            message = (
+                f"Grid file for image_id={image_id} has no camera/FOV reference row "
+                f"under {cache.grid_dir}; leaving its detections un-georeferenced"
+            )
+            logger.warning(message)
+            results.append(
+                ImageRemapResult(
+                    image_id=image_id,
+                    status=ITEM_OK,
+                    n_input_rows=len(image_rows),
+                    n_output_rows=0,
+                    warnings=[
+                        RemapWarning(
+                            unit_id=image_id,
+                            code=WARNING_NO_CAMERA_REFERENCE,
+                            warning_type="NoCameraReferenceWarning",
+                            message=message,
+                            meta={"image_id": image_id},
+                        )
+                    ],
+                    unmapped_rows=list(image_rows),
                 )
             )
             continue
 
         warnings: list[RemapWarning] = []
+        unmapped_rows: list[dict[str, str]] = []
         n_output_rows = 0
 
-        for row in image_rows:
+        for index, row in enumerate(image_rows):
             try:
                 mapped_row, warning = map_bbox(row, grid)
             except Exception as exc:
@@ -533,6 +592,7 @@ def remap_rows(
                             f"Unexpected remap failure for image_id={image_id}, "
                             f"bounding_box_id={row.get('bounding_box_id')}: {exc}"
                         ),
+                        unmapped_rows=unmapped_rows + list(image_rows[index:]),
                     )
                 )
                 break
@@ -540,6 +600,7 @@ def remap_rows(
             if warning is not None:
                 logger.warning(warning.message)
                 warnings.append(warning)
+                unmapped_rows.append(row)
                 continue
 
             output_rows.append(mapped_row)
@@ -552,6 +613,7 @@ def remap_rows(
                     n_input_rows=len(image_rows),
                     n_output_rows=n_output_rows,
                     warnings=warnings,
+                    unmapped_rows=unmapped_rows,
                 )
             )
 
