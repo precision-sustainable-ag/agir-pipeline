@@ -7,7 +7,7 @@ from shapely.geometry import box
 
 from stages.det_to_world.species import (
     UnknownSpeciesCodeError,
-    ZoneTooFarError,
+    assign_fallback_labels,
     assign_monoculture,
     assign_spatial,
     enrich_with_catalog,
@@ -180,16 +180,23 @@ def test_assign_spatial_nearest_fallback(geo_df, shapefile):
     assert (outside["assignment_method"] == "nearest_polygon").all()
 
 
-def test_assign_spatial_raises_when_nearest_zone_beyond_default_threshold(far_geo_df, shapefile):
-    """A detection ~99m from every zone polygon exceeds the 5m default and raises."""
-    with pytest.raises(ZoneTooFarError, match="IMG_0001:0"):
-        assign_spatial(far_geo_df, str(shapefile))
+def test_assign_spatial_unknown_plant_when_nearest_zone_beyond_default_threshold(far_geo_df, shapefile):
+    """A detection ~99m from every zone polygon exceeds the 5m default and gets PLANT."""
+    result = assign_spatial(far_geo_df, str(shapefile))
+
+    assert result.loc[0, "species_id"] == "PLANT"
+    assert result.loc[0, "assignment_method"] == "unknown_too_far"
 
 
-def test_assign_spatial_raises_when_nearest_zone_beyond_custom_threshold(geo_df, shapefile):
+def test_assign_spatial_unknown_plant_when_nearest_zone_beyond_custom_threshold(geo_df, shapefile):
     """A custom, stricter max_nearest_distance_m can flag a point normally within tolerance."""
-    with pytest.raises(ZoneTooFarError, match="IMG_0001:2"):
-        assign_spatial(geo_df, str(shapefile), max_nearest_distance_m=1.0)
+    result = assign_spatial(geo_df, str(shapefile), max_nearest_distance_m=1.0)
+
+    outside = result[result["bounding_box_id"] == 2]
+    assert (outside["species_id"] == "PLANT").all()
+    assert (outside["assignment_method"] == "unknown_too_far").all()
+    inside = result[result["bounding_box_id"].isin([0, 1])]
+    assert (inside["assignment_method"] == "spatial_join").all()
 
 
 def test_assign_spatial_nearest_fallback_within_custom_threshold(far_geo_df, shapefile):
@@ -375,3 +382,58 @@ def test_enrich_with_catalog_after_assign_spatial(geo_df, cultivar_shapefile, ca
     exp_oleic_rows = result[result["cultivar_id"] == "107"]
     assert (exp_oleic_rows["cultivar_display_name"] == "Peanut - EXP-OLEIC-001").all()
     assert (exp_oleic_rows["species_common_name"] == "peanut").all()
+
+
+def test_assign_fallback_labels():
+    """Color checkers (by classname, or class id when classname is blank) get COLORCHECKER
+    whatever their zone or georeferencing; unknown-plant rows get the PLANT entry's
+    labels; cultivar is cleared on both."""
+    dets = pd.DataFrame({
+        "class": ["0", "1", "1", "0", "1"],
+        "classname": ["plant", "color_checker", "", "plant", "color_checker"],
+        "species_id": ["VIVI", "VIVI", "VIVI", "PLANT", "PLANT"],
+        "assignment_method": [
+            "spatial_join", "spatial_join", "unknown_too_far",
+            "unknown_not_georeferenced", "unknown_not_georeferenced",
+        ],
+        "species_name": ["hairy vetch", "hairy vetch", None, None, None],
+        "class_id": [29, 29, None, None, None],
+        "cultivar_id": ["107"] * 5,
+    })
+    catalog = {"species": {
+        "COLORCHECKER": {"common_name": "colorchecker", "class_id": 28},
+        "PLANT": {"common_name": "unknown", "class_id": 27},
+    }}
+
+    result = assign_fallback_labels(dets, catalog)
+
+    assert result.loc[0, "species_id"] == "VIVI"
+    assert result.loc[0, "class_id"] == 29
+    assert result.loc[0, "cultivar_id"] == "107"
+    for i in (1, 2, 4):
+        assert result.loc[i, "species_id"] == "COLORCHECKER"
+        assert result.loc[i, "species_name"] == "colorchecker"
+        assert result.loc[i, "class_id"] == 28
+        assert pd.isna(result.loc[i, "cultivar_id"])
+    assert (result.loc[[1, 2, 4], "assignment_method"] == "color_checker_class").all()
+    assert result.loc[3, "species_id"] == "PLANT"
+    assert result.loc[3, "species_name"] == "unknown"
+    assert result.loc[3, "class_id"] == 27
+    assert pd.isna(result.loc[3, "cultivar_id"])
+
+
+def test_assign_fallback_labels_with_text_class_id_column():
+    """A shapefile whose class_id field is text gives a str-dtype column; the
+    catalog's int class_id must still be assignable into it."""
+    dets = pd.DataFrame({
+        "class": ["0", "0"],
+        "classname": ["plant", "plant"],
+        "species_id": ["VIVI", "PLANT"],
+        "assignment_method": ["spatial_join", "unknown_too_far"],
+        "class_id": ["29", None],
+    })
+    catalog = {"species": {"PLANT": {"common_name": "unknown", "class_id": 27}}}
+
+    result = assign_fallback_labels(dets, catalog)
+
+    assert pd.to_numeric(result["class_id"]).tolist() == [29, 27]
