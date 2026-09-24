@@ -739,7 +739,14 @@ Review these values before running:
 - `paths.log_dir`: Ceres result-sync log directory
 - `result_sync.atlas_endpoint` and `result_sync.ceres_endpoint`
 - `result_sync.atlas_outbox` and `result_sync.ceres_inbox`
-- `result_sync.atlas_run_root` and `result_sync.ceres_run_root`
+- `result_sync.atlas_run_root` and `result_sync.ceres_run_root`. New requests
+  must name an Atlas bundle at `<atlas_run_root>/<stage>/<run_id>`, so each
+  Atlas stage config's `paths.output_stage_runs` must be
+  `<atlas_run_root>/<stage>`. The older flat `<atlas_run_root>/<run_id>`
+  layout is accepted only for runs already registered in `result_syncs`. Ceres
+  bundles stay flat at `<ceres_run_root>/<run_id>`.
+- `result_sync.promotion.stage_suffixes` has an entry for every Atlas stage
+  that promotes output (for example `det_to_seg: segmentations`)
 - `result_sync.promotion.root` and its stage suffixes
 - `result_sync.inventory` Ceres developed-images scope and worker settings
 - polling interval and timeout
