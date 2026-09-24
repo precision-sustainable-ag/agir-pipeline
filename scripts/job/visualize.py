@@ -42,6 +42,10 @@ Works for any stage — behaviour is controlled by --mode:
                renders as solid red with no legend. Output: overlay JPGs
                downscaled to --max-width, plus legend.png when colorized.
 
+  seg_to_cut   Delegate to the independent seg_to_cut visualization module.
+               It reads complete four-file cutout sets and writes one
+               multipage batch QC PDF.
+
 Output always goes to --output and is promoted to:
   <final_dest_root>/<batch_id>/<stage>/sample/
 
@@ -647,12 +651,32 @@ def main() -> int:
     )
     parser.add_argument(
         "--mode", required=True,
-        choices=["raw_to_jpg", "jpg_to_det", "det_to_world", "det_to_seg"],
+        choices=["raw_to_jpg", "jpg_to_det", "det_to_world", "det_to_seg", "seg_to_cut"],
         help="Stage to visualize.",
     )
     parser.add_argument(
-        "--images", required=True, type=Path,
+        "--images", type=Path,
         help="Directory of source JPG images.",
+    )
+    parser.add_argument(
+        "--cutouts", type=Path,
+        help="seg_to_cut mode only: directory containing four-file cutout sets.",
+    )
+    parser.add_argument(
+        "--run-report", type=Path,
+        help="seg_to_cut mode only: optional run_report.json path.",
+    )
+    parser.add_argument(
+        "--manifest", type=Path,
+        help="seg_to_cut mode only: optional manifest.json path.",
+    )
+    parser.add_argument(
+        "--segmentations", type=Path,
+        help="seg_to_cut mode only: original segmentation masks for cleanup comparison.",
+    )
+    parser.add_argument(
+        "--georeferenced-csv", type=Path,
+        help="seg_to_cut mode only: detections used to crop original masks.",
     )
     parser.add_argument(
         "--detections", type=Path, default=None,
@@ -694,6 +718,10 @@ def main() -> int:
         help="Random seed for reproducible sampling (default: 42).",
     )
     parser.add_argument(
+        "--max-flagged", type=int, default=24,
+        help="seg_to_cut mode only: maximum flagged cutouts to show (default: 24).",
+    )
+    parser.add_argument(
         "--bbox-shp-output", type=Path, default=None,
         help=(
             "det_to_world mode only: also write a shapefile of every box in "
@@ -713,7 +741,30 @@ def main() -> int:
         datefmt="%Y-%m-%dT%H:%M:%SZ",
     )
 
-    if not args.images.is_dir():
+    if args.mode == "seg_to_cut":
+        if args.cutouts is None or not args.cutouts.is_dir():
+            logger.error("--cutouts must be a valid directory for seg_to_cut mode")
+            return 1
+        from stages.seg_to_cut.visualization import generate_pdf
+
+        try:
+            generate_pdf(
+                args.cutouts,
+                args.output,
+                run_report_path=args.run_report,
+                manifest_path=args.manifest,
+                segmentations_dir=args.segmentations,
+                georeferenced_csv=args.georeferenced_csv,
+                sample_size=args.sample_size,
+                max_flagged=args.max_flagged,
+                seed=args.seed,
+            )
+        except (OSError, ValueError) as exc:
+            logger.error("Could not generate seg_to_cut QC report: %s", exc)
+            return 1
+        return 0
+
+    if args.images is None or not args.images.is_dir():
         logger.error("Images directory not found: %s", args.images)
         return 1
 
