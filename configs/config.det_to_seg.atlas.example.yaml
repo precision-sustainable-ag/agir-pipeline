@@ -49,20 +49,20 @@ visualization:
     masks: '"$RUN_DIR/artifacts/masks"'
     species_catalog: '"$SPECIES_CATALOG_PATH"'
     output: '"$VIZ_DIR"'
-    sample_size: 50
+    sample_size: 100
     max_width: 1800
 
 render:
   template: slurm_job.sh.j2
 
 paths:
-  agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
-  uv_env: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/.venv/bin/activate
+  # Relative paths resolve against agir_pipeline_dir (default: repo root).
+  uv_env: .venv/bin/activate
 
   # Segmentation model config read by stages/det_to_seg/processor.py. The
   # checkpoint path remains inside this model config and is resolved relative
   # to that file when it is not absolute.
-  stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/stages/det_to_seg/configs/default.yaml
+  stage_config: stages/det_to_seg/configs/default.yaml
 
   # Exported into the generated job as $SPECIES_CATALOG_PATH. It stays outside
   # the model YAML because reference taxonomy is an input, not model tuning.
@@ -76,7 +76,7 @@ paths:
 
   output_stage_runs: /90daydata/dash_agir/tmp/stage_runs/det_to_seg
   final_dest_root: /90daydata/dash_agir/semifield-developed-images
-  log_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs/det_to_seg
+  log_dir: logs/det_to_seg
 
   db: /project/dash_agir/globus_index/globus_file_index.sqlite3
   db_read_mode: direct

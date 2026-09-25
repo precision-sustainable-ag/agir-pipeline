@@ -95,13 +95,13 @@ render:
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 paths:
-  agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
+  # Relative paths resolve against agir_pipeline_dir (default: repo root).
 
-  uv_env: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/.venv/bin/activate
+  uv_env: .venv/bin/activate
 
   # Used by the orchestrator for job traceability; the stage receives paths
   # through its CLI arguments.
-  stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/configs/config.det_to_world.yaml
+  stage_config: configs/config.det_to_world.yaml
 
   # Both images/ and detections/ subdirs for a batch are staged here (see
   # transfer.routes.det_to_world below), then rsynced together into
@@ -135,7 +135,7 @@ paths:
   final_dest_root: /90daydata/dash_agir/semifield-developed-images
 
   # SLURM job stdout/stderr logs.
-  log_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs
+  log_dir: logs/det_to_world
 
   # ── SQLite DB ──────────────────────────────────────────────────────────────
   db: /project/dash_agir/globus_index/globus_file_index.sqlite3

@@ -33,13 +33,12 @@ render:
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 paths:
-  # Root of the agir-pipeline repository on the cluster.
-  agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
+  # Relative paths resolve against agir_pipeline_dir (default: repo root).
 
-  uv_env: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/.venv/bin/activate
+  uv_env: .venv/bin/activate
 
   # Camera config YAML passed to raw_to_jpg --c.
-  stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/configs/config.raw_to_jpg.example.yaml
+  stage_config: configs/config.raw_to_jpg.example.yaml
 
   # Where staged RAW inputs land after transfer (one subdir per batch_id).
   # In SQLite mode this is the path operators rsync/Globus files to directly.
@@ -54,7 +53,7 @@ paths:
   final_dest_root: /90daydata/dash_agir/semifield-developed-images
 
   # SLURM job stdout/stderr logs.
-  log_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs
+  log_dir: logs/raw_to_jpg
 
   # ── SQLite DB (required) ──────────────────────────────────────────
   # Shared state for inventory, input staging, readiness, leases, and run
@@ -74,13 +73,14 @@ paths:
   locks_root: /project/dash_agir/locks
 
   # ── raw_to_jpg camera pipeline paths ─────────────────────────────────────
-  rawtherapee_cli: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/squashfs-root/usr/bin/rawtherapee-cli
-  pp3_profile: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/configs/profiles/MD_shr661CXGE_raw16.pp3
+  # Relative to this file's directory (configs/).
+  rawtherapee_cli: ../squashfs-root/usr/bin/rawtherapee-cli
+  pp3_profile: profiles/MD_shr661CXGE_raw16.pp3
   temp_dng_dir: /tmp/dash_agir/dng
-  color_matrix: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/configs/profiles/MD_shr661CXGE_calibration_matrix_optimized.npy
-  svs_tags: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/configs/profiles/shr661CXGE_tags.yaml
-  rawtherapee_validate_script: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/scripts/setup/validate_rawtherapee.sh
-  setup_exiftool_script: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/scripts/setup/setup_exiftool.sh
+  color_matrix: profiles/MD_shr661CXGE_calibration_matrix_optimized.npy
+  svs_tags: profiles/shr661CXGE_tags.yaml
+  rawtherapee_validate_script: ../scripts/setup/validate_rawtherapee.sh
+  setup_exiftool_script: ../scripts/setup/setup_exiftool.sh
 
 # ── SLURM job parameters ──────────────────────────────────────────────────────
 slurm:
