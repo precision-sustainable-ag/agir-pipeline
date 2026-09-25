@@ -69,6 +69,11 @@ def test_world_area_converts_projected_non_metre_units() -> None:
     assert result == pytest.approx(6 * us_survey_foot_metres**2 * 10_000)
 
 
+def test_local_crs_is_treated_as_metres_without_pyproj_lookup() -> None:
+    assert calculate_bbox_area_cm2(world_box(crs="LOCAL")) == pytest.approx(60_000.0)
+    assert calculate_bbox_area_cm2(world_box(crs="local")) is None
+
+
 @pytest.mark.parametrize(
     "bbox",
     [

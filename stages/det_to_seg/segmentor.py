@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 from dataclasses import dataclass
 from numbers import Integral
 from pathlib import Path
@@ -21,6 +20,21 @@ log = logging.getLogger(__name__)
 DEFAULT_BATCH_SIZE = 16
 TILE_TRIGGER_SIDE = 1024
 TILE_TRIGGER_AREA = 1024 * 1024
+
+# Counts calls to _predict_probabilities, the single chokepoint every
+# inference path (single-crop, batched-crop, tiled) funnels through. Used to
+# measure real GPU forward-call counts for perf baselining; not read by any
+# inference logic itself.
+_forward_call_count = 0
+
+
+def reset_forward_call_count() -> None:
+    global _forward_call_count
+    _forward_call_count = 0
+
+
+def get_forward_call_count() -> int:
+    return _forward_call_count
 
 
 # ---------------------------------------------------------------------------
@@ -89,28 +103,13 @@ def _predict_probabilities(
     tensor: torch.Tensor,
     device: str,
 ) -> torch.Tensor:
+    global _forward_call_count
+    _forward_call_count += 1
     with torch.inference_mode():
         if str(device).startswith("cuda"):
             with torch.amp.autocast(device_type="cuda"):
                 return torch.sigmoid(model(tensor.to(device)))
         return torch.sigmoid(model(tensor.to(device)))
-
-
-def _pad_to_divisor(x: torch.Tensor, div: Optional[int]):
-    if not div:
-        return x, (0, 0, 0, 0)
-    _, _, h, w = x.shape
-    ph = (div - h % div) % div
-    pw = (div - w % div) % div
-    mode = "reflect" if ph < h and pw < w else "constant"
-    padded = torch.nn.functional.pad(x, (0, pw, 0, ph), mode=mode)
-    return padded, (0, ph, 0, pw)
-
-
-def _unpad(arr: np.ndarray, pads) -> np.ndarray:
-    _, pb, _, pr = pads
-    h, w = arr.shape[:2]
-    return arr[: h - pb if pb else h, : w - pr if pr else w]
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +132,51 @@ def predict_mask_single(
     )[0]
 
 
+def _predict_probabilities_padded(
+    model: torch.nn.Module,
+    crops_rgb: Sequence[np.ndarray],
+    divisor: Optional[int],
+    device: str,
+) -> list[np.ndarray]:
+    """Infer crops of any size in one model call and return raw (unthresholded)
+    probability maps, each sliced back to its own crop's native (h, w).
+
+    Crops are padded up to the batch's common max (h, w) -- reflect-padded
+    when legal (mirrors _pad_to_divisor's rule, applied per crop against its
+    own native size), constant-padded otherwise -- so torch.cat works across
+    differently-sized crops without distorting any crop's own pixel content.
+
+    Returns unthresholded probabilities so tiled inference can Hann-blend
+    across overlapping tiles before thresholding once; predict_masks_batched
+    is a thin thresholding wrapper around this for callers that just want
+    binary masks.
+    """
+    if not crops_rgb:
+        return []
+
+    shapes = [crop.shape[:2] for crop in crops_rgb]
+    max_h = max(h for h, _ in shapes)
+    max_w = max(w for _, w in shapes)
+    if divisor:
+        max_h += (divisor - max_h % divisor) % divisor
+        max_w += (divisor - max_w % divisor) % divisor
+
+    padded_tensors = []
+    for crop in crops_rgb:
+        h, w = crop.shape[:2]
+        ph, pw = max_h - h, max_w - w
+        mode = "reflect" if ph < h and pw < w else "constant"
+        padded_tensors.append(
+            torch.nn.functional.pad(_to_tensor01(crop), (0, pw, 0, ph), mode=mode)
+        )
+
+    batch = torch.cat(padded_tensors, dim=0)
+    probabilities = _predict_probabilities(model, batch, device)
+    probabilities = probabilities.squeeze(1).cpu().numpy()
+
+    return [prob[:h, :w] for prob, (h, w) in zip(probabilities, shapes)]
+
+
 def predict_masks_batched(
     model: torch.nn.Module,
     crops_rgb: Sequence[np.ndarray],
@@ -140,32 +184,10 @@ def predict_masks_batched(
     divisor: Optional[int],
     device: str,
 ) -> list[np.ndarray]:
-    """Infer same-sized crops in one model call and return binary crop masks."""
-
-    if not crops_rgb:
-        return []
-
-    crop_shapes = [crop.shape[:2] for crop in crops_rgb]
-    if len(set(crop_shapes)) != 1:
-        raise ValueError("Batched segmentation crops must all have the same height and width")
-
-    batch = torch.cat([_to_tensor01(crop) for crop in crops_rgb], dim=0)
-    padded, pads = _pad_to_divisor(batch, divisor)
-    probabilities = _predict_probabilities(model, padded, device)
-    masks = (probabilities > thr).float().squeeze(1).cpu().numpy().astype(np.uint8)
-
-    results: list[np.ndarray] = []
-    for mask, (crop_height, crop_width) in zip(masks, crop_shapes):
-        if divisor:
-            mask = _unpad(mask, pads)
-        if mask.shape != (crop_height, crop_width):
-            mask = cv2.resize(
-                mask,
-                (crop_width, crop_height),
-                interpolation=cv2.INTER_NEAREST,
-            )
-        results.append(mask)
-    return results
+    """Infer crops of any size in one model call and return thresholded binary
+    crop masks, each sliced back to its own crop's native (h, w)."""
+    probabilities = _predict_probabilities_padded(model, crops_rgb, divisor, device)
+    return [(p > thr).astype(np.uint8) for p in probabilities]
 
 
 def _hann2d(h: int, w: int) -> np.ndarray:
@@ -184,36 +206,36 @@ def predict_mask_tiled(
     device: str,
     tile_size: int = 1024,
     overlap: int = 128,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> np.ndarray:
     h, w = crop_rgb.shape[:2]
     acc = np.zeros((h, w), dtype=np.float32)
     wsum = np.zeros((h, w), dtype=np.float32)
     step = max(1, tile_size - overlap)
 
+    positions: list[tuple[int, int, int, int]] = []
     y = 0
     while y < h:
         x = 0
         while x < w:
-            y2 = min(y + tile_size, h)
-            x2 = min(x + tile_size, w)
-            tile = crop_rgb[y:y2, x:x2]
-            th, tw = tile.shape[:2]
-            win = _hann2d(th, tw)
-
-            t = _to_tensor01(tile)
-            tpad, pads = _pad_to_divisor(t, divisor)
-            prob = _predict_probabilities(model, tpad, device)
-
-            p = prob.squeeze(0).squeeze(0).cpu().numpy()
-            if divisor:
-                p = _unpad(p, pads)
-            if p.shape != (th, tw):
-                p = cv2.resize(p, (tw, th), interpolation=cv2.INTER_LINEAR)
-
-            acc[y:y2, x:x2] += p * win
-            wsum[y:y2, x:x2] += win
+            positions.append((y, x, min(y + tile_size, h), min(x + tile_size, w)))
             x += step
         y += step
+
+    # Batch tiles through the shared padded-probability primitive so a large
+    # crop's tiles cost a handful of forward calls, not one per tile. Tiles
+    # are accumulated as continuous probabilities and thresholded once at the
+    # end (below) -- never via the thresholding predict_masks_batched, which
+    # would threshold each tile before Hann-blending and corrupt the seams
+    # the windowing exists to smooth.
+    for start in range(0, len(positions), batch_size):
+        chunk = positions[start : start + batch_size]
+        tiles = [crop_rgb[y:y2, x:x2] for (y, x, y2, x2) in chunk]
+        probabilities = _predict_probabilities_padded(model, tiles, divisor, device)
+        for (y, x, y2, x2), p in zip(chunk, probabilities):
+            win = _hann2d(y2 - y, x2 - x)
+            acc[y:y2, x:x2] += p * win
+            wsum[y:y2, x:x2] += win
 
     return (acc / np.clip(wsum, 1e-6, None) >= thr).astype(np.uint8)
 
@@ -229,6 +251,7 @@ def predict_mask(
     use_tiling: bool,
     tile_size: int,
     overlap: int,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     tile_trigger_side: int = TILE_TRIGGER_SIDE,
     tile_trigger_area: int = TILE_TRIGGER_AREA,
 ) -> np.ndarray:
@@ -244,6 +267,7 @@ def predict_mask(
             device=device,
             tile_size=tile_size,
             overlap=overlap,
+            batch_size=batch_size,
         )
 
     return predict_mask_single(
@@ -317,6 +341,14 @@ def _is_large_crop(crop: np.ndarray) -> bool:
     return max(height, width) > TILE_TRIGGER_SIDE or height * width > TILE_TRIGGER_AREA
 
 
+def _chunk_by_size(crops: Sequence[_PreparedCrop], batch_size: int) -> list[list[_PreparedCrop]]:
+    """Sort crops by longest side so crops batched together are similarly
+    sized (bounds padding waste when they're padded to a shared shape), then
+    slice into fixed-size chunks."""
+    ordered = sorted(crops, key=lambda crop: max(crop.crop_rgb.shape[:2]))
+    return [ordered[i : i + batch_size] for i in range(0, len(ordered), batch_size)]
+
+
 def _validate_crop_mask(mask: np.ndarray, crop: _PreparedCrop) -> None:
     expected_shape = crop.crop_rgb.shape[:2]
     if not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.shape != expected_shape:
@@ -347,43 +379,48 @@ def composite_bbox_masks(
         raise ValueError(f"batch_size must be a positive integer, got {batch_size!r}")
 
     masks_by_order: dict[int, np.ndarray] = {}
-    ordinary_by_shape: dict[tuple[int, int], list[_PreparedCrop]] = defaultdict(list)
-
+    large_crops: list[_PreparedCrop] = []
+    ordinary_crops: list[_PreparedCrop] = []
     for crop in prepared:
-        if _is_large_crop(crop.crop_rgb):
-            masks_by_order[crop.order] = predict_mask(
-                model=model,
-                crop_rgb=crop.crop_rgb,
-                thr=threshold,
-                divisor=divisor,
-                device=device,
-                use_tiling=bool(config["tiling"]),
-                tile_size=int(config["tile_size"]),
-                overlap=int(config["overlap"]),
-            )
-        else:
-            ordinary_by_shape[crop.crop_rgb.shape[:2]].append(crop)
+        (large_crops if _is_large_crop(crop.crop_rgb) else ordinary_crops).append(crop)
 
-    for crops in ordinary_by_shape.values():
-        for start in range(0, len(crops), batch_size):
-            chunk = crops[start : start + batch_size]
-            masks = predict_masks_batched(
-                model=model,
-                crops_rgb=[crop.crop_rgb for crop in chunk],
-                thr=threshold,
-                divisor=divisor,
-                device=device,
-            )
-            if len(masks) != len(chunk):
-                raise RuntimeError(
-                    f"Batched inference returned {len(masks)} masks for {len(chunk)} crops"
-                )
-            for crop, mask in zip(chunk, masks):
-                masks_by_order[crop.order] = mask
+    for crop in large_crops:
+        masks_by_order[crop.order] = predict_mask(
+            model=model,
+            crop_rgb=crop.crop_rgb,
+            thr=threshold,
+            divisor=divisor,
+            device=device,
+            use_tiling=bool(config["tiling"]),
+            tile_size=int(config["tile_size"]),
+            overlap=int(config["overlap"]),
+            batch_size=batch_size,
+        )
 
-    # Composite in original TXT order even though inference was grouped by
-    # shape. The first detection owns overlap pixels; later detections may only
-    # fill pixels that are still background.
+    # Sort-by-longest-side then fixed-size chunking replaces exact-shape
+    # grouping: real YOLO boxes almost never share an exact pixel size, so
+    # requiring an exact match left batch_size effectively unused. Crops in a
+    # chunk are padded (not resized) to the chunk's own max shape inside
+    # predict_masks_batched, so grouping strategy has no effect on any crop's
+    # own pixel content -- only how many forward calls it costs to infer them.
+    for chunk in _chunk_by_size(ordinary_crops, batch_size):
+        masks = predict_masks_batched(
+            model=model,
+            crops_rgb=[crop.crop_rgb for crop in chunk],
+            thr=threshold,
+            divisor=divisor,
+            device=device,
+        )
+        if len(masks) != len(chunk):
+            raise RuntimeError(
+                f"Batched inference returned {len(masks)} masks for {len(chunk)} crops"
+            )
+        for crop, mask in zip(chunk, masks):
+            masks_by_order[crop.order] = mask
+
+    # Composite in original TXT order even though inference was grouped into
+    # size-sorted chunks. The first detection owns overlap pixels; later
+    # detections may only fill pixels that are still background.
     for crop in prepared:
         mask_crop = masks_by_order[crop.order]
         _validate_crop_mask(mask_crop, crop)

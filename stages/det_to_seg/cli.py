@@ -6,8 +6,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import logging
+import statistics
 import subprocess
 from pathlib import Path
+
+import torch
 
 from stages import EXIT_CONFIG_ERROR, EXIT_FAILURE, EXIT_PARTIAL, EXIT_SUCCESS, ITEM_OK
 from stages.common import ManifestBuilder, RunReportBuilder, parse_batch_id, setup_logging
@@ -46,6 +49,22 @@ def get_git_commit() -> str | None:
     except (subprocess.CalledProcessError, FileNotFoundError):
         logger.warning("Could not determine git commit hash")
         return None
+
+
+def _summarize(values: list[float]) -> dict:
+    """sum/mean/p50/p90/max summary of a per-image timing series, for perf baselining."""
+    if not values:
+        return {"n": 0, "sum": 0.0, "mean": 0.0, "p50": 0.0, "p90": 0.0, "max": 0.0}
+    ordered = sorted(values)
+    p90_index = min(len(ordered) - 1, int(round(0.9 * (len(ordered) - 1))))
+    return {
+        "n": len(ordered),
+        "sum": sum(ordered),
+        "mean": statistics.mean(ordered),
+        "p50": statistics.median(ordered),
+        "p90": ordered[p90_index],
+        "max": ordered[-1],
+    }
 
 
 def _build_jpg_index(jpg_dir: Path) -> dict[str, Path]:
@@ -301,6 +320,10 @@ def main() -> int:
         model_id=str(processor.config.get("weights")),
     )
 
+    is_cuda = str(args.device).startswith("cuda")
+    if is_cuda:
+        torch.cuda.reset_peak_memory_stats(args.device)
+
     results = []
     if image_pairs:
         try:
@@ -372,7 +395,33 @@ def main() -> int:
         fallback_detection_count,
     )
 
-    report.set_extra(fallback_detection_count=fallback_detection_count)
+    timing_summary = {
+        "decode_seconds": _summarize([r.decode_seconds for r in results if r.decode_seconds]),
+        "inference_seconds": _summarize(
+            [r.inference_seconds for r in results if r.inference_seconds]
+        ),
+        "write_seconds": _summarize([r.write_seconds for r in results if r.write_seconds]),
+        "forward_calls_total": sum(r.n_forward_calls for r in results),
+    }
+    if is_cuda:
+        timing_summary["peak_gpu_memory_mb"] = torch.cuda.max_memory_allocated(args.device) / (
+            1024 * 1024
+        )
+
+    logger.info(
+        "Timing | decode mean=%.3fs p90=%.3fs | inference mean=%.3fs p90=%.3fs | "
+        "write mean=%.3fs p90=%.3fs | forward_calls_total=%d%s",
+        timing_summary["decode_seconds"]["mean"],
+        timing_summary["decode_seconds"]["p90"],
+        timing_summary["inference_seconds"]["mean"],
+        timing_summary["inference_seconds"]["p90"],
+        timing_summary["write_seconds"]["mean"],
+        timing_summary["write_seconds"]["p90"],
+        timing_summary["forward_calls_total"],
+        f" | peak_gpu_memory_mb={timing_summary['peak_gpu_memory_mb']:.1f}" if is_cuda else "",
+    )
+
+    report.set_extra(fallback_detection_count=fallback_detection_count, timing=timing_summary)
     report.stop(exit_code)
     report.set_outputs(
         output_root=str(args.o),
