@@ -365,8 +365,18 @@ def _format_decimal(value: float | None, *, suffix: str = "") -> str:
     return f"{formatted}{suffix}"
 
 
+def _area_label_and_value(record: CutoutRecord) -> tuple[str, float | None]:
+    bbox_area = _metric(record, "bbox_area_cm2")
+    if bbox_area is not None:
+        return "area", bbox_area
+    estimated_area = _metric(record, "estimated_bbox_area_cm2")
+    if estimated_area is not None:
+        return "estimated area", estimated_area
+    return "area", None
+
+
 def _area_value(record: CutoutRecord) -> float | None:
-    return _metric(record, "bbox_area_cm2") or _metric(record, "estimated_bbox_area_cm2")
+    return _area_label_and_value(record)[1]
 
 
 def _area_bin(record: CutoutRecord) -> str | None:
@@ -771,12 +781,13 @@ def _native_preview(
 
 
 def _sample_caption(record: CutoutRecord, *, annotate_flags: bool) -> str:
+    area_label, area_value = _area_label_and_value(record)
     details = (
         f"{record.metadata.get('cutout_width', '?')} × "
         f"{record.metadata.get('cutout_height', '?')} px   |   "
         f"blur {_format_metric(_metric(record, 'blur_effect'))}   |   "
         f"components {_format_metric(_metric(record, 'num_components'))}   |   "
-        f"area {_format_decimal(_area_value(record), suffix=' cm²')}"
+        f"{area_label} {_format_decimal(area_value, suffix=' cm²')}"
     )
     if annotate_flags:
         details += (
