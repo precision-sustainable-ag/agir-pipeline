@@ -37,17 +37,17 @@ render:
   template: slurm_job.sh.j2
 
 paths:
-  agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
-  uv_env: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/.venv/bin/activate
+  # Relative paths resolve against agir_pipeline_dir (default: repo root).
+  uv_env: .venv/bin/activate
   # Contains the area-source, border, edge, camera, and lens settings.
-  stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/stages/seg_to_cut/configs/default.yaml
+  stage_config: stages/seg_to_cut/configs/default.yaml
   # Batch-independent reference data remains shared on Ceres rather than
   # being copied once per batch.
   species_catalog: /project/dash_agir/semifield-utils/species_information/species_catalog.generated.json
   input_staging_root: /90daydata/dash_agir/semifield-developed-images
   output_stage_runs: /90daydata/dash_agir/tmp/stage_runs/seg_to_cut
   final_dest_root: /90daydata/dash_agir/semifield-cutouts
-  log_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs/seg_to_cut
+  log_dir: logs/seg_to_cut
   db: /project/dash_agir/globus_index/globus_file_index.sqlite3
   db_read_mode: direct
   db_temp_dir: /90daydata/dash_agir/tmp/db

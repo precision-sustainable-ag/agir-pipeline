@@ -44,14 +44,16 @@ echo "[INFO] Main log: ${MAIN_LOG}"
 # ---- Environment ----
 # Load whatever your system requires for globus CLI and Python.
 # module load globus-cli
-source /project/dash_agir/matthew.kutugata/repos/agir-pipeline/.venv/bin/activate
 
 # ---- Paths ----
-REPO_DIR="/project/dash_agir/matthew.kutugata/repos/agir-pipeline"
+# Repo root = sbatch submit dir (Slurm runs a spooled copy of this script).
+REPO_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
 PYTHON_SCRIPT="${REPO_DIR}/scripts/admin/globus_index.py"
 SPECIES_REFERENCE_SCRIPT="${REPO_DIR}/scripts/admin/load_species_reference.py"
 ENDPOINT_CONFIG_YAML="${REPO_DIR}/configs/globus_endpoint_config.example.yaml"
 SQLITE_DB="/project/dash_agir/globus_index/globus_file_index.sqlite3"
+
+source "${REPO_DIR}/.venv/bin/activate"
 
 # ---- Tuning ----
 MAX_WORKERS=12

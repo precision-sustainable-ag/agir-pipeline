@@ -5,13 +5,14 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=1G
 #SBATCH --time=6:00:00
-#SBATCH --output=/project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs/det_to_world_group_%j.out
-#SBATCH --error=/project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs/det_to_world_group_%j.err
+#SBATCH --output=logs/det_to_world_group_%j.out
+#SBATCH --error=logs/det_to_world_group_%j.err
 
 set -Eeuo pipefail
 umask 002
 
-PROJECT_DIR="/project/dash_agir/matthew.kutugata/repos/agir-pipeline"
+# Repo root = sbatch submit dir (Slurm runs a spooled copy of this script).
+PROJECT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
 CONFIG_FILE="configs/config.det_to_world.example.yaml"
 STAGE="det_to_world"
 # det_to_world's readiness/submission checks are site-agnostic (driven by

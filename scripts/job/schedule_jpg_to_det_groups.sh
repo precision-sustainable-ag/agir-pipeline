@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-PROJECT_DIR="/project/dash_agir/matthew.kutugata/repos/agir-pipeline"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MASTER_BATCH_FILE="configs/batch_list.example.txt"
 GROUP_DIR="configs/jpg_to_det_groups"
 GROUP_RUNNER="scripts/job/run_jpg_to_det_group.sbatch"

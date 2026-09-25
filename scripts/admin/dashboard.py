@@ -1360,7 +1360,7 @@ def connect(state_file: Path, local_port: int, token: str) -> int:
         state = {}
     if not state.get("running"):
         print(f"No dashboard job is running (per {state_file}).\n"
-              f"Start one: sbatch {REPO_ROOT}/scripts/admin/dashboard.sbatch", file=sys.stderr)
+              f"Start one: cd {REPO_ROOT} && sbatch scripts/admin/dashboard.sbatch", file=sys.stderr)
         return 1
     target = (state["host"], state["port"])
     try:

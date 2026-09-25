@@ -8,13 +8,13 @@ paths:
   db_read_mode: direct  # direct | snapshot
   # Used only when db_read_mode is "snapshot".
   db_temp_dir: /90daydata/dash_agir/tmp/db
-  uv_env: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/.venv/bin/activate
+  uv_env: .venv/bin/activate
   locks_root: /90daydata/dash_agir/locks
 
-  agir_pipeline_dir: /project/dash_agir/matthew.kutugata/repos/agir-pipeline
+  # Relative paths resolve against agir_pipeline_dir (default: repo root).
 
   # Detection YAML config passed to jpg_to_det --c
-  stage_config: /project/dash_agir/matthew.kutugata/repos/agir-pipeline/stages/jpg_to_det/configs/default.yaml
+  stage_config: stages/jpg_to_det/configs/default.yaml
 
   # Detection model weights passed to jpg_to_det --m
   det_model_path: /90daydata/dash_agir/semifield-tools/models/plant_detector/With_Synthetic_Train_Data/weights/last.pt
@@ -30,7 +30,7 @@ paths:
   final_dest_root: /90daydata/dash_agir/semifield-developed-images
 
   # Slurm job stdout/stderr logs
-  log_dir: /project/dash_agir/logs/jpg_to_det
+  log_dir: logs/jpg_to_det
 
 # ── Globus transfer settings ──────────────────────────────────────────────────
 # Used by scripts/job/stage_inputs.py to fetch a batch's images if they
