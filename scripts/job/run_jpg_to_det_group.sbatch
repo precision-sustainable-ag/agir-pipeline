@@ -5,13 +5,14 @@
 #SBATCH --time=1-00:00:00
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=2G
-#SBATCH --output=/project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs/jpg_to_det_group_%j.out
-#SBATCH --error=/project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs/jpg_to_det_group_%j.err
+#SBATCH --output=logs/jpg_to_det_group_%j.out
+#SBATCH --error=logs/jpg_to_det_group_%j.err
 
 set -Eeuo pipefail
 umask 002
 
-PROJECT_DIR="/project/dash_agir/matthew.kutugata/repos/agir-pipeline"
+# Repo root = sbatch submit dir (Slurm runs a spooled copy of this script).
+PROJECT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
 CONFIG_FILE="configs/config.jpg_to_det.atlas.example.yaml"
 STAGE="jpg_to_det"
 POLL_SECONDS=60

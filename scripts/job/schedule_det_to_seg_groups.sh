@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-PROJECT_DIR="/project/dash_agir/matthew.kutugata/repos/agir-pipeline"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MASTER_BATCH_FILE="configs/batch_list_MD_test.txt"
 GROUP_DIR="configs/det_to_seg_groups"
 GROUP_RUNNER="scripts/job/run_det_to_seg_group.sbatch"
