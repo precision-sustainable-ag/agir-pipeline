@@ -272,8 +272,15 @@ def _mpl_overview_figure(
     skipped = counts.get("skipped", report_counts.get("n_units_skipped", 0))
 
     fig = plt.figure(figsize=(8.27, 11.69))
-    fig.suptitle("Segmentation-to-cutout QC report", y=0.972, fontsize=21, fontweight="bold")
-    fig.text(0.5, 0.933, batch_id, ha="center", color=INK, fontsize=16, fontweight="bold")
+    fig.suptitle(batch_id, y=0.972, fontsize=21, fontweight="bold")
+    fig.text(
+        0.5,
+        0.933,
+        "Segmentation-to-cutout report",
+        ha="center",
+        color=MUTED,
+        fontsize=16,
+    )
 
     identity_ax = fig.add_axes((0.08, 0.64, 0.84, 0.23))
     identity_ax.axis("off")
