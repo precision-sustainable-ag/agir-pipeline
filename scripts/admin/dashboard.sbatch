@@ -4,17 +4,16 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=2G
 #SBATCH --time=9:00:00
-#SBATCH --output=/project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs/dashboard/agir_dashboard_%j.out
-#SBATCH --error=/project/dash_agir/matthew.kutugata/repos/agir-pipeline/logs/dashboard/agir_dashboard_%j.out
+#SBATCH --output=logs/dashboard/agir_dashboard_%j.out
+#SBATCH --error=logs/dashboard/agir_dashboard_%j.out
 #
 # Runs scripts/admin/dashboard.py on a compute node from START_AT to STOP_AT
 # (default 08:00-17:00) and records its node/port in ~/.agir_dashboard.json.
-# To open it, on the login node run:
-#   /project/dash_agir/matthew.kutugata/repos/agir-pipeline/.venv/bin/python \
-#       /project/dash_agir/matthew.kutugata/repos/agir-pipeline/scripts/admin/dashboard.py --connect
+# To open it, on the login node run (from the repo root):
+#   .venv/bin/python scripts/admin/dashboard.py --connect
 # which relays localhost:8765 to the job and prints the URL.
 #
-# Start the daily cycle once with:
+# Start the daily cycle once, from the repo root, with:
 #   sbatch scripts/admin/dashboard.sbatch
 # Each run queues tomorrow's START_AT run (like scripts/admin/globus_index.sh),
 # so it keeps going until you scancel the pending agir_dashboard job.
@@ -22,7 +21,8 @@
 set -Eeuo pipefail
 umask 002
 
-PROJECT_DIR="/project/dash_agir/matthew.kutugata/repos/agir-pipeline"
+# Repo root = sbatch submit dir (Slurm runs a spooled copy of this script).
+PROJECT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
 START_AT="${START_AT:-08:00}"
 STOP_AT="${STOP_AT:-17:00}"
 TOKEN_FILE="${HOME}/.agir_dashboard_token"
