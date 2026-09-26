@@ -31,7 +31,18 @@ stage:
   final_dest_suffix: ""
 
 visualization:
-  enabled: false
+  enabled: true
+  mode: seg_to_cut
+  args:
+    cutouts: '"$RUN_DIR/artifacts/cutouts"'
+    run_report: '"$RUN_DIR/run_report.json"'
+    manifest: '"$RUN_DIR/manifest.json"'
+    segmentations: '"$TMPDIR/input/segmentations"'
+    georeferenced_csv: '"$TMPDIR/input/georeferenced/${BATCH_ID}_georeferenced.csv"'
+    output: '"$VIZ_DIR"'
+    sample_size: 24
+    max_flagged: 24
+    seed: 42
 
 render:
   template: slurm_job.sh.j2
