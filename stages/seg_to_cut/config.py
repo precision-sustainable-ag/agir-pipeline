@@ -27,7 +27,7 @@ class SegToCutConfig:
     camera_sensor_diagonal_mm: float = 56.73
     camera_height_cm: float = 170.0
     species_bbox_min_sample_size: int = 5
-    abnormal_bbox_size_threshold: float = 0.25
+    abnormal_bbox_size_threshold: float = 0.75
 
 
 def _extension(value: Any, *, field: str) -> str:
@@ -192,7 +192,7 @@ def parse_config(data: Mapping[str, Any]) -> SegToCutConfig:
         field="species_bbox_min_sample_size",
     )
     abnormal_bbox_size_threshold = _fraction(
-        data.get("abnormal_bbox_size_threshold", 0.25),
+        data.get("abnormal_bbox_size_threshold", 0.75),
         field="abnormal_bbox_size_threshold",
     )
     return SegToCutConfig(

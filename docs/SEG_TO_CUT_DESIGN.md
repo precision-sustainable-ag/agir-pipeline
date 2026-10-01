@@ -221,9 +221,9 @@ Stage settings live in [`stages/seg_to_cut/configs/default.yaml`](../stages/seg_
 | `camera.sensor_size_mm` | `56.73` | Assumed active sensor diagonal used for camera area estimates. |
 | `camera.lens_height_above_pot_surface_cm` | `170` | Assumed lens-to-surface distance used for camera area estimates. |
 | `species_bbox_min_sample_size` | `5` | Requires this many valid areas before calculating a group median. Must be a positive integer. |
-| `abnormal_bbox_size_threshold` | `0.25` | Flags an area strictly below 75% of its group median. Allowed range: 0–1. |
+| `abnormal_bbox_size_threshold` | `0.7` | Minimum fraction of the group median; flags an area strictly below this fraction. Allowed range: 0–1. |
 
-For example, if the group median is 100 cm², the default threshold flags bbox areas strictly below 75 cm². Larger areas are not flagged. If the group has fewer than five valid areas, its median, area ratio, and abnormal-size flag are null; the sample count is still recorded.
+For example, if the group median is 100 cm², the packaged default flags bbox areas strictly below 70 cm². Larger areas are not flagged. If the group has fewer than five valid areas, its median, area ratio, and abnormal-size flag are null; the sample count is still recorded.
 
 The camera dimensions in YAML determine the estimate; they do not supply the metadata's lens model.
 

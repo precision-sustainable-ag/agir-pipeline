@@ -311,7 +311,7 @@ def finalize_species_bbox_metrics(
             record.bbox_area_cm2
         ):
             ratio = float(record.bbox_area_cm2 / category_median)
-            abnormal = ratio < 1.0 - config.abnormal_bbox_size_threshold
+            abnormal = ratio < config.abnormal_bbox_size_threshold
         finalized[record.identity] = {
             "species_median_bbox_area_cm2": category_median,
             "species_bbox_sample_size": sample_size,

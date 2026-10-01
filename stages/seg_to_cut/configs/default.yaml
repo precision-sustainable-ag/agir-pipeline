@@ -29,4 +29,4 @@ camera:
   lens_height_above_pot_surface_cm: 170
 
 species_bbox_min_sample_size: 5  # Require this many valid areas before calculating a group median.
-abnormal_bbox_size_threshold: 0.3  # Flag areas more than 30% below the group median.
+abnormal_bbox_size_threshold: 0.7  # Flag areas below 70% of the group median.
