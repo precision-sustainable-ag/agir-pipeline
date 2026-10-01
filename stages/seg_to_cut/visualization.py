@@ -37,6 +37,7 @@ INK = "#1f2937"
 MUTED = "#6b7280"
 ACCENT = "#2563eb"
 WARNING = "#b45309"
+DEFAULT_ABNORMAL_BBOX_SIZE_THRESHOLD = 0.7
 SCHEMA_VERSION = 1
 AREA_BINS = (
     "0-1",
@@ -156,12 +157,8 @@ def _metric(record: CutoutRecord, field: str) -> float | None:
 
 
 def _display_name(record: CutoutRecord) -> str:
-    category = record.category
-    for field in ("cultivar_name", "common_name", "species_id", "USDA_symbol"):
-        value = category.get(field)
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    return "Unknown"
+    value = record.category.get("common_name")
+    return str(value).strip() if value is not None and str(value).strip() else "Unknown"
 
 
 def _flag_reasons(record: CutoutRecord) -> tuple[str, ...]:
@@ -234,6 +231,50 @@ def select_abnormal_size_records(
     if len(abnormal_size) > max_flagged:
         abnormal_size = rng.sample(abnormal_size, max_flagged)
     return tuple(sorted(abnormal_size, key=lambda record: record.cutout_id))
+
+
+def _abnormal_size_summary(
+    records: Sequence[CutoutRecord],
+    sampled_records: Sequence[CutoutRecord],
+    threshold: float,
+) -> tuple[tuple[str, float | None, float | None, float | None, float | None], ...]:
+    """Summarize bbox areas for species represented in the abnormal sample."""
+
+    sampled_species = {
+        str(record.category.get("species_id") or "Unknown")
+        for record in sampled_records
+    }
+    grouped: dict[str, list[float]] = {species_id: [] for species_id in sampled_species}
+    names: dict[str, str] = {}
+    has_available_median: dict[str, bool] = {
+        species_id: False for species_id in sampled_species
+    }
+    for record in records:
+        species_id = str(record.category.get("species_id") or "Unknown")
+        if species_id not in sampled_species:
+            continue
+        names.setdefault(species_id, _display_name(record))
+        area = _metric(record, "bbox_area_cm2")
+        if area is not None and area > 0:
+            grouped[species_id].append(area)
+        if _metric(record, "species_median_bbox_area_cm2") is not None:
+            has_available_median[species_id] = True
+
+    rows = []
+    for species_id, values in grouped.items():
+        category_median = (
+            float(median(values)) if values and has_available_median[species_id] else None
+        )
+        rows.append(
+            (
+                names.get(species_id, "Unknown"),
+                min(values) if values else None,
+                max(values) if values else None,
+                category_median * threshold if category_median is not None else None,
+                category_median,
+            )
+        )
+    return tuple(sorted(rows, key=lambda row: row[0].casefold()))
 
 
 def _counts_from_manifest(manifest: Mapping[str, Any]) -> Counter[str]:
@@ -369,6 +410,7 @@ def _mpl_overview_figure(
             f"• NO_EXPECTED_CLASS_PIXELS{reason_suffixes['NO_EXPECTED_CLASS_PIXELS']}: the mask crop "
             "contains no pixels for the detection's expected species/cultivar class; other classes "
             "do not count.\n"
+            "  Examples: a color checker or a very small false-positive detection.\n"
             f"• NO_FOREGROUND_AFTER_CLEANUP{reason_suffixes['NO_FOREGROUND_AFTER_CLEANUP']}: expected-class "
             "pixels existed, but every component was confined to the cleanup border band and removed.\n"
             f"• FAIL_STOP{reason_suffixes['FAIL_STOP']}: operational skip after an earlier failure when "
@@ -560,8 +602,13 @@ def _mpl_area_bins_figure(records: Sequence[CutoutRecord]) -> Figure:
     """Show fixed area-bin composition overall and by species."""
 
     overall = Counter(_area_bin(record) for record in records)
+    species_names: dict[str, str] = {}
+    for record in records:
+        species_id = str(record.category.get("species_id") or "Unknown")
+        species_names.setdefault(species_id, _display_name(record))
     species_ids = sorted(
-        {str(record.category.get("species_id") or "Unknown") for record in records}
+        species_names,
+        key=lambda species_id: (species_names[species_id].casefold(), species_id),
     )
     matrix = np.zeros((len(species_ids), len(AREA_BINS)), dtype=int)
     for row, species_id in enumerate(species_ids):
@@ -587,7 +634,7 @@ def _mpl_area_bins_figure(records: Sequence[CutoutRecord]) -> Figure:
     image = axes[1].imshow(matrix, aspect="auto", cmap="Blues")
     axes[1].set_title("Bounding-box area bin by species", loc="left", pad=10, fontweight="bold")
     axes[1].set_xticks(range(len(AREA_BINS)), AREA_BINS, rotation=30, ha="right")
-    axes[1].set_yticks(range(len(species_ids)), species_ids)
+    axes[1].set_yticks(range(len(species_ids)), [species_names[value] for value in species_ids])
     axes[1].set_xlabel("Area bin (cm²)")
     axes[1].set_ylabel("Species")
     maximum = int(matrix.max()) if matrix.size else 0
@@ -667,7 +714,7 @@ def _observed_widths(records: Sequence[CutoutRecord], field: str) -> str:
     return str(numbers[0]) if len(numbers) == 1 else f"{numbers[0]}–{numbers[-1]}"
 
 
-def _qc_definition_text(records: Sequence[CutoutRecord]) -> tuple[str, str]:
+def _qc_definition_text(records: Sequence[CutoutRecord]) -> tuple[str, str, str]:
     edge_thresholds = _observed_numbers(
         (
             edge.get("threshold")
@@ -688,17 +735,13 @@ def _qc_definition_text(records: Sequence[CutoutRecord]) -> tuple[str, str]:
         f"• Edge cut — more than the configured threshold ({edge_thresholds}) of the cleaned plant "
         "foreground occupies any outermost one-pixel row or column; each side is tested separately.\n"
         "• Unsuitable placement — two opposite, three, or four sides are edge-cut.\n"
-        "• Abnormal size — bbox area is below the configured lower limit relative to its category median.\n"
+        "• Abnormal size — bbox area is below the configured fraction of its category median; "
+        "for example, 0.7 means below 70% of the median.\n"
         "• ≥10 Components — at least ten disconnected expected-class regions remain after cleanup.\n"
         "• Intruder cleanup applied — border cleanup removed at least one expected-class component.\n"
         "• Missing area — neither world-coordinate nor camera-estimated bbox area is available."
     )
-    placement_text = (
-        "Y-axis definitions\n"
-        "• Unrestricted — no sides are edge-cut; the cutout may be placed anywhere.\n"
-        "• Single edge restricted — exactly one side is edge-cut; place against that edge.\n"
-        "• Double edge restricted — exactly two adjacent sides are edge-cut; place in that corner.\n"
-        "• Unsuitable — two opposite, three, or four sides are edge-cut.\n\n"
+    cleanup_text = (
         "Intruder-cleanup configuration\n"
         f"Border band fraction: {cleanup_fractions}\n"
         f"Resolved top/bottom width: {top_bottom} px\n"
@@ -706,7 +749,14 @@ def _qc_definition_text(records: Sequence[CutoutRecord]) -> tuple[str, str]:
         "Removal rule: components entirely inside the border band are removed; a component "
         "reaching the crop interior is retained."
     )
-    return indicator_text, placement_text
+    placement_text = (
+        "Y-axis definitions\n"
+        "• Unrestricted — no sides are edge-cut; the cutout may be placed anywhere.\n"
+        "• Single edge restricted — exactly one side is edge-cut; place against that edge.\n"
+        "• Double edge restricted — exactly two adjacent sides are edge-cut; place in that corner.\n"
+        "• Unsuitable — two opposite, three, or four sides are edge-cut."
+    )
+    return indicator_text, cleanup_text, placement_text
 
 
 def _mpl_qc_figure(records: Sequence[CutoutRecord]) -> Figure:
@@ -726,10 +776,17 @@ def _mpl_qc_figure(records: Sequence[CutoutRecord]) -> Figure:
             placements[category] += 1
 
     fig = plt.figure(figsize=(8.27, 11.69))
-    fig.subplots_adjust(top=0.90, bottom=0.08, left=0.25, right=0.94, hspace=0.44)
-    grid = fig.add_gridspec(4, 1, height_ratios=(1.15, 0.86, 0.95, 0.92))
+    fig.subplots_adjust(top=0.90, bottom=0.08, left=0.25, right=0.94, hspace=0.32)
+    grid = fig.add_gridspec(4, 1, height_ratios=(1.12, 1.05, 0.95, 0.70))
+    qc_detail_grid = grid[1].subgridspec(
+        2, 1, height_ratios=(0.58, 0.47), hspace=0.04
+    )
     axes = (fig.add_subplot(grid[0]), fig.add_subplot(grid[2]))
-    definition_axes = (fig.add_subplot(grid[1]), fig.add_subplot(grid[3]))
+    explanation_axes = (
+        fig.add_subplot(qc_detail_grid[0]),
+        fig.add_subplot(qc_detail_grid[1]),
+        fig.add_subplot(grid[3]),
+    )
     fig.suptitle("Quality-control indicators", y=0.97, fontsize=20, fontweight="bold")
 
     bars = axes[0].barh(
@@ -757,8 +814,10 @@ def _mpl_qc_figure(records: Sequence[CutoutRecord]) -> Figure:
     axes[1].margins(x=0.14, y=0.12)
     _clean_axis(axes[1], grid_axis="x")
 
-    indicator_text, placement_text = _qc_definition_text(records)
-    for axis, content in zip(definition_axes, (indicator_text, placement_text), strict=True):
+    indicator_text, cleanup_text, placement_text = _qc_definition_text(records)
+    for axis, content in zip(
+        explanation_axes, (indicator_text, cleanup_text, placement_text), strict=True
+    ):
         axis.axis("off")
         axis.text(
             -0.22,
@@ -971,6 +1030,57 @@ def _sample_caption(record: CutoutRecord, *, annotate_flags: bool) -> str:
     return "\n".join(lines)
 
 
+def _add_abnormal_size_summary_table(
+    fig: Figure,
+    rows: Sequence[tuple[str, float | None, float | None, float | None, float | None]],
+    threshold: float,
+) -> None:
+    axis = fig.add_axes((0.04, 0.69, 0.94, 0.19))
+    axis.axis("off")
+    axis.set_title(
+        f"Species bbox-area summary — abnormal_bbox_size_threshold = {threshold:g}",
+        loc="left",
+        pad=8,
+        fontsize=10,
+        fontweight="bold",
+    )
+    columns = (
+        "Species (common name)",
+        "Min (cm²)",
+        "Max (cm²)",
+        "Value at abnormal_bbox_size_threshold (cm²)",
+        "Median (cm²)",
+    )
+    cells = [
+        [
+            name,
+            *(
+                "Unavailable" if value is None else f"{value:,.2f}"
+                for value in values
+            ),
+        ]
+        for name, *values in rows
+    ]
+    table = axis.table(
+        cellText=cells,
+        colLabels=columns,
+        cellLoc="right",
+        colLoc="center",
+        colWidths=(0.27, 0.13, 0.13, 0.31, 0.16),
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1.0, 1.18)
+    for (row, _column), cell in table.get_celld().items():
+        cell.set_edgecolor("#d1d5db")
+        if row == 0:
+            cell.set_facecolor("#e5e7eb")
+            cell.set_text_props(weight="bold", color=INK)
+        elif row % 2 == 0:
+            cell.set_facecolor("#f9fafb")
+
+
 def _mpl_sample_figures(
     records: Sequence[CutoutRecord],
     *,
@@ -978,6 +1088,8 @@ def _mpl_sample_figures(
     subtitle: str,
     annotate_flags: bool,
     cleanup_sources: CleanupPreviewSources | None,
+    summary_rows: Sequence[tuple[str, float | None, float | None, float | None, float | None]] = (),
+    summary_threshold: float = DEFAULT_ABNORMAL_BBOX_SIZE_THRESHOLD,
 ) -> Iterable[Figure]:
     """Yield spacious landscape contact sheets with two cutouts per page."""
 
@@ -985,7 +1097,18 @@ def _mpl_sample_figures(
     for offset in range(0, len(records), per_page):
         subset = records[offset : offset + per_page]
         fig = plt.figure(figsize=(11.69, 8.27))
-        fig.subplots_adjust(top=0.87, bottom=0.06, left=0.04, right=0.98, hspace=0.20, wspace=0.08)
+        show_summary = offset == 0 and bool(summary_rows)
+        grid_top = 0.65 if show_summary else 0.87
+        fig.subplots_adjust(
+            top=grid_top,
+            bottom=0.06,
+            left=0.04,
+            right=0.98,
+            hspace=0.20,
+            wspace=0.08,
+        )
+        if show_summary:
+            _add_abnormal_size_summary_table(fig, summary_rows, summary_threshold)
         grid = fig.add_gridspec(4, 3, height_ratios=(0.30, 1.0, 0.30, 1.0))
         fig.suptitle(title, y=0.965, fontsize=18, fontweight="bold")
         fig.text(
@@ -1036,8 +1159,13 @@ def generate_pdf(
     sample_size: int = 24,
     max_flagged: int = 24,
     seed: int = 42,
+    abnormal_bbox_size_threshold: float = DEFAULT_ABNORMAL_BBOX_SIZE_THRESHOLD,
 ) -> Path:
     """Generate the QC PDF and return its path."""
+
+    threshold = _number(abnormal_bbox_size_threshold)
+    if threshold is None or not 0 <= threshold <= 1:
+        raise ValueError("abnormal_bbox_size_threshold must be a finite number in [0, 1]")
 
     records = load_cutout_records(cutouts_dir)
     if not records:
@@ -1058,6 +1186,9 @@ def generate_pdf(
 
     normal_size_records = select_normal_size_records(records, sample_size, seed)
     abnormal_size_records = select_abnormal_size_records(records, max_flagged, seed)
+    abnormal_size_summary = _abnormal_size_summary(
+        records, abnormal_size_records, threshold
+    )
     cleanup_sources = _load_cleanup_preview_sources(
         segmentations_dir,
         georeferenced_csv,
@@ -1098,9 +1229,11 @@ def generate_pdf(
         for figure in _mpl_sample_figures(
             abnormal_size_records,
             title="Abnormal-size cutout sample",
-            subtitle="Cutouts below the configured species median bbox-area lower limit",
+            subtitle=f"Cutouts below {threshold:g} × the species median bbox area",
             annotate_flags=True,
             cleanup_sources=cleanup_sources,
+            summary_rows=abnormal_size_summary,
+            summary_threshold=threshold,
         ):
             pdf.savefig(figure, dpi=300)
             plt.close(figure)
@@ -1120,6 +1253,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-size", type=int, default=24)
     parser.add_argument("--max-flagged", type=int, default=24)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--abnormal-bbox-size-threshold",
+        type=float,
+        default=DEFAULT_ABNORMAL_BBOX_SIZE_THRESHOLD,
+        help="Minimum fraction of the species median bbox area (default: 0.7)",
+    )
     parser.add_argument(
         "--log-level",
         default="INFO",
@@ -1142,6 +1281,7 @@ def main(argv: list[str] | None = None) -> int:
             sample_size=args.sample_size,
             max_flagged=args.max_flagged,
             seed=args.seed,
+            abnormal_bbox_size_threshold=args.abnormal_bbox_size_threshold,
         )
     except (OSError, ValueError) as exc:
         logger.error("Could not generate seg_to_cut QC report: %s", exc)
