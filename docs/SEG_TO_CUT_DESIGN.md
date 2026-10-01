@@ -98,7 +98,7 @@ This example shows the current output fields. Values are illustrative. `category
   "cutout_width": 600,
   "lens_model": "Linos Inspect XL",
   "validated": false,
-  "cutout_version": "2.0",
+  "cutout_version": "2.1",
   "cutout_props": {
     "is_primary": true,
     "intruder_cleanup": {
@@ -138,7 +138,7 @@ This example shows the current output fields. Values are illustrative. `category
     "bbox_area_cm2": 120.0,
     "estimated_bbox_area_cm2": null,
     "estimated_area_bin": "100-500",
-    "species_mean_bbox_area_cm2": 100.0,
+    "species_median_bbox_area_cm2": 100.0,
     "species_bbox_sample_size": 10,
     "species_bbox_area_ratio": 1.2,
     "abnormal_bbox_size": false,
@@ -181,15 +181,15 @@ This example shows the current output fields. Values are illustrative. `category
 | `season`, `bbot_version` | Values supplied when running the stage. |
 | `datetime`, `lens_model` | Capture time and lens from the original image's EXIF metadata. `--lens-model` supplies a fallback lens. |
 | `validated` | Starts as false; stage completion does not mean the cutout has been reviewed. |
-| `cutout_version` | Metadata version from the config, currently `"2.0"` by default. |
+| `cutout_version` | Metadata version from the config, currently `"2.1"` by default. |
 | `is_primary` | Primary-detection flag copied from the CSV; both primary and non-primary detections are processed. |
 | `intruder_cleanup` | Border-band settings and counts of removed/remaining regions and removed pixels. |
 | `extends_border`, `edge_cut` | Whether the plant touches the crop edges and where it can be placed. |
 | `bbox_area_cm2` | Physical area of the detection box from complete valid world coordinates; null when that calculation is unavailable. This measures the box, not the plant silhouette. |
 | `estimated_bbox_area_cm2` | Camera-geometry estimate when world area is unavailable; null when `bbox_area_cm2` is populated. |
 | `estimated_area_bin` | Size bin of whichever area field is populated; null if neither area can be calculated. |
-| `species_mean_bbox_area_cm2`, `species_bbox_sample_size` | Average box area and number of valid area samples in the same batch/category. Groups use cultivar when present, otherwise species. |
-| `species_bbox_area_ratio`, `abnormal_bbox_size` | Current area divided by the group average, and whether the difference exceeds the configured limit. |
+| `species_median_bbox_area_cm2`, `species_bbox_sample_size` | Median box area and number of valid area samples in the same batch/category. Groups use cultivar when present, otherwise species. |
+| `species_bbox_area_ratio`, `abnormal_bbox_size` | Current area divided by the group median, and whether it falls below the configured lower limit. Large boxes are not flagged. |
 | `solidity` | How much of the plant's enclosing convex shape is filled by plant pixels. |
 | `blur_effect` | Blur score measured on the cutout with a black background. Higher means blurrier. |
 | `num_components` | Number of separate plant regions remaining after cleanup. |
@@ -203,7 +203,7 @@ For cultivar cutouts, use `category.cultivar_class_id` as the mask value. For sp
 
 The `bbox_area.source` setting remains `georeferenced_csv`. A complete valid world-coordinate box in a supported projected CRS, or in the pipeline's metre-based `LOCAL` frame, populates `bbox_area_cm2`. A blank or missing CRS does not default to `LOCAL`. World-coordinate columns may be omitted; the detection CSV itself remains required.
 
-When valid world area is unavailable, the stage estimates area from the configured camera focal length, sensor diagonal, and lens height above the pot surface. The actual JPG aspect ratio splits the sensor diagonal into horizontal and vertical sensor dimensions. The estimated image footprint is `height × sensor width ÷ focal length` by `height × sensor height ÷ focal length`. Multiplying that footprint by the normalized detection-box width and height gives `estimated_bbox_area_cm2`. This assumes a perpendicular camera and a flat surface at the configured height. The calculation does not read `fov.csv`, `camera_reference.csv`, detection world coordinates, or CRS. Missing or invalid camera inputs are logged. Species mean and abnormal-size metrics continue to use only valid world-coordinate areas.
+When valid world area is unavailable, the stage estimates area from the configured camera focal length, sensor diagonal, and lens height above the pot surface. The actual JPG aspect ratio splits the sensor diagonal into horizontal and vertical sensor dimensions. The estimated image footprint is `height × sensor width ÷ focal length` by `height × sensor height ÷ focal length`. Multiplying that footprint by the normalized detection-box width and height gives `estimated_bbox_area_cm2`. This assumes a perpendicular camera and a flat surface at the configured height. The calculation does not read `fov.csv`, `camera_reference.csv`, detection world coordinates, or CRS. Missing or invalid camera inputs are logged. Species bbox statistics continue to use only valid world-coordinate areas.
 
 Only one numeric area field is populated: world area fills `bbox_area_cm2`, while camera fallback fills `estimated_bbox_area_cm2`. `estimated_area_bin` uses whichever area is available. Its lower-inclusive cm² thresholds are `0-1`, `1-10`, `10-100`, `100-500`, `500-1000`, `1000-5000`, `5000-10000`, and `10000+`. For example, exactly 100 cm² is `100-500`.
 
@@ -215,15 +215,15 @@ Stage settings live in [`stages/seg_to_cut/configs/default.yaml`](../stages/seg_
 | `mask_extension` | `.png` | Chooses which input mask files are found. |
 | `border_band_fraction` | `0.10` | Larger values widen the cleanup band and can remove more border regions. Must be greater than 0 and less than 0.5. |
 | `edge_threshold` | `0.05` | Larger values require more plant coverage before an edge is flagged. Allowed range: 0–1. |
-| `cutout_version` | `"2.0"` | Sets the version label in the JSON. |
+| `cutout_version` | `"2.1"` | Sets the version label in the JSON. |
 | `bbox_area.source` | `georeferenced_csv` | Uses valid world coordinates for authoritative area; this is the only supported value. |
 | `camera.focal_length_mm` | `60` | Focal length used for camera area estimates. |
 | `camera.sensor_size_mm` | `56.73` | Assumed active sensor diagonal used for camera area estimates. |
 | `camera.lens_height_above_pot_surface_cm` | `170` | Assumed lens-to-surface distance used for camera area estimates. |
-| `species_bbox_min_sample_size` | `5` | Requires this many valid areas before calculating a group average. Must be a positive integer. |
-| `abnormal_bbox_size_threshold` | `0.25` | Flags an area more than 25% above or below its group average. Must be nonnegative. |
+| `species_bbox_min_sample_size` | `5` | Requires this many valid areas before calculating a group median. Must be a positive integer. |
+| `abnormal_bbox_size_threshold` | `0.25` | Flags an area strictly below 75% of its group median. Allowed range: 0–1. |
 
-For example, if the group average is 100 cm², the default size threshold flags areas below 75 cm² or above 125 cm². If the group has fewer than five valid areas, its average, area ratio, and abnormal-size flag are null; the sample count is still recorded.
+For example, if the group median is 100 cm², the default threshold flags bbox areas strictly below 75 cm². Larger areas are not flagged. If the group has fewer than five valid areas, its median, area ratio, and abnormal-size flag are null; the sample count is still recorded.
 
 The camera dimensions in YAML determine the estimate; they do not supply the metadata's lens model.
 

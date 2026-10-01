@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Sequence
+from statistics import median
 from typing import Any
 
 import cv2
@@ -91,8 +92,10 @@ def measurement_provenance(config: SegToCutConfig) -> dict[str, Any]:
             "camera_area_output_unit": "cm2",
             "area_bin_edges_cm2": AREA_BIN_EDGES,
             "species_bbox_grouping": "resolved_category",
+            "species_bbox_statistic": "median",
             "species_bbox_min_sample_size": config.species_bbox_min_sample_size,
             "abnormal_bbox_size_threshold": config.abnormal_bbox_size_threshold,
+            "abnormal_bbox_size_direction": "below_only",
         },
     }
 
@@ -204,14 +207,14 @@ def null_metadata_reasons(
         )[1] or "camera area estimate unavailable"
     if props["estimated_area_bin"] is None:
         reasons["estimated_area_bin"] = "bbox_area_cm2 and estimated_bbox_area_cm2 are unavailable"
-    if props["species_mean_bbox_area_cm2"] is None:
-        reasons["species_mean_bbox_area_cm2"] = (
+    if props["species_median_bbox_area_cm2"] is None:
+        reasons["species_median_bbox_area_cm2"] = (
             f"category has {props['species_bbox_sample_size']} valid area samples; "
             f"requires at least {config.species_bbox_min_sample_size}"
         )
     if props["species_bbox_area_ratio"] is None:
         dependencies = [
-            field for field in ("bbox_area_cm2", "species_mean_bbox_area_cm2")
+            field for field in ("bbox_area_cm2", "species_median_bbox_area_cm2")
             if props[field] is None
         ]
         reasons["species_bbox_area_ratio"] = (
@@ -274,7 +277,7 @@ def finalize_species_bbox_metrics(
     *,
     config: SegToCutConfig,
 ) -> dict[tuple[str, int], dict[str, float | int | bool | None]]:
-    """Finalize deterministic per-category statistics for valid cutouts.
+    """Finalize deterministic per-category bbox statistics for valid cutouts.
 
     Callers pass detections that remain valid after mask cleanup. Only finite,
     positive bounding-box areas contribute to a group. When the configured
@@ -297,18 +300,20 @@ def finalize_species_bbox_metrics(
     for record in records:
         values = groups[_area_group(record)]
         sample_size = len(values)
-        mean = (
-            float(math.fsum(values) / sample_size)
+        category_median = (
+            float(median(values))
             if sample_size >= config.species_bbox_min_sample_size
             else None
         )
         ratio = None
         abnormal = None
-        if mean is not None and mean > 0 and _valid_area(record.bbox_area_cm2):
-            ratio = float(record.bbox_area_cm2 / mean)
-            abnormal = abs(ratio - 1.0) > config.abnormal_bbox_size_threshold
+        if category_median is not None and category_median > 0 and _valid_area(
+            record.bbox_area_cm2
+        ):
+            ratio = float(record.bbox_area_cm2 / category_median)
+            abnormal = ratio < 1.0 - config.abnormal_bbox_size_threshold
         finalized[record.identity] = {
-            "species_mean_bbox_area_cm2": mean,
+            "species_median_bbox_area_cm2": category_median,
             "species_bbox_sample_size": sample_size,
             "species_bbox_area_ratio": ratio,
             "abnormal_bbox_size": abnormal,
