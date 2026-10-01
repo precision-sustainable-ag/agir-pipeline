@@ -48,6 +48,20 @@ AREA_BINS = (
     "5000-10000",
     "10000+",
 )
+QC_INDICATORS = (
+    ("Edge cut", "Edge cut"),
+    ("Unsuitable placement", "unsuitable placement"),
+    ("Abnormal size", "Abnormal size"),
+    ("≥10 Components", "≥10 Components"),
+    ("Intruder cleanup applied", "Intruder cleanup applied"),
+    ("Missing area", "missing area"),
+)
+PLACEMENT_LABELS = (
+    "unsuitable",
+    "unrestricted",
+    "single edge restricted",
+    "double edge restricted",
+)
 
 
 @dataclass(frozen=True)
@@ -154,7 +168,7 @@ def _flag_reasons(record: CutoutRecord) -> tuple[str, ...]:
     props = record.props
     reasons: list[str] = []
     if props.get("abnormal_bbox_size") is True:
-        reasons.append("abnormal size")
+        reasons.append("abnormal bbox size")
     edge_cut = props.get("edge_cut")
     if isinstance(edge_cut, Mapping) and edge_cut.get("flagged") is True:
         sides = edge_cut.get("flagged_sides")
@@ -175,21 +189,22 @@ def _flag_reasons(record: CutoutRecord) -> tuple[str, ...]:
     return tuple(reasons)
 
 
-def select_random_records(
+def select_normal_size_records(
     records: Sequence[CutoutRecord], sample_size: int, seed: int
 ) -> tuple[CutoutRecord, ...]:
     if sample_size < 0:
         raise ValueError("sample_size must be non-negative")
     rng = random.Random(seed)
+    normal_size = [record for record in records if record.props.get("abnormal_bbox_size") is False]
     groups: dict[str, list[CutoutRecord]] = {}
-    for record in sorted(records, key=lambda item: item.cutout_id):
+    for record in sorted(normal_size, key=lambda item: item.cutout_id):
         species_id = str(record.category.get("species_id") or "Unknown")
         groups.setdefault(species_id, []).append(record)
     for group in groups.values():
         rng.shuffle(group)
 
     selected: list[CutoutRecord] = []
-    target = min(sample_size, len(records))
+    target = min(sample_size, len(normal_size))
     while len(selected) < target:
         added = False
         for species_id in sorted(groups):
@@ -209,16 +224,16 @@ def select_random_records(
     )
 
 
-def select_flagged_records(
+def select_abnormal_size_records(
     records: Sequence[CutoutRecord], max_flagged: int, seed: int
 ) -> tuple[CutoutRecord, ...]:
     if max_flagged < 0:
         raise ValueError("max_flagged must be non-negative")
-    flagged = [record for record in records if _flag_reasons(record)]
+    abnormal_size = [record for record in records if record.props.get("abnormal_bbox_size") is True]
     rng = random.Random(seed ^ 0x5EEDC0DE)
-    if len(flagged) > max_flagged:
-        flagged = rng.sample(flagged, max_flagged)
-    return tuple(sorted(flagged, key=lambda record: record.cutout_id))
+    if len(abnormal_size) > max_flagged:
+        abnormal_size = rng.sample(abnormal_size, max_flagged)
+    return tuple(sorted(abnormal_size, key=lambda record: record.cutout_id))
 
 
 def _counts_from_manifest(manifest: Mapping[str, Any]) -> Counter[str]:
@@ -229,6 +244,17 @@ def _counts_from_manifest(manifest: Mapping[str, Any]) -> Counter[str]:
         str(item.get("status"))
         for item in items
         if isinstance(item, Mapping) and item.get("status") is not None
+    )
+
+
+def _skip_reason_counts(manifest: Mapping[str, Any]) -> Counter[str]:
+    items = manifest.get("items")
+    if not isinstance(items, list):
+        return Counter()
+    return Counter(
+        str(item.get("message") or "UNSPECIFIED")
+        for item in items
+        if isinstance(item, Mapping) and item.get("status") == "skipped"
     )
 
 
@@ -322,22 +348,42 @@ def _mpl_overview_figure(
     totals_ax.spines[["top", "right", "left"]].set_visible(False)
     totals_ax.tick_params(axis="y", left=False, labelleft=False)
 
-    fig.text(0.10, 0.425, "Note", fontsize=9, fontweight="bold", color=INK)
+    skip_reasons = _skip_reason_counts(manifest)
+    reason_suffixes = {
+        reason: f" ({skip_reasons[reason]:,})" if reason in skip_reasons else ""
+        for reason in (
+            "NO_EXPECTED_CLASS_PIXELS",
+            "NO_FOREGROUND_AFTER_CLEANUP",
+            "FAIL_STOP",
+        )
+    }
     fig.text(
-        0.10,
-        0.402,
+        0.08, 0.435, "Skipped-instance definitions",
+        fontsize=9, fontweight="bold", color=INK,
+    )
+    fig.text(
+        0.08,
+        0.414,
         (
-            "Skipped means a detection did not produce a cutout artifact set because "
-            "the expected class was absent from its mask crop or cleanup left no foreground."
+            "Skipped: a detection produced no four-file cutout artifact set.\n"
+            f"• NO_EXPECTED_CLASS_PIXELS{reason_suffixes['NO_EXPECTED_CLASS_PIXELS']}: the mask crop "
+            "contains no pixels for the detection's expected species/cultivar class; other classes "
+            "do not count.\n"
+            f"• NO_FOREGROUND_AFTER_CLEANUP{reason_suffixes['NO_FOREGROUND_AFTER_CLEANUP']}: expected-class "
+            "pixels existed, but every component was confined to the cleanup border band and removed.\n"
+            f"• FAIL_STOP{reason_suffixes['FAIL_STOP']}: operational skip after an earlier failure when "
+            "the stage was run with --fail-stop."
         ),
-        fontsize=8,
+        fontsize=7.3,
         color=MUTED,
         ha="left",
         va="top",
         wrap=True,
+        linespacing=1.35,
     )
 
-    category_ax = fig.add_axes((0.34, 0.075, 0.57, 0.255))
+
+    category_ax = fig.add_axes((0.34, 0.055, 0.57, 0.225))
     species = Counter(_display_name(record) for record in records)
     top_categories = species.most_common(12)
     names = [
@@ -399,7 +445,7 @@ def _area_bin(record: CutoutRecord) -> str | None:
 
 def _blur_examples(
     records: Sequence[CutoutRecord],
-) -> tuple[tuple[str, CutoutRecord, float], ...]:
+) -> tuple[tuple[str, float, tuple[tuple[CutoutRecord, float], ...]], ...]:
     available = [
         (value, record)
         for record in records
@@ -408,31 +454,52 @@ def _blur_examples(
     if not available:
         return ()
     available.sort(key=lambda item: (item[0], item[1].cutout_id))
-    median_value = median(value for value, _ in available)
-    median_item = min(
-        available,
-        key=lambda item: (abs(item[0] - median_value), item[1].cutout_id),
+    values = np.asarray([value for value, _ in available], dtype=np.float64)
+    targets = (
+        ("25th percentile", float(np.percentile(values, 25))),
+        ("Median", float(np.percentile(values, 50))),
+        ("75th percentile", float(np.percentile(values, 75))),
     )
-    chosen = (
-        ("Lowest", available[0]),
-        ("Median", median_item),
-        ("Highest", available[-1]),
-    )
-    return tuple((label, record, value) for label, (value, record) in chosen)
+    avoid_duplicates = len(available) >= 15
+    used: set[str] = set()
+    groups: list[tuple[str, float, tuple[tuple[CutoutRecord, float], ...]]] = []
+    for label, target in targets:
+        ranked = sorted(
+            available,
+            key=lambda item: (abs(item[0] - target), item[0], item[1].cutout_id),
+        )
+        if avoid_duplicates:
+            ranked = [item for item in ranked if item[1].cutout_id not in used]
+        selected = ranked[:5]
+        used.update(record.cutout_id for _, record in selected)
+        groups.append(
+            (label, target, tuple((record, value) for value, record in selected))
+        )
+    return tuple(groups)
 
 
 def _mpl_blur_figure(records: Sequence[CutoutRecord]) -> Figure:
-    """Show the blur distribution with low, median, and high examples."""
+    """Show the blur distribution and five examples near each quartile."""
 
     values = [
         value
         for record in records
         if (value := _metric(record, "blur_effect")) is not None
     ]
-    fig = plt.figure(figsize=(8.27, 11.69))
-    fig.subplots_adjust(top=0.90, bottom=0.08, left=0.09, right=0.95, hspace=0.42, wspace=0.16)
-    grid = fig.add_gridspec(2, 3, height_ratios=(0.9, 1.1))
-    fig.suptitle("Blur effect", y=0.965, fontsize=20, fontweight="bold")
+    fig = plt.figure(figsize=(11.69, 8.27))
+    fig.subplots_adjust(
+        top=0.89, bottom=0.07, left=0.09, right=0.97, hspace=0.72, wspace=0.16,
+    )
+    grid = fig.add_gridspec(4, 5, height_ratios=(0.78, 1, 1, 1))
+    fig.suptitle("Blur effect", y=0.97, fontsize=20, fontweight="bold")
+    fig.text(
+        0.5,
+        0.925,
+        "Five cutouts nearest each percentile target; higher scores mean blurrier cutouts",
+        ha="center",
+        color=MUTED,
+        fontsize=8.5,
+    )
 
     histogram_ax = fig.add_subplot(grid[0, :])
     if values:
@@ -457,25 +524,36 @@ def _mpl_blur_figure(records: Sequence[CutoutRecord]) -> Figure:
     _clean_axis(histogram_ax)
 
     examples = _blur_examples(records)
-    for column in range(3):
-        axis = fig.add_subplot(grid[1, column])
-        axis.set_xticks([])
-        axis.set_yticks([])
-        if column < len(examples):
-            label, record, value = examples[column]
-            axis.imshow(_native_preview(record, "cutout"), interpolation="none")
-            axis.set_title(
-                f"{label}: {_format_decimal(value)}\n{record.cutout_id}",
-                fontsize=9,
-                fontweight="bold",
-                pad=9,
-            )
-        else:
-            axis.text(0.5, 0.5, "Unavailable", ha="center", va="center", color=MUTED)
-        for spine in axis.spines.values():
-            spine.set_color("#d1d5db")
-            spine.set_linewidth(0.7)
+    for row in range(3):
+        label, target, group = (
+            examples[row] if row < len(examples) else ("Unavailable", math.nan, ())
+        )
+        for column in range(5):
+            axis = fig.add_subplot(grid[row + 1, column])
+            axis.set_xticks([])
+            axis.set_yticks([])
+            if column == 0:
+                target_text = _format_decimal(target) if math.isfinite(target) else "NA"
+                axis.set_ylabel(
+                    f"{label}\ntarget {target_text}",
+                    fontsize=8,
+                    fontweight="bold",
+                    rotation=0,
+                    ha="right",
+                    va="center",
+                    labelpad=6,
+                )
+            if column < len(group):
+                record, value = group[column]
+                axis.imshow(_native_preview(record, "cutout"), interpolation="none")
+                axis.set_title(f"{_format_decimal(value)}\n{record.cutout_id}", fontsize=6.6, pad=4)
+            else:
+                axis.text(0.5, 0.5, "Unavailable", ha="center", va="center", color=MUTED)
+            for spine in axis.spines.values():
+                spine.set_color("#d1d5db")
+                spine.set_linewidth(0.7)
     return fig
+
 
 
 def _mpl_area_bins_figure(records: Sequence[CutoutRecord]) -> Figure:
@@ -538,6 +616,8 @@ def _normalized_qc_counts(records: Sequence[CutoutRecord]) -> Counter[str]:
         key = reason
         if reason.startswith("edge cut"):
             key = "Edge cut"
+        elif reason == "abnormal bbox size":
+            key = "Abnormal size"
         elif reason.endswith("components"):
             key = "≥10 Components"
         elif reason.startswith("cleanup removed"):
@@ -557,27 +637,85 @@ def _placement_category(raw_value: Any) -> str | None:
     return None
 
 
+def _observed_numbers(values: Iterable[Any], *, include_percent: bool = False) -> str:
+    numbers = sorted({value for value in (_number(item) for item in values) if value is not None})
+    if not numbers:
+        return "unavailable"
+    return ", ".join(
+        f"{_format_decimal(value)} ({_format_decimal(value * 100, suffix='%')})"
+        if include_percent else _format_decimal(value)
+        for value in numbers
+    )
+
+
+def _observed_widths(records: Sequence[CutoutRecord], field: str) -> str:
+    widths: list[Any] = []
+    for record in records:
+        cleanup = record.props.get("intruder_cleanup")
+        if not isinstance(cleanup, Mapping):
+            continue
+        value = cleanup.get("border_width_px")
+        if isinstance(value, Mapping):
+            widths.append(value.get(field))
+    numbers = sorted({
+        int(value)
+        for value in widths
+        if isinstance(value, int) and not isinstance(value, bool)
+    })
+    if not numbers:
+        return "unavailable"
+    return str(numbers[0]) if len(numbers) == 1 else f"{numbers[0]}–{numbers[-1]}"
+
+
+def _qc_definition_text(records: Sequence[CutoutRecord]) -> tuple[str, str]:
+    edge_thresholds = _observed_numbers(
+        (
+            edge.get("threshold")
+            for record in records
+            if isinstance((edge := record.props.get("edge_cut")), Mapping)
+        ),
+        include_percent=True,
+    )
+    cleanup_fractions = _observed_numbers(
+        cleanup.get("border_band_fraction")
+        for record in records
+        if isinstance((cleanup := record.props.get("intruder_cleanup")), Mapping)
+    )
+    top_bottom = _observed_widths(records, "top_bottom")
+    left_right = _observed_widths(records, "left_right")
+    indicator_text = (
+        "Y-axis definitions\n"
+        f"• Edge cut — more than the configured threshold ({edge_thresholds}) of the cleaned plant "
+        "foreground occupies any outermost one-pixel row or column; each side is tested separately.\n"
+        "• Unsuitable placement — two opposite, three, or four sides are edge-cut.\n"
+        "• Abnormal size — bbox area is below the configured lower limit relative to its category median.\n"
+        "• ≥10 Components — at least ten disconnected expected-class regions remain after cleanup.\n"
+        "• Intruder cleanup applied — border cleanup removed at least one expected-class component.\n"
+        "• Missing area — neither world-coordinate nor camera-estimated bbox area is available."
+    )
+    placement_text = (
+        "Y-axis definitions\n"
+        "• Unrestricted — no sides are edge-cut; the cutout may be placed anywhere.\n"
+        "• Single edge restricted — exactly one side is edge-cut; place against that edge.\n"
+        "• Double edge restricted — exactly two adjacent sides are edge-cut; place in that corner.\n"
+        "• Unsuitable — two opposite, three, or four sides are edge-cut.\n\n"
+        "Intruder-cleanup configuration\n"
+        f"Border band fraction: {cleanup_fractions}\n"
+        f"Resolved top/bottom width: {top_bottom} px\n"
+        f"Resolved left/right width: {left_right} px\n"
+        "Removal rule: components entirely inside the border band are removed; a component "
+        "reaching the crop interior is retained."
+    )
+    return indicator_text, placement_text
+
+
 def _mpl_qc_figure(records: Sequence[CutoutRecord]) -> Figure:
     """Build QC indicators and normalized synthetic-placement counts."""
 
-    indicators = (
-        ("Edge cut", "Edge cut"),
-        ("Unsuitable placement", "unsuitable placement"),
-        ("Abnormal size", "abnormal size"),
-        ("≥10 Components", "≥10 Components"),
-        ("Intruder cleanup applied", "Intruder cleanup applied"),
-        ("Missing area", "missing area"),
-    )
     normalized = _normalized_qc_counts(records)
-    labels = [display for display, _ in indicators]
-    values = [normalized[key] for _, key in indicators]
+    labels = [display for display, _ in QC_INDICATORS]
+    values = [normalized[key] for _, key in QC_INDICATORS]
 
-    placement_labels = (
-        "unsuitable",
-        "unrestricted",
-        "single edge restricted",
-        "double edge restricted",
-    )
     placements: Counter[str] = Counter()
     for record in records:
         edge = record.props.get("edge_cut")
@@ -587,8 +725,11 @@ def _mpl_qc_figure(records: Sequence[CutoutRecord]) -> Figure:
         if category is not None:
             placements[category] += 1
 
-    fig, axes = plt.subplots(2, 1, figsize=(8.27, 11.69))
-    fig.subplots_adjust(top=0.90, bottom=0.10, left=0.31, right=0.94, hspace=0.48)
+    fig = plt.figure(figsize=(8.27, 11.69))
+    fig.subplots_adjust(top=0.90, bottom=0.08, left=0.25, right=0.94, hspace=0.44)
+    grid = fig.add_gridspec(4, 1, height_ratios=(1.15, 0.86, 0.95, 0.92))
+    axes = (fig.add_subplot(grid[0]), fig.add_subplot(grid[2]))
+    definition_axes = (fig.add_subplot(grid[1]), fig.add_subplot(grid[3]))
     fig.suptitle("Quality-control indicators", y=0.97, fontsize=20, fontweight="bold")
 
     bars = axes[0].barh(
@@ -603,9 +744,9 @@ def _mpl_qc_figure(records: Sequence[CutoutRecord]) -> Figure:
     axes[0].margins(x=0.14, y=0.10)
     _clean_axis(axes[0], grid_axis="x")
 
-    placement_values = [placements[label] for label in placement_labels]
+    placement_values = [placements[label] for label in PLACEMENT_LABELS]
     bars = axes[1].barh(
-        list(reversed(placement_labels)),
+        list(reversed(PLACEMENT_LABELS)),
         list(reversed(placement_values)),
         color="#7c3aed",
         height=0.58,
@@ -615,6 +756,22 @@ def _mpl_qc_figure(records: Sequence[CutoutRecord]) -> Figure:
     axes[1].set_xlabel("Cutouts", labelpad=8)
     axes[1].margins(x=0.14, y=0.12)
     _clean_axis(axes[1], grid_axis="x")
+
+    indicator_text, placement_text = _qc_definition_text(records)
+    for axis, content in zip(definition_axes, (indicator_text, placement_text), strict=True):
+        axis.axis("off")
+        axis.text(
+            -0.22,
+            1.0,
+            content,
+            transform=axis.transAxes,
+            ha="left",
+            va="top",
+            fontsize=7.25,
+            color=INK,
+            linespacing=1.38,
+            wrap=True,
+        )
     return fig
 
 
@@ -798,7 +955,7 @@ def _sample_caption(record: CutoutRecord, *, annotate_flags: bool) -> str:
     )
     if annotate_flags:
         details += (
-            "   |   area ratio "
+            "   |   bbox ratio "
             f"{_format_decimal(_metric(record, 'species_bbox_area_ratio'))}"
         )
     lines = [
@@ -899,8 +1056,8 @@ def generate_pdf(
         )
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    random_records = select_random_records(records, sample_size, seed)
-    flagged_records = select_flagged_records(records, max_flagged, seed)
+    normal_size_records = select_normal_size_records(records, sample_size, seed)
+    abnormal_size_records = select_abnormal_size_records(records, max_flagged, seed)
     cleanup_sources = _load_cleanup_preview_sources(
         segmentations_dir,
         georeferenced_csv,
@@ -929,9 +1086,9 @@ def generate_pdf(
         plt.close(figure)
         page_count += 1
         for figure in _mpl_sample_figures(
-            random_records,
-            title="Random cutout sample",
-            subtitle=f"Species-stratified deterministic sample, seed {seed}",
+            normal_size_records,
+            title="Normal-size cutout sample",
+            subtitle=f"Species-stratified sample above the bbox-area lower limit, seed {seed}",
             annotate_flags=False,
             cleanup_sources=cleanup_sources,
         ):
@@ -939,9 +1096,9 @@ def generate_pdf(
             plt.close(figure)
             page_count += 1
         for figure in _mpl_sample_figures(
-            flagged_records,
-            title="Flagged cutout sample",
-            subtitle="Cutouts with one or more QC indicators",
+            abnormal_size_records,
+            title="Abnormal-size cutout sample",
+            subtitle="Cutouts below the configured species median bbox-area lower limit",
             annotate_flags=True,
             cleanup_sources=cleanup_sources,
         ):
