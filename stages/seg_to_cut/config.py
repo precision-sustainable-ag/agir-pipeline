@@ -21,13 +21,13 @@ class SegToCutConfig:
     mask_extension: str = ".png"
     border_band_fraction: float = 0.10
     edge_threshold: float = 0.05
-    cutout_version: str = "2.0"
+    cutout_version: str = "2.1"
     bbox_area_source: str = "georeferenced_csv"
     camera_focal_length_mm: float = 60.0
     camera_sensor_diagonal_mm: float = 56.73
     camera_height_cm: float = 170.0
     species_bbox_min_sample_size: int = 5
-    abnormal_bbox_size_threshold: float = 0.50
+    abnormal_bbox_size_threshold: float = 0.75
 
 
 def _extension(value: Any, *, field: str) -> str:
@@ -148,7 +148,7 @@ def parse_config(data: Mapping[str, Any]) -> SegToCutConfig:
             field="border_band_fraction",
         )
     edge_threshold = _fraction(data.get("edge_threshold", 0.05), field="edge_threshold")
-    cutout_version = data.get("cutout_version", "2.0")
+    cutout_version = data.get("cutout_version", "2.1")
     if not isinstance(cutout_version, str) or not cutout_version.strip():
         raise SegToCutConfigError(
             ERROR_CONFIG_INVALID,
@@ -191,8 +191,8 @@ def parse_config(data: Mapping[str, Any]) -> SegToCutConfig:
         data.get("species_bbox_min_sample_size", 5),
         field="species_bbox_min_sample_size",
     )
-    abnormal_bbox_size_threshold = _nonnegative_float(
-        data.get("abnormal_bbox_size_threshold", 0.50),
+    abnormal_bbox_size_threshold = _fraction(
+        data.get("abnormal_bbox_size_threshold", 0.75),
         field="abnormal_bbox_size_threshold",
     )
     return SegToCutConfig(

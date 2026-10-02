@@ -1,0 +1,1293 @@
+"""Generate a standalone PDF quality-control report for a cutout batch.
+
+The report is deliberately a visualization product, not a stage contract.  It
+reads the four-file cutout sets after ``seg_to_cut`` finishes and can therefore
+be rerun without regenerating cutouts.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import math
+import random
+import textwrap
+from collections import Counter
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from statistics import fmean, median
+from typing import Any, Iterable, Mapping, Sequence
+
+import numpy as np
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.figure import Figure
+from PIL import Image, ImageDraw
+
+from .processor import load_detection_rows, normalized_bbox_to_pixels
+
+logger = logging.getLogger(__name__)
+
+INK = "#1f2937"
+MUTED = "#6b7280"
+ACCENT = "#2563eb"
+WARNING = "#b45309"
+DEFAULT_ABNORMAL_BBOX_SIZE_THRESHOLD = 0.7
+SCHEMA_VERSION = 1
+AREA_BINS = (
+    "0-1",
+    "1-10",
+    "10-100",
+    "100-500",
+    "500-1000",
+    "1000-5000",
+    "5000-10000",
+    "10000+",
+)
+QC_INDICATORS = (
+    ("Edge cut", "Edge cut"),
+    ("Unsuitable placement", "unsuitable placement"),
+    ("Abnormal size", "Abnormal size"),
+    ("≥10 Components", "≥10 Components"),
+    ("Intruder cleanup applied", "Intruder cleanup applied"),
+    ("Missing area", "missing area"),
+)
+PLACEMENT_LABELS = (
+    "unsuitable",
+    "unrestricted",
+    "single edge restricted",
+    "double edge restricted",
+)
+
+
+@dataclass(frozen=True)
+class CutoutRecord:
+    cutout_id: str
+    image_id: str
+    batch_id: str
+    metadata: Mapping[str, Any]
+    cropout_path: Path
+    cutout_path: Path
+    mask_path: Path
+
+    @property
+    def props(self) -> Mapping[str, Any]:
+        value = self.metadata.get("cutout_props")
+        return value if isinstance(value, Mapping) else {}
+
+    @property
+    def category(self) -> Mapping[str, Any]:
+        value = self.metadata.get("category")
+        return value if isinstance(value, Mapping) else {}
+
+
+@dataclass(frozen=True)
+class CleanupPreviewSources:
+    """Original masks and detections used to reconstruct removed pixels."""
+
+    masks: Mapping[str, Path]
+    detections: Mapping[tuple[str, int], Any]
+
+
+def _read_object(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        logger.warning("Could not read %s: %s", path, exc)
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def load_cutout_records(cutouts_dir: str | Path) -> tuple[CutoutRecord, ...]:
+    """Load complete cutout sets, skipping malformed or incomplete entries."""
+
+    root = Path(cutouts_dir)
+    if not root.is_dir():
+        raise ValueError(f"cutout directory does not exist: {root}")
+
+    records: list[CutoutRecord] = []
+    for metadata_path in sorted(root.glob("*.json")):
+        metadata = _read_object(metadata_path)
+        cutout_id = metadata.get("cutout_id")
+        image_id = metadata.get("image_id")
+        if not isinstance(cutout_id, str) or cutout_id != metadata_path.stem:
+            logger.warning("Skipping metadata with invalid cutout_id: %s", metadata_path)
+            continue
+        if not isinstance(image_id, str) or not image_id:
+            logger.warning("Skipping metadata with invalid image_id: %s", metadata_path)
+            continue
+
+        cropout_path = root / f"{cutout_id}.jpg"
+        cutout_path = root / f"{cutout_id}.png"
+        mask_path = root / f"{cutout_id}_mask.png"
+        missing = [path.name for path in (cropout_path, cutout_path, mask_path) if not path.is_file()]
+        if missing:
+            logger.warning("Skipping incomplete cutout %s; missing %s", cutout_id, missing)
+            continue
+        records.append(
+            CutoutRecord(
+                cutout_id=cutout_id,
+                image_id=image_id,
+                batch_id=str(metadata.get("batch_id") or "unknown"),
+                metadata=metadata,
+                cropout_path=cropout_path,
+                cutout_path=cutout_path,
+                mask_path=mask_path,
+            )
+        )
+    return tuple(records)
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    return result if math.isfinite(result) else None
+
+
+def _metric(record: CutoutRecord, field: str) -> float | None:
+    return _number(record.props.get(field))
+
+
+def _display_name(record: CutoutRecord) -> str:
+    value = record.category.get("common_name")
+    return str(value).strip() if value is not None and str(value).strip() else "Unknown"
+
+
+def _flag_reasons(record: CutoutRecord) -> tuple[str, ...]:
+    props = record.props
+    reasons: list[str] = []
+    if props.get("abnormal_bbox_size") is True:
+        reasons.append("abnormal bbox size")
+    edge_cut = props.get("edge_cut")
+    if isinstance(edge_cut, Mapping) and edge_cut.get("flagged") is True:
+        sides = edge_cut.get("flagged_sides")
+        suffix = f" ({','.join(map(str, sides))})" if isinstance(sides, list) and sides else ""
+        reasons.append(f"edge cut{suffix}")
+        if edge_cut.get("synthetic_placement") == "unsuitable":
+            reasons.append("unsuitable placement")
+    components = _number(props.get("num_components"))
+    if components is not None and components >= 10:
+        reasons.append(f"{int(components)} components")
+    cleanup = props.get("intruder_cleanup")
+    if isinstance(cleanup, Mapping):
+        removed = _number(cleanup.get("removed_components"))
+        if removed is not None and removed > 0:
+            reasons.append(f"cleanup removed {int(removed)}")
+    if props.get("bbox_area_cm2") is None and props.get("estimated_bbox_area_cm2") is None:
+        reasons.append("missing area")
+    return tuple(reasons)
+
+
+def select_normal_size_records(
+    records: Sequence[CutoutRecord], sample_size: int, seed: int
+) -> tuple[CutoutRecord, ...]:
+    if sample_size < 0:
+        raise ValueError("sample_size must be non-negative")
+    rng = random.Random(seed)
+    normal_size = [record for record in records if record.props.get("abnormal_bbox_size") is False]
+    groups: dict[str, list[CutoutRecord]] = {}
+    for record in sorted(normal_size, key=lambda item: item.cutout_id):
+        species_id = str(record.category.get("species_id") or "Unknown")
+        groups.setdefault(species_id, []).append(record)
+    for group in groups.values():
+        rng.shuffle(group)
+
+    selected: list[CutoutRecord] = []
+    target = min(sample_size, len(normal_size))
+    while len(selected) < target:
+        added = False
+        for species_id in sorted(groups):
+            if groups[species_id] and len(selected) < target:
+                selected.append(groups[species_id].pop())
+                added = True
+        if not added:
+            break
+    return tuple(
+        sorted(
+            selected,
+            key=lambda record: (
+                str(record.category.get("species_id") or "Unknown"),
+                record.cutout_id,
+            ),
+        )
+    )
+
+
+def select_abnormal_size_records(
+    records: Sequence[CutoutRecord], max_flagged: int, seed: int
+) -> tuple[CutoutRecord, ...]:
+    if max_flagged < 0:
+        raise ValueError("max_flagged must be non-negative")
+    abnormal_size = [record for record in records if record.props.get("abnormal_bbox_size") is True]
+    rng = random.Random(seed ^ 0x5EEDC0DE)
+    if len(abnormal_size) > max_flagged:
+        abnormal_size = rng.sample(abnormal_size, max_flagged)
+    return tuple(sorted(abnormal_size, key=lambda record: record.cutout_id))
+
+
+def _abnormal_size_summary(
+    records: Sequence[CutoutRecord],
+    sampled_records: Sequence[CutoutRecord],
+    threshold: float,
+) -> tuple[tuple[str, float | None, float | None, float | None, float | None], ...]:
+    """Summarize bbox areas for species represented in the abnormal sample."""
+
+    sampled_species = {
+        str(record.category.get("species_id") or "Unknown")
+        for record in sampled_records
+    }
+    grouped: dict[str, list[float]] = {species_id: [] for species_id in sampled_species}
+    names: dict[str, str] = {}
+    has_available_median: dict[str, bool] = {
+        species_id: False for species_id in sampled_species
+    }
+    for record in records:
+        species_id = str(record.category.get("species_id") or "Unknown")
+        if species_id not in sampled_species:
+            continue
+        names.setdefault(species_id, _display_name(record))
+        area = _metric(record, "bbox_area_cm2")
+        if area is not None and area > 0:
+            grouped[species_id].append(area)
+        if _metric(record, "species_median_bbox_area_cm2") is not None:
+            has_available_median[species_id] = True
+
+    rows = []
+    for species_id, values in grouped.items():
+        category_median = (
+            float(median(values)) if values and has_available_median[species_id] else None
+        )
+        rows.append(
+            (
+                names.get(species_id, "Unknown"),
+                min(values) if values else None,
+                max(values) if values else None,
+                category_median * threshold if category_median is not None else None,
+                category_median,
+            )
+        )
+    return tuple(sorted(rows, key=lambda row: row[0].casefold()))
+
+
+def _counts_from_manifest(manifest: Mapping[str, Any]) -> Counter[str]:
+    items = manifest.get("items")
+    if not isinstance(items, list):
+        return Counter()
+    return Counter(
+        str(item.get("status"))
+        for item in items
+        if isinstance(item, Mapping) and item.get("status") is not None
+    )
+
+
+def _skip_reason_counts(manifest: Mapping[str, Any]) -> Counter[str]:
+    items = manifest.get("items")
+    if not isinstance(items, list):
+        return Counter()
+    return Counter(
+        str(item.get("message") or "UNSPECIFIED")
+        for item in items
+        if isinstance(item, Mapping) and item.get("status") == "skipped"
+    )
+
+
+def _checkerboard(size: tuple[int, int], tile: int = 18) -> Image.Image:
+    width, height = size
+    canvas = Image.new("RGB", size, "white")
+    draw = ImageDraw.Draw(canvas)
+    for y in range(0, height, tile):
+        for x in range(0, width, tile):
+            color = "#d1d5db" if (x // tile + y // tile) % 2 else "#f3f4f6"
+            draw.rectangle((x, y, min(x + tile, width), min(y + tile, height)), fill=color)
+    return canvas
+
+
+def _format_metric(value: float | None) -> str:
+    return "NA" if value is None else f"{value:.3g}"
+
+
+
+def _clean_axis(axis, *, grid_axis: str = "y") -> None:
+    axis.spines[["top", "right"]].set_visible(False)
+    axis.grid(axis=grid_axis, color="#e5e7eb", linewidth=0.7)
+    axis.set_axisbelow(True)
+
+
+def _mpl_overview_figure(
+    records: Sequence[CutoutRecord],
+    report: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    *,
+    seed: int,
+) -> Figure:
+    """Build the report overview and batch composition page."""
+
+    batch_id = str(report.get("batch_id") or records[0].batch_id)
+    counts = _counts_from_manifest(manifest)
+    outputs = report.get("outputs") if isinstance(report.get("outputs"), Mapping) else {}
+    report_counts = outputs.get("counts") if isinstance(outputs.get("counts"), Mapping) else {}
+    succeeded = counts.get("ok", report_counts.get("n_units_succeeded", len(records)))
+    failed = counts.get("failed", report_counts.get("n_units_failed", 0))
+    skipped = counts.get("skipped", report_counts.get("n_units_skipped", 0))
+
+    fig = plt.figure(figsize=(8.27, 11.69))
+    fig.suptitle(batch_id, y=0.972, fontsize=21, fontweight="bold")
+    fig.text(
+        0.5,
+        0.933,
+        "Segmentation-to-cutout report",
+        ha="center",
+        color=MUTED,
+        fontsize=16,
+    )
+
+    identity_ax = fig.add_axes((0.08, 0.64, 0.84, 0.23))
+    identity_ax.axis("off")
+    identity_rows = [
+        ("Run ID", str(report.get("run_id") or "Unavailable")),
+        ("Stage version", str(report.get("stage_version") or "Unavailable")),
+        ("Cutout version", str(records[0].metadata.get("cutout_version") or "Unavailable")),
+        ("Season", str(records[0].metadata.get("season") or "Unavailable")),
+        ("BBot version", str(records[0].metadata.get("bbot_version") or "Unavailable")),
+        ("Lens", str(records[0].metadata.get("lens_model") or "Unavailable")),
+        ("Sample seed", str(seed)),
+        ("Generated UTC", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")),
+    ]
+    table = identity_ax.table(
+        cellText=identity_rows,
+        colLabels=("Run identity", "Value"),
+        cellLoc="left",
+        colLoc="left",
+        colWidths=(0.25, 0.75),
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8.5)
+    table.scale(1, 1.22)
+    for (row, _), cell in table.get_celld().items():
+        cell.set_edgecolor("#e5e7eb")
+        cell.PAD = 0.08
+        if row == 0:
+            cell.set_facecolor("#eff6ff")
+            cell.set_text_props(fontweight="bold")
+
+    totals_ax = fig.add_axes((0.18, 0.48, 0.64, 0.09))
+    labels = ("Succeeded", "Skipped", "Failed")
+    values = (succeeded, skipped, failed)
+    bars = totals_ax.bar(labels, values, color=("#15803d", "#b45309", "#b91c1c"), width=0.48)
+    totals_ax.bar_label(bars, padding=3, fontsize=9, fontweight="bold")
+    totals_ax.set_title("Instances", loc="left", pad=8, fontweight="bold")
+    totals_ax.margins(y=0.25)
+    totals_ax.spines[["top", "right", "left"]].set_visible(False)
+    totals_ax.tick_params(axis="y", left=False, labelleft=False)
+
+    skip_reasons = _skip_reason_counts(manifest)
+    reason_suffixes = {
+        reason: f" ({skip_reasons[reason]:,})" if reason in skip_reasons else ""
+        for reason in (
+            "NO_EXPECTED_CLASS_PIXELS",
+            "NO_FOREGROUND_AFTER_CLEANUP",
+            "FAIL_STOP",
+        )
+    }
+    fig.text(
+        0.08, 0.435, "Skipped-instance definitions",
+        fontsize=9, fontweight="bold", color=INK,
+    )
+    fig.text(
+        0.08,
+        0.414,
+        (
+            "Skipped: a detection produced no four-file cutout artifact set.\n"
+            f"• NO_EXPECTED_CLASS_PIXELS{reason_suffixes['NO_EXPECTED_CLASS_PIXELS']}: the mask crop "
+            "contains no pixels for the detection's expected species/cultivar class; other classes "
+            "do not count.\n"
+            "  Examples: a color checker or a very small false-positive detection.\n"
+            f"• NO_FOREGROUND_AFTER_CLEANUP{reason_suffixes['NO_FOREGROUND_AFTER_CLEANUP']}: expected-class "
+            "pixels existed, but every component was confined to the cleanup border band and removed.\n"
+            f"• FAIL_STOP{reason_suffixes['FAIL_STOP']}: operational skip after an earlier failure when "
+            "the stage was run with --fail-stop."
+        ),
+        fontsize=7.3,
+        color=MUTED,
+        ha="left",
+        va="top",
+        wrap=True,
+        linespacing=1.35,
+    )
+
+
+    category_ax = fig.add_axes((0.34, 0.055, 0.57, 0.225))
+    species = Counter(_display_name(record) for record in records)
+    top_categories = species.most_common(12)
+    names = [
+        textwrap.shorten(name, width=48, placeholder="…")
+        for name, _ in reversed(top_categories)
+    ]
+    category_counts = [count for _, count in reversed(top_categories)]
+    bars = category_ax.barh(names, category_counts, color=ACCENT, height=0.62)
+    category_ax.bar_label(bars, padding=4, fontsize=8)
+    category_ax.set_title("Category composition (top 12)", loc="left", pad=10, fontweight="bold")
+    category_ax.set_xlabel("Cutouts", labelpad=6)
+    category_ax.margins(x=0.12, y=0.05)
+    category_ax.tick_params(axis="y", labelsize=8.5, pad=5)
+    _clean_axis(category_ax, grid_axis="x")
+    return fig
+
+
+def _metric_stats(values: Sequence[float]) -> str:
+    if not values:
+        return "No available values"
+    array = np.asarray(values, dtype=np.float64)
+    return (
+        f"n={len(values):,}   median={median(values):.3g}   mean={fmean(values):.3g}   "
+        f"p95={np.percentile(array, 95):.3g}   range={array.min():.3g}–{array.max():.3g}"
+    )
+
+
+def _format_decimal(value: float | None, *, suffix: str = "") -> str:
+    if value is None:
+        return "NA"
+    formatted = f"{value:.5f}".rstrip("0").rstrip(".")
+    return f"{formatted}{suffix}"
+
+
+def _area_label_and_value(record: CutoutRecord) -> tuple[str, float | None]:
+    bbox_area = _metric(record, "bbox_area_cm2")
+    if bbox_area is not None:
+        return "area", bbox_area
+    estimated_area = _metric(record, "estimated_bbox_area_cm2")
+    if estimated_area is not None:
+        return "estimated area", estimated_area
+    return "area", None
+
+
+def _area_value(record: CutoutRecord) -> float | None:
+    return _area_label_and_value(record)[1]
+
+
+def _area_bin(record: CutoutRecord) -> str | None:
+    value = record.props.get("estimated_area_bin")
+    if isinstance(value, str) and value in AREA_BINS:
+        return value
+    area = _area_value(record)
+    if area is None or area <= 0:
+        return None
+    edges = (1.0, 10.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0)
+    return AREA_BINS[sum(area >= edge for edge in edges)]
+
+
+def _blur_examples(
+    records: Sequence[CutoutRecord],
+) -> tuple[tuple[str, float, tuple[tuple[CutoutRecord, float], ...]], ...]:
+    available = [
+        (value, record)
+        for record in records
+        if (value := _metric(record, "blur_effect")) is not None
+    ]
+    if not available:
+        return ()
+    available.sort(key=lambda item: (item[0], item[1].cutout_id))
+    values = np.asarray([value for value, _ in available], dtype=np.float64)
+    targets = (
+        ("25th percentile", float(np.percentile(values, 25))),
+        ("Median", float(np.percentile(values, 50))),
+        ("75th percentile", float(np.percentile(values, 75))),
+    )
+    avoid_duplicates = len(available) >= 15
+    used: set[str] = set()
+    groups: list[tuple[str, float, tuple[tuple[CutoutRecord, float], ...]]] = []
+    for label, target in targets:
+        ranked = sorted(
+            available,
+            key=lambda item: (abs(item[0] - target), item[0], item[1].cutout_id),
+        )
+        if avoid_duplicates:
+            ranked = [item for item in ranked if item[1].cutout_id not in used]
+        selected = ranked[:5]
+        used.update(record.cutout_id for _, record in selected)
+        groups.append(
+            (label, target, tuple((record, value) for value, record in selected))
+        )
+    return tuple(groups)
+
+
+def _mpl_blur_figure(records: Sequence[CutoutRecord]) -> Figure:
+    """Show the blur distribution and five examples near each quartile."""
+
+    values = [
+        value
+        for record in records
+        if (value := _metric(record, "blur_effect")) is not None
+    ]
+    fig = plt.figure(figsize=(11.69, 8.27))
+    fig.subplots_adjust(
+        top=0.89, bottom=0.07, left=0.09, right=0.97, hspace=0.72, wspace=0.16,
+    )
+    grid = fig.add_gridspec(4, 5, height_ratios=(0.78, 1, 1, 1))
+    fig.suptitle("Blur effect", y=0.97, fontsize=20, fontweight="bold")
+    fig.text(
+        0.5,
+        0.925,
+        "Five cutouts nearest each percentile target; higher scores mean blurrier cutouts",
+        ha="center",
+        color=MUTED,
+        fontsize=8.5,
+    )
+
+    histogram_ax = fig.add_subplot(grid[0, :])
+    if values:
+        bins = min(24, max(5, int(math.sqrt(len(values)))))
+        histogram_ax.hist(values, bins=bins, color=ACCENT, edgecolor="white", linewidth=0.65)
+    else:
+        histogram_ax.text(0.5, 0.5, "No available values", ha="center", va="center", color=MUTED)
+    histogram_ax.set_title("Distribution", loc="left", pad=12, fontsize=13, fontweight="bold")
+    histogram_ax.text(
+        1.0,
+        1.03,
+        _metric_stats(values),
+        transform=histogram_ax.transAxes,
+        ha="right",
+        va="bottom",
+        fontsize=8,
+        color=MUTED,
+    )
+    histogram_ax.set_xlabel("Blur effect", labelpad=7)
+    histogram_ax.set_ylabel("Cutouts", labelpad=7)
+    histogram_ax.margins(y=0.12)
+    _clean_axis(histogram_ax)
+
+    examples = _blur_examples(records)
+    for row in range(3):
+        label, target, group = (
+            examples[row] if row < len(examples) else ("Unavailable", math.nan, ())
+        )
+        for column in range(5):
+            axis = fig.add_subplot(grid[row + 1, column])
+            axis.set_xticks([])
+            axis.set_yticks([])
+            if column == 0:
+                target_text = _format_decimal(target) if math.isfinite(target) else "NA"
+                axis.set_ylabel(
+                    f"{label}\ntarget {target_text}",
+                    fontsize=8,
+                    fontweight="bold",
+                    rotation=0,
+                    ha="right",
+                    va="center",
+                    labelpad=6,
+                )
+            if column < len(group):
+                record, value = group[column]
+                axis.imshow(_native_preview(record, "cutout"), interpolation="none")
+                axis.set_title(f"{_format_decimal(value)}\n{record.cutout_id}", fontsize=6.6, pad=4)
+            else:
+                axis.text(0.5, 0.5, "Unavailable", ha="center", va="center", color=MUTED)
+            for spine in axis.spines.values():
+                spine.set_color("#d1d5db")
+                spine.set_linewidth(0.7)
+    return fig
+
+
+
+def _mpl_area_bins_figure(records: Sequence[CutoutRecord]) -> Figure:
+    """Show fixed area-bin composition overall and by species."""
+
+    overall = Counter(_area_bin(record) for record in records)
+    species_names: dict[str, str] = {}
+    for record in records:
+        species_id = str(record.category.get("species_id") or "Unknown")
+        species_names.setdefault(species_id, _display_name(record))
+    species_ids = sorted(
+        species_names,
+        key=lambda species_id: (species_names[species_id].casefold(), species_id),
+    )
+    matrix = np.zeros((len(species_ids), len(AREA_BINS)), dtype=int)
+    for row, species_id in enumerate(species_ids):
+        for record in records:
+            record_species = str(record.category.get("species_id") or "Unknown")
+            area_bin = _area_bin(record)
+            if record_species == species_id and area_bin in AREA_BINS:
+                matrix[row, AREA_BINS.index(area_bin)] += 1
+
+    fig, axes = plt.subplots(2, 1, figsize=(11.69, 8.27), gridspec_kw={"height_ratios": (0.9, 1.25)})
+    fig.subplots_adjust(top=0.87, bottom=0.14, left=0.12, right=0.96, hspace=0.52)
+    fig.suptitle("Bounding-box area bin", y=0.96, fontsize=20, fontweight="bold")
+
+    counts = [overall[label] for label in AREA_BINS]
+    bars = axes[0].bar(AREA_BINS, counts, color=ACCENT, width=0.68)
+    axes[0].bar_label(bars, padding=3, fontsize=8)
+    axes[0].set_title("All species", loc="left", pad=10, fontweight="bold")
+    axes[0].set_ylabel("Cutouts")
+    axes[0].tick_params(axis="x", rotation=25, labelsize=8)
+    axes[0].margins(y=0.16)
+    _clean_axis(axes[0])
+
+    image = axes[1].imshow(matrix, aspect="auto", cmap="Blues")
+    axes[1].set_title("Bounding-box area bin by species", loc="left", pad=10, fontweight="bold")
+    axes[1].set_xticks(range(len(AREA_BINS)), AREA_BINS, rotation=30, ha="right")
+    axes[1].set_yticks(range(len(species_ids)), [species_names[value] for value in species_ids])
+    axes[1].set_xlabel("Area bin (cm²)")
+    axes[1].set_ylabel("Species")
+    maximum = int(matrix.max()) if matrix.size else 0
+    for row in range(matrix.shape[0]):
+        for column in range(matrix.shape[1]):
+            value = int(matrix[row, column])
+            axes[1].text(
+                column,
+                row,
+                str(value),
+                ha="center",
+                va="center",
+                fontsize=8,
+                color="white" if maximum and value > maximum * 0.55 else INK,
+            )
+    fig.colorbar(image, ax=axes[1], label="Cutouts", fraction=0.025, pad=0.025)
+    return fig
+
+
+def _normalized_qc_counts(records: Sequence[CutoutRecord]) -> Counter[str]:
+    reason_counts: Counter[str] = Counter()
+    for record in records:
+        reason_counts.update(_flag_reasons(record))
+    normalized: Counter[str] = Counter()
+    for reason, count in reason_counts.items():
+        key = reason
+        if reason.startswith("edge cut"):
+            key = "Edge cut"
+        elif reason == "abnormal bbox size":
+            key = "Abnormal size"
+        elif reason.endswith("components"):
+            key = "≥10 Components"
+        elif reason.startswith("cleanup removed"):
+            key = "Intruder cleanup applied"
+        normalized[key] += count
+    return normalized
+
+
+def _placement_category(raw_value: Any) -> str | None:
+    value = str(raw_value or "").strip().lower()
+    if value in {"unsuitable", "unrestricted"}:
+        return value
+    if value.endswith("_corner_only"):
+        return "double edge restricted"
+    if value.endswith("_edge_only"):
+        return "single edge restricted"
+    return None
+
+
+def _observed_numbers(values: Iterable[Any], *, include_percent: bool = False) -> str:
+    numbers = sorted({value for value in (_number(item) for item in values) if value is not None})
+    if not numbers:
+        return "unavailable"
+    return ", ".join(
+        f"{_format_decimal(value)} ({_format_decimal(value * 100, suffix='%')})"
+        if include_percent else _format_decimal(value)
+        for value in numbers
+    )
+
+
+def _observed_widths(records: Sequence[CutoutRecord], field: str) -> str:
+    widths: list[Any] = []
+    for record in records:
+        cleanup = record.props.get("intruder_cleanup")
+        if not isinstance(cleanup, Mapping):
+            continue
+        value = cleanup.get("border_width_px")
+        if isinstance(value, Mapping):
+            widths.append(value.get(field))
+    numbers = sorted({
+        int(value)
+        for value in widths
+        if isinstance(value, int) and not isinstance(value, bool)
+    })
+    if not numbers:
+        return "unavailable"
+    return str(numbers[0]) if len(numbers) == 1 else f"{numbers[0]}–{numbers[-1]}"
+
+
+def _qc_definition_text(records: Sequence[CutoutRecord]) -> tuple[str, str, str]:
+    edge_thresholds = _observed_numbers(
+        (
+            edge.get("threshold")
+            for record in records
+            if isinstance((edge := record.props.get("edge_cut")), Mapping)
+        ),
+        include_percent=True,
+    )
+    cleanup_fractions = _observed_numbers(
+        cleanup.get("border_band_fraction")
+        for record in records
+        if isinstance((cleanup := record.props.get("intruder_cleanup")), Mapping)
+    )
+    top_bottom = _observed_widths(records, "top_bottom")
+    left_right = _observed_widths(records, "left_right")
+    indicator_text = (
+        "Y-axis definitions\n"
+        f"• Edge cut — more than the configured threshold ({edge_thresholds}) of the cleaned plant "
+        "foreground occupies any outermost one-pixel row or column; each side is tested separately.\n"
+        "• Unsuitable placement — two opposite, three, or four sides are edge-cut.\n"
+        "• Abnormal size — bbox area is below the configured fraction of its category median; "
+        "for example, 0.7 means below 70% of the median.\n"
+        "• ≥10 Components — at least ten disconnected expected-class regions remain after cleanup.\n"
+        "• Intruder cleanup applied — border cleanup removed at least one expected-class component.\n"
+        "• Missing area — neither world-coordinate nor camera-estimated bbox area is available."
+    )
+    cleanup_text = (
+        "Intruder-cleanup configuration\n"
+        f"Border band fraction: {cleanup_fractions}\n"
+        f"Resolved top/bottom width: {top_bottom} px\n"
+        f"Resolved left/right width: {left_right} px\n"
+        "Removal rule: components entirely inside the border band are removed; a component "
+        "reaching the crop interior is retained."
+    )
+    placement_text = (
+        "Y-axis definitions\n"
+        "• Unrestricted — no sides are edge-cut; the cutout may be placed anywhere.\n"
+        "• Single edge restricted — exactly one side is edge-cut; place against that edge.\n"
+        "• Double edge restricted — exactly two adjacent sides are edge-cut; place in that corner.\n"
+        "• Unsuitable — two opposite, three, or four sides are edge-cut."
+    )
+    return indicator_text, cleanup_text, placement_text
+
+
+def _mpl_qc_figure(records: Sequence[CutoutRecord]) -> Figure:
+    """Build QC indicators and normalized synthetic-placement counts."""
+
+    normalized = _normalized_qc_counts(records)
+    labels = [display for display, _ in QC_INDICATORS]
+    values = [normalized[key] for _, key in QC_INDICATORS]
+
+    placements: Counter[str] = Counter()
+    for record in records:
+        edge = record.props.get("edge_cut")
+        if not isinstance(edge, Mapping):
+            continue
+        category = _placement_category(edge.get("synthetic_placement"))
+        if category is not None:
+            placements[category] += 1
+
+    fig = plt.figure(figsize=(8.27, 11.69))
+    fig.subplots_adjust(top=0.90, bottom=0.08, left=0.25, right=0.94, hspace=0.32)
+    grid = fig.add_gridspec(4, 1, height_ratios=(1.12, 1.05, 0.95, 0.70))
+    qc_detail_grid = grid[1].subgridspec(
+        2, 1, height_ratios=(0.58, 0.47), hspace=0.04
+    )
+    axes = (fig.add_subplot(grid[0]), fig.add_subplot(grid[2]))
+    explanation_axes = (
+        fig.add_subplot(qc_detail_grid[0]),
+        fig.add_subplot(qc_detail_grid[1]),
+        fig.add_subplot(grid[3]),
+    )
+    fig.suptitle("Quality-control indicators", y=0.97, fontsize=20, fontweight="bold")
+
+    bars = axes[0].barh(
+        list(reversed(labels)),
+        list(reversed(values)),
+        color=WARNING,
+        height=0.58,
+    )
+    axes[0].bar_label(bars, padding=4, fontsize=9)
+    axes[0].set_title("Indicators (not mutually exclusive)", loc="left", pad=12, fontweight="bold")
+    axes[0].set_xlabel("Cutouts", labelpad=8)
+    axes[0].margins(x=0.14, y=0.10)
+    _clean_axis(axes[0], grid_axis="x")
+
+    placement_values = [placements[label] for label in PLACEMENT_LABELS]
+    bars = axes[1].barh(
+        list(reversed(PLACEMENT_LABELS)),
+        list(reversed(placement_values)),
+        color="#7c3aed",
+        height=0.58,
+    )
+    axes[1].bar_label(bars, padding=4, fontsize=9)
+    axes[1].set_title("Synthetic placement", loc="left", pad=12, fontweight="bold")
+    axes[1].set_xlabel("Cutouts", labelpad=8)
+    axes[1].margins(x=0.14, y=0.12)
+    _clean_axis(axes[1], grid_axis="x")
+
+    indicator_text, cleanup_text, placement_text = _qc_definition_text(records)
+    for axis, content in zip(
+        explanation_axes, (indicator_text, cleanup_text, placement_text), strict=True
+    ):
+        axis.axis("off")
+        axis.text(
+            -0.22,
+            1.0,
+            content,
+            transform=axis.transAxes,
+            ha="left",
+            va="top",
+            fontsize=7.25,
+            color=INK,
+            linespacing=1.38,
+            wrap=True,
+        )
+    return fig
+
+
+def _preview_array(image: Image.Image, *, resample: Image.Resampling) -> np.ndarray:
+    """Cap a panel at 720 px, enough for its 300-DPI printed dimensions."""
+
+    image.thumbnail((720, 720), resample=resample)
+    return np.asarray(image.convert("RGB")).copy()
+
+
+def _cleanup_count(record: CutoutRecord, field: str) -> int:
+    cleanup = record.props.get("intruder_cleanup")
+    if not isinstance(cleanup, Mapping):
+        return 0
+    value = cleanup.get(field)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _resolved_class_id(record: CutoutRecord) -> int | None:
+    value = record.category.get("cultivar_class_id")
+    if value is None:
+        value = record.category.get("class_id")
+    return value if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 255 else None
+
+
+def _load_cleanup_preview_sources(
+    segmentations_dir: str | Path | None,
+    georeferenced_csv: str | Path | None,
+) -> CleanupPreviewSources | None:
+    """Load optional source indexes; ordinary mask previews remain the fallback."""
+
+    if segmentations_dir is None and georeferenced_csv is None:
+        return None
+    if segmentations_dir is None or georeferenced_csv is None:
+        logger.warning(
+            "Both --segmentations and --georeferenced-csv are required to show removed mask components"
+        )
+        return None
+    root = Path(segmentations_dir)
+    csv_path = Path(georeferenced_csv)
+    if not root.is_dir() or not csv_path.is_file():
+        logger.warning(
+            "Cleanup comparison inputs are unavailable (segmentations=%s, georeferenced_csv=%s)",
+            root,
+            csv_path,
+        )
+        return None
+    try:
+        rows = load_detection_rows(csv_path)
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not load cleanup comparison detections: %s", exc)
+        return None
+
+    masks: dict[str, Path] = {}
+    for path in sorted(root.iterdir(), key=lambda item: item.name.casefold()):
+        if not path.is_file() or path.suffix.lower() != ".png":
+            continue
+        key = path.stem.casefold()
+        if key in masks:
+            logger.warning(
+                "Duplicate source masks for image_id %s; disabling cleanup comparison", key
+            )
+            return None
+        masks[key] = path
+    detections = {
+        (row.normalized_image_id, row.bounding_box_id): row
+        for row in rows
+    }
+    return CleanupPreviewSources(masks=masks, detections=detections)
+
+
+def _reconstructed_removed_pixels(
+    record: CutoutRecord,
+    cleaned_mask: np.ndarray,
+    sources: CleanupPreviewSources | None,
+) -> np.ndarray | None:
+    """Return verified pixels removed by cleanup for one selected cutout."""
+
+    removed_components = _cleanup_count(record, "removed_components")
+    expected_removed = _cleanup_count(record, "removed_pixels")
+    if removed_components == 0 or expected_removed == 0 or sources is None:
+        return None
+    cutout_num = record.metadata.get("cutout_num")
+    class_id = _resolved_class_id(record)
+    if not isinstance(cutout_num, int) or isinstance(cutout_num, bool) or class_id is None:
+        logger.warning(
+            "Cannot reconstruct removed pixels for %s: invalid identity or class",
+            record.cutout_id,
+        )
+        return None
+    key = (record.image_id.casefold(), cutout_num)
+    detection = sources.detections.get(key)
+    mask_path = sources.masks.get(key[0])
+    if detection is None or mask_path is None:
+        logger.warning(
+            "Cannot reconstruct removed pixels for %s: source detection or mask missing",
+            record.cutout_id,
+        )
+        return None
+    try:
+        with Image.open(mask_path) as source:
+            original_mask = np.asarray(source).copy()
+    except (OSError, ValueError) as exc:
+        logger.warning("Cannot read source mask for %s: %s", record.cutout_id, exc)
+        return None
+    if original_mask.ndim != 2 or original_mask.dtype != np.uint8:
+        logger.warning(
+            "Cannot reconstruct removed pixels for %s: source mask is not uint8 grayscale",
+            record.cutout_id,
+        )
+        return None
+    height, width = original_mask.shape
+    try:
+        box = normalized_bbox_to_pixels(
+            detection.normalized_bbox,
+            width=width,
+            height=height,
+            image_id=record.image_id,
+            bounding_box_id=cutout_num,
+        )
+    except ValueError as exc:
+        logger.warning("Cannot reconstruct removed pixels for %s: %s", record.cutout_id, exc)
+        return None
+    original_crop = original_mask[box.ymin : box.ymax, box.xmin : box.xmax]
+    if original_crop.shape != cleaned_mask.shape:
+        logger.warning(
+            "Cannot reconstruct removed pixels for %s: source crop %s != saved mask %s",
+            record.cutout_id,
+            original_crop.shape,
+            cleaned_mask.shape,
+        )
+        return None
+    removed = (original_crop == class_id) & (cleaned_mask != class_id)
+    actual_removed = int(np.count_nonzero(removed))
+    if actual_removed != expected_removed:
+        logger.warning(
+            "Cannot verify removed pixels for %s: reconstructed %d, metadata says %d",
+            record.cutout_id,
+            actual_removed,
+            expected_removed,
+        )
+        return None
+    return removed
+
+
+def _native_preview(
+    record: CutoutRecord,
+    kind: str,
+    cleanup_sources: CleanupPreviewSources | None = None,
+) -> np.ndarray:
+    """Return a print-resolution RGB preview without embedding huge source arrays."""
+
+    if kind == "cropout":
+        with Image.open(record.cropout_path) as source:
+            return _preview_array(source.convert("RGB"), resample=Image.Resampling.LANCZOS)
+    if kind == "cutout":
+        with Image.open(record.cutout_path) as source:
+            rgba = source.convert("RGBA")
+            background = _checkerboard(rgba.size, tile=max(4, min(rgba.size) // 12))
+            background.paste(rgba, mask=rgba.getchannel("A"))
+            return _preview_array(background, resample=Image.Resampling.LANCZOS)
+    with Image.open(record.mask_path) as source:
+        mask = np.asarray(source).copy()
+    foreground = mask != 0
+    rgb = np.zeros((*foreground.shape, 3), dtype=np.uint8)
+    rgb[foreground] = (234, 88, 12)
+    removed = _reconstructed_removed_pixels(record, mask, cleanup_sources)
+    if removed is not None:
+        rgb[removed] = (236, 72, 153)
+    return _preview_array(Image.fromarray(rgb, "RGB"), resample=Image.Resampling.NEAREST)
+
+
+def _sample_caption(record: CutoutRecord, *, annotate_flags: bool) -> str:
+    area_label, area_value = _area_label_and_value(record)
+    details = (
+        f"{record.metadata.get('cutout_width', '?')} × "
+        f"{record.metadata.get('cutout_height', '?')} px   |   "
+        f"blur {_format_metric(_metric(record, 'blur_effect'))}   |   "
+        f"components {_format_metric(_metric(record, 'num_components'))}   |   "
+        f"{area_label} {_format_decimal(area_value, suffix=' cm²')}"
+    )
+    if annotate_flags:
+        details += (
+            "   |   bbox ratio "
+            f"{_format_decimal(_metric(record, 'species_bbox_area_ratio'))}"
+        )
+    lines = [
+        f"{record.cutout_id}  •  {_display_name(record)}",
+        details,
+    ]
+    removed_components = _cleanup_count(record, "removed_components")
+    if removed_components:
+        lines.append(f"Intruder cleanup: {removed_components} component(s) removed (pink)")
+    if annotate_flags:
+        flags = "; ".join(_flag_reasons(record)) or "No QC indicators"
+        lines.append(f"QC: {flags}")
+    return "\n".join(lines)
+
+
+def _add_abnormal_size_summary_table(
+    fig: Figure,
+    rows: Sequence[tuple[str, float | None, float | None, float | None, float | None]],
+    threshold: float,
+) -> None:
+    axis = fig.add_axes((0.04, 0.69, 0.94, 0.19))
+    axis.axis("off")
+    axis.set_title(
+        f"Species bbox-area summary — abnormal_bbox_size_threshold = {threshold:g}",
+        loc="left",
+        pad=8,
+        fontsize=10,
+        fontweight="bold",
+    )
+    columns = (
+        "Species (common name)",
+        "Min (cm²)",
+        "Max (cm²)",
+        "Value at abnormal_bbox_size_threshold (cm²)",
+        "Median (cm²)",
+    )
+    cells = [
+        [
+            name,
+            *(
+                "Unavailable" if value is None else f"{value:,.2f}"
+                for value in values
+            ),
+        ]
+        for name, *values in rows
+    ]
+    table = axis.table(
+        cellText=cells,
+        colLabels=columns,
+        cellLoc="right",
+        colLoc="center",
+        colWidths=(0.27, 0.13, 0.13, 0.31, 0.16),
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1.0, 1.18)
+    for (row, _column), cell in table.get_celld().items():
+        cell.set_edgecolor("#d1d5db")
+        if row == 0:
+            cell.set_facecolor("#e5e7eb")
+            cell.set_text_props(weight="bold", color=INK)
+        elif row % 2 == 0:
+            cell.set_facecolor("#f9fafb")
+
+
+def _mpl_sample_figures(
+    records: Sequence[CutoutRecord],
+    *,
+    title: str,
+    subtitle: str,
+    annotate_flags: bool,
+    cleanup_sources: CleanupPreviewSources | None,
+    summary_rows: Sequence[tuple[str, float | None, float | None, float | None, float | None]] = (),
+    summary_threshold: float = DEFAULT_ABNORMAL_BBOX_SIZE_THRESHOLD,
+) -> Iterable[Figure]:
+    """Yield spacious landscape contact sheets with two cutouts per page."""
+
+    per_page = 2
+    for offset in range(0, len(records), per_page):
+        subset = records[offset : offset + per_page]
+        fig = plt.figure(figsize=(11.69, 8.27))
+        show_summary = offset == 0 and bool(summary_rows)
+        grid_top = 0.65 if show_summary else 0.87
+        fig.subplots_adjust(
+            top=grid_top,
+            bottom=0.06,
+            left=0.04,
+            right=0.98,
+            hspace=0.20,
+            wspace=0.08,
+        )
+        if show_summary:
+            _add_abnormal_size_summary_table(fig, summary_rows, summary_threshold)
+        grid = fig.add_gridspec(4, 3, height_ratios=(0.30, 1.0, 0.30, 1.0))
+        fig.suptitle(title, y=0.965, fontsize=18, fontweight="bold")
+        fig.text(
+            0.5,
+            0.92,
+            f"{subtitle} — {offset + 1}–{offset + len(subset)} of {len(records)}",
+            ha="center",
+            color=MUTED,
+            fontsize=9,
+        )
+        for index, record in enumerate(subset):
+            caption_row = index * 2
+            caption_axis = fig.add_subplot(grid[caption_row, :])
+            caption_axis.axis("off")
+            caption_axis.text(
+                0.01,
+                0.55,
+                _sample_caption(record, annotate_flags=annotate_flags),
+                ha="left",
+                va="center",
+                fontsize=8.5,
+                color=WARNING if annotate_flags else INK,
+                linespacing=1.35,
+            )
+            for column, kind in enumerate(("cropout", "cutout", "mask")):
+                axis = fig.add_subplot(grid[caption_row + 1, column])
+                axis.imshow(
+                    _native_preview(record, kind, cleanup_sources),
+                    interpolation="none",
+                )
+                axis.set_xticks([])
+                axis.set_yticks([])
+                axis.set_title(kind.title(), fontsize=10, fontweight="bold", pad=7)
+                for spine in axis.spines.values():
+                    spine.set_color("#d1d5db")
+                    spine.set_linewidth(0.7)
+        yield fig
+
+
+def generate_pdf(
+    cutouts_dir: str | Path,
+    output: str | Path,
+    *,
+    run_report_path: str | Path | None = None,
+    manifest_path: str | Path | None = None,
+    segmentations_dir: str | Path | None = None,
+    georeferenced_csv: str | Path | None = None,
+    sample_size: int = 24,
+    max_flagged: int = 24,
+    seed: int = 42,
+    abnormal_bbox_size_threshold: float = DEFAULT_ABNORMAL_BBOX_SIZE_THRESHOLD,
+) -> Path:
+    """Generate the QC PDF and return its path."""
+
+    threshold = _number(abnormal_bbox_size_threshold)
+    if threshold is None or not 0 <= threshold <= 1:
+        raise ValueError("abnormal_bbox_size_threshold must be a finite number in [0, 1]")
+
+    records = load_cutout_records(cutouts_dir)
+    if not records:
+        raise ValueError(f"no complete cutout sets found in {cutouts_dir}")
+    report = _read_object(Path(run_report_path) if run_report_path else None)
+    manifest = _read_object(Path(manifest_path) if manifest_path else None)
+    destination = Path(output)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    if destination.suffix.lower() != ".pdf":
+        destination = destination / (
+            f"seg_to_cut_qc_{records[0].batch_id}_{timestamp}.pdf"
+        )
+    elif destination.exists():
+        destination = destination.with_name(
+            f"{destination.stem}_{timestamp}{destination.suffix}"
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    normal_size_records = select_normal_size_records(records, sample_size, seed)
+    abnormal_size_records = select_abnormal_size_records(records, max_flagged, seed)
+    abnormal_size_summary = _abnormal_size_summary(
+        records, abnormal_size_records, threshold
+    )
+    cleanup_sources = _load_cleanup_preview_sources(
+        segmentations_dir,
+        georeferenced_csv,
+    )
+    metadata = {
+        "Title": f"seg_to_cut QC: {records[0].batch_id}",
+        "Author": "AgIR pipeline",
+        "Subject": f"Schema version {SCHEMA_VERSION} batch visualization",
+        "Keywords": "seg_to_cut, cutouts, quality control",
+    }
+    page_count = 0
+    with PdfPages(destination, metadata=metadata) as pdf:
+        figure = _mpl_overview_figure(records, report, manifest, seed=seed)
+        pdf.savefig(figure, dpi=300)
+        plt.close(figure)
+        page_count += 1
+        for figure in (
+            _mpl_blur_figure(records),
+            _mpl_area_bins_figure(records),
+        ):
+            pdf.savefig(figure, dpi=300)
+            plt.close(figure)
+            page_count += 1
+        figure = _mpl_qc_figure(records)
+        pdf.savefig(figure, dpi=300)
+        plt.close(figure)
+        page_count += 1
+        for figure in _mpl_sample_figures(
+            normal_size_records,
+            title="Normal-size cutout sample",
+            subtitle=f"Species-stratified sample above the bbox-area lower limit, seed {seed}",
+            annotate_flags=False,
+            cleanup_sources=cleanup_sources,
+        ):
+            pdf.savefig(figure, dpi=300)
+            plt.close(figure)
+            page_count += 1
+        for figure in _mpl_sample_figures(
+            abnormal_size_records,
+            title="Abnormal-size cutout sample",
+            subtitle=f"Cutouts below {threshold:g} × the species median bbox area",
+            annotate_flags=True,
+            cleanup_sources=cleanup_sources,
+            summary_rows=abnormal_size_summary,
+            summary_threshold=threshold,
+        ):
+            pdf.savefig(figure, dpi=300)
+            plt.close(figure)
+            page_count += 1
+    logger.info("Wrote %d-page cutout QC report to %s", page_count, destination)
+    return destination
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cutouts", required=True, type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--run-report", type=Path)
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--segmentations", type=Path)
+    parser.add_argument("--georeferenced-csv", type=Path)
+    parser.add_argument("--sample-size", type=int, default=24)
+    parser.add_argument("--max-flagged", type=int, default=24)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--abnormal-bbox-size-threshold",
+        type=float,
+        default=DEFAULT_ABNORMAL_BBOX_SIZE_THRESHOLD,
+        help="Minimum fraction of the species median bbox area (default: 0.7)",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    logging.basicConfig(level=getattr(logging, args.log_level))
+    try:
+        generate_pdf(
+            args.cutouts,
+            args.output,
+            run_report_path=args.run_report,
+            manifest_path=args.manifest,
+            segmentations_dir=args.segmentations,
+            georeferenced_csv=args.georeferenced_csv,
+            sample_size=args.sample_size,
+            max_flagged=args.max_flagged,
+            seed=args.seed,
+            abnormal_bbox_size_threshold=args.abnormal_bbox_size_threshold,
+        )
+    except (OSError, ValueError) as exc:
+        logger.error("Could not generate seg_to_cut QC report: %s", exc)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
