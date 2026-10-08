@@ -7,3 +7,5 @@ tile_size: 1024
 overlap: 256
 tiling: true
 batch_size: 16
+prepare_workers: 2
+prefetch_depth: 4

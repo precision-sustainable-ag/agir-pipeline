@@ -256,10 +256,9 @@ class TestBatch:
         assert results[0].status == ITEM_FAILED
         assert results[1].status == ITEM_OK
 
-    # fail_stop must not leave the prefetch thread blocked forever trying to
-    # hand off work nothing will ever consume again, and must not burn time
-    # preparing pairs process_batch is about to discard.
-    def test_fail_stop_stops_prefetch_thread_promptly(
+    # fail_stop must shut down the bounded preparation pool and must not burn
+    # time preparing every pair process_batch is about to discard.
+    def test_fail_stop_stops_prepare_pool_promptly(
         self, config_file, fake_jpg, fake_txt, tmp_path
     ):
         proc = _make_processor(config_file)
@@ -282,12 +281,11 @@ class TestBatch:
         assert len(results) == 1
         assert results[0].status == ITEM_FAILED
         assert elapsed < 5, "fail_stop should return after the first pair, not prepare all 20"
-        assert not any(t.name == "det_to_seg-prefetch" for t in threading.enumerate())
+        assert not any(t.name.startswith("det_to_seg-prepare") for t in threading.enumerate())
 
-    # a real (not mocked) decode failure happening on the background prepare
-    # thread must still come back as a normal failed SegmentationResult, not
-    # hang process_batch or crash the thread silently.
-    def test_process_batch_surfaces_prepare_failures_from_prefetch_thread(
+    # A real (not mocked) decode failure happening in the preparation pool
+    # must still come back as a normal failed SegmentationResult.
+    def test_process_batch_surfaces_prepare_failures_from_pool(
         self, config_file, tmp_path
     ):
         proc = _make_processor(config_file)
@@ -302,4 +300,4 @@ class TestBatch:
         assert len(results) == 1
         assert results[0].status == ITEM_FAILED
         assert results[0].error_code == ERROR_IMAGE_READ_FAILED
-        assert not any(t.name == "det_to_seg-prefetch" for t in threading.enumerate())
+        assert not any(t.name.startswith("det_to_seg-prepare") for t in threading.enumerate())
