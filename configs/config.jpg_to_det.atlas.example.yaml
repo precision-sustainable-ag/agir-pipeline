@@ -17,7 +17,7 @@ paths:
   stage_config: stages/jpg_to_det/configs/sam3.yaml
 
   # Detection model weights passed to jpg_to_det --m
-  det_model_path: /90daydata/dash_agir/semifield-tools/models/plant_detector/With_Synthetic_Train_Data/weights/last.pt
+  det_model_path: /90daydata/dash_agir/semifield-tools/models/plant_detector/SAM3_v4_boxes_whole_2016/weights/sam3_finetuned_best.pt
 
   # JPG inputs live here: <input_staging_root>/<batch_id>/images/
   input_staging_root: /90daydata/dash_agir/semifield-developed-images

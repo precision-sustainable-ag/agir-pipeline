@@ -88,7 +88,51 @@ def get_batches_needing_jpg_to_det(
     site: Optional[str] = None,
     limit: int = 200,
     batch_ids: Optional[Sequence[str]] = None,
+    rerun: bool = False,
 ) -> List[Dict]:
+    """
+    Return rows from ``v_batches_needing_jpg_to_det``.
+
+    ``rerun=True`` (requires ``batch_ids``) bypasses the view for those
+    batches: it still requires current developed-image JPGs but drops the
+    view's "no detections" and "never succeeded" exclusions so already-
+    processed batches can be re-staged and rerun (e.g. with a new model).
+    Active leases are still excluded, and ``site`` is ignored.
+    """
+    if rerun:
+        if not batch_ids:
+            raise ValueError("rerun=True requires explicit batch_ids")
+        placeholders = ",".join("?" for _ in batch_ids)
+        rows = conn.execute(
+            f"""
+            SELECT
+                g.batch_id,
+                MIN(CASE WHEN g.parent_dir = 'images'
+                              AND g.file_ext IN {_JPG_EXTS}
+                         THEN g.batch_date END) AS batch_date,
+                SUM(g.parent_dir = 'images'
+                    AND g.file_ext IN {_JPG_EXTS}) AS jpg_count,
+                SUM(g.parent_dir IN ('detections', 'plant-detections', 'metadata')) AS det_count
+            FROM globus_file_index g
+            WHERE g.batch_id IN ({placeholders})
+              AND g.data_state = 'semifield-developed-images'
+              AND g.entry_type = 'file'
+              AND g.is_current = 1
+              AND g.batch_id NOT IN (
+                  SELECT batch_id
+                  FROM   stage_leases
+                  WHERE  stage      = 'jpg_to_det'
+                    AND  expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+              )
+            GROUP BY g.batch_id
+            HAVING jpg_count > 0
+            ORDER BY batch_date ASC, g.batch_id ASC
+            LIMIT ?
+            """,
+            (*batch_ids, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     batch_filter_sql = ""
     filter_params: List = []
     if batch_ids:
