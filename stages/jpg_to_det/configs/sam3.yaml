@@ -1,0 +1,14 @@
+# SAM 3 backend (stages/jpg_to_det/sam3_detector.py). Pass the fine-tuned
+# checkpoint from SemiF-Segmentation as --m, e.g.
+#   outputs/runs/plant_boxes_001/sam3_finetune/boxes_v2_whole_2016/sam3_finetuned_best.pt
+# Each image runs whole, once per prompt: no mirror padding, multiscale, WBF or
+# edge-aware filtering. Needs the sam3 extra: uv pip install -e ".[sam3]"
+backend: sam3
+resolution: 2016          # SAM 3 input size; match the checkpoint's sam3_finetune resolution (1008 or 2016)
+base_checkpoint: null     # sam3.pt the fine-tuned weights apply to; null uses the one recorded in the
+                          # checkpoint ("sam3" = Hugging Face download, gated; set a local path on nodes without network)
+conf: 0.5                 # SAM 3 score threshold (presence x query score)
+final_max_det: 1000       # SAM 3 returns at most 200 per prompt
+prompts:                  # text prompt -> YOLO class id / name written to the detections
+  - {prompt: plant, class: 0, name: plant}
+  - {prompt: color chart, class: 1, name: color_checker}

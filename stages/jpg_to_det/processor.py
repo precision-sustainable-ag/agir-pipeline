@@ -19,6 +19,7 @@ from . import (
     ERROR_EXPORT_FAILED,
 )
 from .detector import run_multiscale, export_predictions
+from .sam3_detector import class_names, load_sam3_detector, run_sam3
 from stages import ITEM_OK, ITEM_FAILED
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,13 @@ def validate_config(config: dict) -> None:
     if not config:
         raise ValueError("Config is empty or None")
 
+    backend = config.setdefault("backend", "yolo")
+    if backend == "sam3":
+        _validate_sam3_config(config)
+        return
+    if backend != "yolo":
+        raise ValueError(f"Config 'backend' must be 'yolo' or 'sam3', got {backend!r}")
+
     required_config_keys = [
         "base_imgsz", "scales", "per_scale_conf", "per_scale_iou",
         "per_scale_max_det", "conf", "iou", "final_max_det",
@@ -72,6 +80,26 @@ def validate_config(config: dict) -> None:
     conf = config["conf"]
     if not isinstance(conf, (int, float)) or not (0.0 <= conf <= 1.0):
         raise ValueError(f"Config 'conf' must be a float in [0, 1], got {conf}")
+
+
+def _validate_sam3_config(config: dict) -> None:
+    for key in ("resolution", "conf", "prompts"):
+        if key not in config:
+            raise ValueError(f"Config missing required key: {key}")
+
+    conf = config["conf"]
+    if not isinstance(conf, (int, float)) or not (0.0 <= conf <= 1.0):
+        raise ValueError(f"Config 'conf' must be a float in [0, 1], got {conf}")
+
+    prompts = config["prompts"]
+    if not isinstance(prompts, list) or len(prompts) == 0:
+        raise ValueError("Config 'prompts' must be a non-empty list")
+    for prompt in prompts:
+        if not isinstance(prompt, dict) or not {"prompt", "class", "name"} <= prompt.keys():
+            raise ValueError(f"Config 'prompts' entries need prompt, class and name, got {prompt!r}")
+    class_ids = [int(p["class"]) for p in prompts]
+    if len(set(class_ids)) != len(class_ids):
+        raise ValueError(f"Config 'prompts' class ids must be unique, got {class_ids}")
 
 
 def load_config(config_path: Path) -> dict:
@@ -214,12 +242,16 @@ class Processor:
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model file not found: {self.model_path}")
 
+        self.backend = self.config["backend"]
         try:
-            self.model = YOLO(str(self.model_path))
+            if self.backend == "sam3":
+                self.model = load_sam3_detector(self.model_path, self.config, device=device)
+            else:
+                self.model = YOLO(str(self.model_path))
         except Exception as e:
             raise RuntimeError(f"{ERROR_MODEL_LOAD_FAILED}: {e}") from e
 
-        self.names = self.model.names
+        self.names = class_names(self.config) if self.backend == "sam3" else self.model.names
 
     def process_image(self, jpg_path: Path, output_dir: Path) -> DetectionResult:
         """
@@ -244,12 +276,15 @@ class Processor:
             )
 
         try:
-            det_abs = run_multiscale(
-                model=self.model,
-                im0_bgr=im0,
-                config=self.config,
-                device=self.device,
-            )
+            if self.backend == "sam3":
+                det_abs = run_sam3(self.model, im0, self.config)
+            else:
+                det_abs = run_multiscale(
+                    model=self.model,
+                    im0_bgr=im0,
+                    config=self.config,
+                    device=self.device,
+                )
         except Exception as e:
             return DetectionResult(
                 image_id=image_id,
@@ -298,6 +333,11 @@ class Processor:
         results: List[DetectionResult] = []
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.backend == "sam3" and max_workers > 1:
+            # One SAM 3 copy per worker would not fit; the GPU is the bottleneck anyway.
+            logger.info("SAM 3 backend runs sequentially; ignoring max_workers=%d", max_workers)
+            max_workers = 0
 
         if max_workers <= 1:
             logger.info(
