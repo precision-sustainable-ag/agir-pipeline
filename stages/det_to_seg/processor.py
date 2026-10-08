@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-import queue
-import threading
 import time
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -89,6 +89,8 @@ _REQUIRED_CONFIG_KEYS = [
 ]
 
 DEFAULT_BATCH_SIZE = 16
+DEFAULT_PREPARE_WORKERS = 2
+DEFAULT_PREFETCH_DEPTH = 4
 
 
 def validate_config(config: dict) -> None:
@@ -114,6 +116,15 @@ def validate_config(config: dict) -> None:
     batch_size = config["batch_size"]
     if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
         raise ValueError(f"Config 'batch_size' must be a positive integer, got {batch_size!r}")
+
+    for key, default in (
+        ("prepare_workers", DEFAULT_PREPARE_WORKERS),
+        ("prefetch_depth", DEFAULT_PREFETCH_DEPTH),
+    ):
+        config.setdefault(key, default)
+        value = config[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"Config '{key}' must be a positive integer, got {value!r}")
 
 
 def load_config(config_path: Path) -> dict:
@@ -386,56 +397,54 @@ class Processor:
         results: list[SegmentationResult] = []
         total = len(pairs)
 
+        prepare_workers = int(self.config["prepare_workers"])
+        prefetch_depth = int(self.config["prefetch_depth"])
         logger.info(
-            "Execution plan | device=%s | mode=sequential+prefetch | workers=1 | model_copies=1",
+            "Execution plan | device=%s | mode=parallel-prepare+sequential-inference "
+            "| prepare_workers=%d | prefetch_depth=%d | model_copies=1",
             self.device,
+            prepare_workers,
+            prefetch_depth,
         )
         if total == 0:
             return results
 
-        # A single background thread prepares (decodes JPG, parses
-        # detections for) the next image while the main thread runs GPU
-        # inference + disk write for the current one. The thread only ever
-        # calls _prepare, which never touches the model/CUDA, so this can't
-        # hit the fork+CUDA problems that ruled out process-level
-        # parallelism here (see _prepare/_infer_and_write docstrings). A
-        # 1-deep queue is enough to overlap decode with GPU work; it isn't a
-        # general worker pool.
-        stop_event = threading.Event()
-        prepared_queue: queue.Queue[_PreparedImage] = queue.Queue(maxsize=1)
-
-        def _producer() -> None:
-            for txt_path, jpg_path in pairs:
-                if stop_event.is_set():
-                    return
-                try:
-                    prepared = self._prepare(txt_path, jpg_path, output_dir)
-                except Exception as e:
-                    image_id = txt_path.stem
-                    prepared = _PreparedImage(
+        # Prepare a few images in parallel so the GPU does not have to wait.
+        # Keep the queue small and process the images in their original order.
+        def _prepare_safely(txt_path: Path, jpg_path: Path) -> _PreparedImage:
+            try:
+                return self._prepare(txt_path, jpg_path, output_dir)
+            except Exception as e:
+                image_id = txt_path.stem
+                return _PreparedImage(
+                    image_id=image_id,
+                    mask_path=output_dir / f"{image_id}.png",
+                    early_result=SegmentationResult(
                         image_id=image_id,
-                        mask_path=output_dir / f"{image_id}.png",
-                        early_result=SegmentationResult(
-                            image_id=image_id,
-                            status=ITEM_FAILED,
-                            error_code=ERROR_IMAGE_READ_FAILED,
-                            error_type=type(e).__name__,
-                            error_message=f"Unexpected error during prepare: {e}",
-                        ),
-                    )
-                # Poll instead of blocking indefinitely on put() so a
-                # fail_stop return on the consumer side is noticed quickly
-                # instead of leaving this thread blocked forever on a queue
-                # nothing will drain again.
-                while not stop_event.is_set():
-                    try:
-                        prepared_queue.put(prepared, timeout=0.5)
-                        break
-                    except queue.Full:
-                        continue
+                        status=ITEM_FAILED,
+                        error_code=ERROR_IMAGE_READ_FAILED,
+                        error_type=type(e).__name__,
+                        error_message=f"Unexpected error during prepare: {e}",
+                    ),
+                )
 
-        loader = threading.Thread(target=_producer, name="det_to_seg-prefetch", daemon=True)
-        loader.start()
+        pair_iter = iter(pairs)
+        pending: deque[Future[_PreparedImage]] = deque()
+        executor = ThreadPoolExecutor(
+            max_workers=prepare_workers,
+            thread_name_prefix="det_to_seg-prepare",
+        )
+
+        def _submit_next() -> bool:
+            try:
+                txt_path, jpg_path = next(pair_iter)
+            except StopIteration:
+                return False
+            pending.append(executor.submit(_prepare_safely, txt_path, jpg_path))
+            return True
+
+        for _ in range(min(prefetch_depth, total)):
+            _submit_next()
 
         try:
             with (
@@ -443,7 +452,8 @@ class Processor:
                 tqdm(total=total, desc="det_to_seg", unit="img") as progress,
             ):
                 for idx in range(1, total + 1):
-                    prepared = prepared_queue.get()
+                    prepared = pending.popleft().result()
+                    _submit_next()
                     progress.set_postfix_str(prepared.image_id)
                     progress.update(1)
                     logger.info("[%d/%d] Processing image %s", idx, total, prepared.image_id)
@@ -478,8 +488,7 @@ class Processor:
                         if fail_stop:
                             return results
         finally:
-            stop_event.set()
-            loader.join(timeout=30)
-            if loader.is_alive():
-                logger.warning("det_to_seg prefetch thread did not exit within 30s")
+            for future in pending:
+                future.cancel()
+            executor.shutdown(wait=True, cancel_futures=True)
         return results
