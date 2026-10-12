@@ -10,8 +10,7 @@ import torch
 from stages.common.class_ids import DetectionBox
 from stages.det_to_seg.segmentor import (
     _hann2d,
-    composite_bbox_masks,
-    predict_mask_tiled,
+    composite_bbox_masks_cross_image,
     predict_masks_batched,
     validate_class_mask,
     write_mask_png,
@@ -38,6 +37,15 @@ def _detection(bounding_box_id, xyxy, class_id):
 
 def _foreground_masks(*, crops_rgb, **kwargs):
     return [np.ones(crop.shape[:2], dtype=np.uint8) for crop in crops_rgb]
+
+
+def _composite_one(model, image, detections, config=CONFIG, device="cpu"):
+    return composite_bbox_masks_cross_image(
+        model,
+        [(image, detections)],
+        config,
+        device,
+    )[0]
 
 
 def test_predict_masks_batched_uses_one_model_call_for_the_chunk():
@@ -110,7 +118,7 @@ def test_composites_class_ids_with_first_detection_winning_overlap():
         "stages.det_to_seg.segmentor.predict_masks_batched",
         side_effect=_foreground_masks,
     ):
-        mask = composite_bbox_masks(object(), image, detections, CONFIG, "cpu")
+        mask = _composite_one(object(), image, detections)
 
     assert mask.dtype == np.uint8
     assert mask.shape == (8, 8)
@@ -132,7 +140,7 @@ def test_groups_equal_sized_crops_and_chunks_by_batch_size():
         "stages.det_to_seg.segmentor.predict_masks_batched",
         side_effect=_foreground_masks,
     ) as mock_batched:
-        composite_bbox_masks(object(), image, detections, CONFIG, "cpu")
+        _composite_one(object(), image, detections)
 
     assert [len(call.kwargs["crops_rgb"]) for call in mock_batched.call_args_list] == [2, 2, 1]
 
@@ -150,7 +158,7 @@ def test_chunks_varied_sized_crops_together_sorted_by_longest_side():
         "stages.det_to_seg.segmentor.predict_masks_batched",
         side_effect=_foreground_masks,
     ) as mock_batched:
-        composite_bbox_masks(object(), image, detections, config, "cpu")
+        _composite_one(object(), image, detections, config)
 
     mock_batched.assert_called_once()  # all 3, differently shaped, fit in one chunk
     called_shapes = [crop.shape[:2] for crop in mock_batched.call_args.kwargs["crops_rgb"]]
@@ -179,7 +187,7 @@ def test_padded_batch_does_not_leak_beyond_each_crops_own_bbox():
                 device=inputs.device,
             )
 
-    mask = composite_bbox_masks(AllForegroundModel().eval(), image, detections, config, "cpu")
+    mask = _composite_one(AllForegroundModel().eval(), image, detections, config)
 
     assert mask.shape == (40, 40)
     assert np.all(mask[0:4, 0:4] == 5)
@@ -201,7 +209,7 @@ def test_batch_size_one_infers_each_ordinary_crop_individually():
         "stages.det_to_seg.segmentor.predict_masks_batched",
         side_effect=_foreground_masks,
     ) as mock_batched:
-        composite_bbox_masks(object(), image, detections, config, "cpu")
+        _composite_one(object(), image, detections, config)
 
     assert [len(call.kwargs["crops_rgb"]) for call in mock_batched.call_args_list] == [1, 1]
 
@@ -228,7 +236,7 @@ def test_batching_tiny_crop_with_near_max_ordinary_crop_does_not_crash():
                 device=inputs.device,
             )
 
-    mask = composite_bbox_masks(ConstModel().eval(), image, detections, config, "cpu")
+    mask = _composite_one(ConstModel().eval(), image, detections, config)
 
     assert mask.shape == (1024, 1600)
     assert np.all(mask[0:3, 0:3] == 5)
@@ -236,22 +244,27 @@ def test_batching_tiny_crop_with_near_max_ordinary_crop_does_not_crash():
     assert np.count_nonzero(mask) == 3 * 3 + 1020 * 1020
 
 
-def test_large_crop_is_inferred_individually():
+def test_large_crop_uses_tiled_inference():
     image = np.zeros((1025, 2, 3), dtype=np.uint8)
     detections = [_detection(0, (0, 0, 2, 1025), 27)]
 
-    with (
-        patch(
-            "stages.det_to_seg.segmentor.predict_mask",
-            return_value=np.ones((1025, 2), dtype=np.uint8),
-        ) as mock_individual,
-        patch("stages.det_to_seg.segmentor.predict_masks_batched") as mock_batched,
-    ):
-        mask = composite_bbox_masks(object(), image, detections, CONFIG, "cpu")
+    class RecordingModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.call_sizes = []
 
-    mock_individual.assert_called_once()
-    assert mock_individual.call_args.kwargs["use_tiling"] is True
-    mock_batched.assert_not_called()
+        def forward(self, inputs):
+            self.call_sizes.append(inputs.shape[0])
+            return torch.full(
+                (inputs.shape[0], 1, inputs.shape[2], inputs.shape[3]),
+                10.0,
+                device=inputs.device,
+            )
+
+    model = RecordingModel()
+    mask = _composite_one(model, image, detections)
+
+    assert model.call_sizes == [2]
     assert np.all(mask == 27)
 
 
@@ -274,16 +287,16 @@ def test_tiled_inference_batches_tiles_into_one_call():
     # (0,0),(0,200),(200,0),(200,200), well within batch_size=16.
     crop = np.zeros((300, 300, 3), dtype=np.uint8)
 
-    mask = predict_mask_tiled(
-        model,
-        crop,
-        thr=0.5,
-        divisor=8,
-        device="cpu",
-        tile_size=200,
-        overlap=0,
-        batch_size=16,
-    )
+    config = {
+        **CONFIG,
+        "pad_divisor": 8,
+        "tile_size": 200,
+        "overlap": 0,
+        "batch_size": 16,
+    }
+    detections = [_detection(0, (0, 0, 300, 300), 1)]
+    with patch("stages.det_to_seg.segmentor._is_large_crop", return_value=True):
+        mask = _composite_one(model, crop, detections, config)
 
     assert model.call_sizes == [4], "all 4 tiles should cost exactly one forward call"
     assert mask.shape == (300, 300)
@@ -314,21 +327,22 @@ def test_tiled_inference_blends_continuous_probabilities_before_thresholding():
     crop = np.zeros((4, 8, 3), dtype=np.uint8)  # content unused by this fake model
     thr = 0.5
 
-    mask = predict_mask_tiled(
-        TwoTileModel(),
-        crop,
-        thr=thr,
-        divisor=None,
-        device="cpu",
-        tile_size=6,
-        overlap=2,
-        batch_size=16,
-    )
+    config = {
+        **CONFIG,
+        "threshold": thr,
+        "pad_divisor": 0,
+        "tile_size": 6,
+        "overlap": 2,
+        "batch_size": 16,
+    }
+    detections = [_detection(0, (0, 0, 8, 4), 1)]
+    with patch("stages.det_to_seg.segmentor._is_large_crop", return_value=True):
+        mask = _composite_one(TwoTileModel(), crop, detections, config)
     assert mask.shape == (4, 8)
 
     # Independently derive the true Hann-weighted blend at the seam (row 0,
     # col 4) using the same _hann2d the implementation calls, combined here
-    # explicitly -- not by calling predict_mask_tiled itself.
+    # explicitly -- not by calling the implementation under test itself.
     win0 = _hann2d(4, 6)  # T0 spans (y0:4, x0:6)
     win1 = _hann2d(4, 4)  # T1 spans (y0:4, x4:8)
     w0, w1 = win0[0, 4], win1[0, 0]  # col 4 is local col 4 in T0, local col 0 in T1
@@ -348,19 +362,82 @@ def test_tiled_inference_blends_continuous_probabilities_before_thresholding():
     assert mask[0, 7] == (1 if p1 >= thr else 0)  # T1-only region
 
 
+def test_cross_image_batches_ordinary_crops_together():
+    class RecordingModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.call_sizes = []
+
+        def forward(self, inputs):
+            self.call_sizes.append(inputs.shape[0])
+            return torch.full(
+                (inputs.shape[0], 1, inputs.shape[2], inputs.shape[3]),
+                10.0,
+                device=inputs.device,
+            )
+
+    model = RecordingModel()
+    images = [
+        (
+            np.zeros((10, 10, 3), dtype=np.uint8),
+            [_detection(0, (1, 1, 5, 5), 11)],
+        ),
+        (
+            np.zeros((12, 12, 3), dtype=np.uint8),
+            [_detection(0, (2, 2, 7, 7), 19)],
+        ),
+    ]
+
+    masks = composite_bbox_masks_cross_image(model, images, CONFIG, "cpu")
+
+    assert model.call_sizes == [2]
+    assert np.all(masks[0][1:5, 1:5] == 11)
+    assert np.all(masks[1][2:7, 2:7] == 19)
+
+
+def test_cross_image_batches_tiles_from_different_images_together():
+    class RecordingModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.call_sizes = []
+
+        def forward(self, inputs):
+            self.call_sizes.append(inputs.shape[0])
+            return torch.full(
+                (inputs.shape[0], 1, inputs.shape[2], inputs.shape[3]),
+                10.0,
+                device=inputs.device,
+            )
+
+    model = RecordingModel()
+    config = {**CONFIG, "batch_size": 4}
+    images = [
+        (
+            np.zeros((1025, 2, 3), dtype=np.uint8),
+            [_detection(0, (0, 0, 2, 1025), 11)],
+        ),
+        (
+            np.zeros((1025, 2, 3), dtype=np.uint8),
+            [_detection(0, (0, 0, 2, 1025), 19)],
+        ),
+    ]
+
+    masks = composite_bbox_masks_cross_image(model, images, config, "cpu")
+
+    assert model.call_sizes == [4]
+    assert np.all(masks[0] == 11)
+    assert np.all(masks[1] == 19)
+
+
 def test_zero_detections_returns_background_without_inference():
     image = np.zeros((5, 7, 3), dtype=np.uint8)
 
-    with (
-        patch("stages.det_to_seg.segmentor.predict_mask") as mock_individual,
-        patch("stages.det_to_seg.segmentor.predict_masks_batched") as mock_batched,
-    ):
-        mask = composite_bbox_masks(object(), image, [], CONFIG, "cpu")
+    with patch("stages.det_to_seg.segmentor.predict_masks_batched") as mock_batched:
+        mask = _composite_one(object(), image, [])
 
     assert mask.shape == (5, 7)
     assert mask.dtype == np.uint8
     assert np.count_nonzero(mask) == 0
-    mock_individual.assert_not_called()
     mock_batched.assert_not_called()
 
 
@@ -369,7 +446,7 @@ def test_class_zero_is_rejected_because_zero_is_background():
     detections = [_detection(0, (0, 0, 4, 4), 0)]
 
     with pytest.raises(ValueError, match="range 1..255"):
-        composite_bbox_masks(object(), image, detections, CONFIG, "cpu")
+        _composite_one(object(), image, detections)
 
 
 @pytest.mark.parametrize(

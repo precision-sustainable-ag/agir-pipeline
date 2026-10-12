@@ -33,7 +33,7 @@ from . import (
 )
 from .segmentor import (
     build_seg_model,
-    composite_bbox_masks,
+    composite_bbox_masks_cross_image,
     get_forward_call_count,
     reset_forward_call_count,
     write_mask_png,
@@ -311,79 +311,107 @@ class Processor:
             width=width,
         )
 
-    def _infer_and_write(self, prepared: _PreparedImage) -> SegmentationResult:
-        """GPU + disk write. Must run on the thread that owns the model
-        (the main thread), unlike _prepare."""
-        if prepared.early_result is not None:
-            return prepared.early_result
+    def _infer_and_write_many(
+        self,
+        prepared_images: list[_PreparedImage],
+    ) -> list[SegmentationResult]:
+        """Run shared GPU batches for a bounded group of prepared images."""
+        results: list[SegmentationResult | None] = [None] * len(prepared_images)
+        active_indices = [
+            index
+            for index, prepared in enumerate(prepared_images)
+            if prepared.early_result is None
+        ]
 
+        for index, prepared in enumerate(prepared_images):
+            if prepared.early_result is not None:
+                results[index] = prepared.early_result
+
+        if not active_indices:
+            return [result for result in results if result is not None]
+
+        active = [prepared_images[index] for index in active_indices]
         reset_forward_call_count()
         inference_start = time.perf_counter()
         try:
-            class_mask = composite_bbox_masks(
+            class_masks = composite_bbox_masks_cross_image(
                 model=self.model,
-                image_rgb=prepared.im_rgb,
-                detections=prepared.detections,
+                images=[
+                    (prepared.im_rgb, prepared.detections or [])
+                    for prepared in active
+                ],
                 config=self.config,
                 device=self.device,
             )
+            if len(class_masks) != len(active):
+                raise RuntimeError(
+                    f"Cross-image inference returned {len(class_masks)} masks "
+                    f"for {len(active)} images"
+                )
         except Exception as e:
-            return SegmentationResult(
-                image_id=prepared.image_id,
-                status=ITEM_FAILED,
-                n_detections=len(prepared.detections),
-                n_fallback_detections=prepared.n_fallback_detections,
-                error_code=ERROR_INFERENCE_FAILED,
-                error_type=type(e).__name__,
-                error_message=str(e),
-                decode_seconds=prepared.decode_seconds,
-                inference_seconds=time.perf_counter() - inference_start,
-                n_forward_calls=get_forward_call_count(),
-            )
-        inference_seconds = time.perf_counter() - inference_start
-        n_forward_calls = get_forward_call_count()
+            inference_seconds = (time.perf_counter() - inference_start) / len(active)
+            forward_calls = get_forward_call_count()
+            calls_base, calls_extra = divmod(forward_calls, len(active))
+            for active_position, result_index in enumerate(active_indices):
+                prepared = prepared_images[result_index]
+                results[result_index] = SegmentationResult(
+                    image_id=prepared.image_id,
+                    status=ITEM_FAILED,
+                    n_detections=len(prepared.detections or []),
+                    n_fallback_detections=prepared.n_fallback_detections,
+                    error_code=ERROR_INFERENCE_FAILED,
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                    decode_seconds=prepared.decode_seconds,
+                    inference_seconds=inference_seconds,
+                    n_forward_calls=calls_base + (active_position < calls_extra),
+                )
+            return [result for result in results if result is not None]
 
-        write_start = time.perf_counter()
-        try:
-            write_mask_png(
-                class_mask,
-                prepared.mask_path,
-                expected_shape=(prepared.height, prepared.width),
-            )
-        except Exception as e:
-            return SegmentationResult(
+        inference_seconds = (time.perf_counter() - inference_start) / len(active)
+        forward_calls = get_forward_call_count()
+        calls_base, calls_extra = divmod(forward_calls, len(active))
+
+        for active_position, (result_index, class_mask) in enumerate(
+            zip(active_indices, class_masks)
+        ):
+            prepared = prepared_images[result_index]
+            calls_for_image = calls_base + (active_position < calls_extra)
+            write_start = time.perf_counter()
+            try:
+                write_mask_png(
+                    class_mask,
+                    prepared.mask_path,
+                    expected_shape=(prepared.height, prepared.width),
+                )
+            except Exception as e:
+                results[result_index] = SegmentationResult(
+                    image_id=prepared.image_id,
+                    status=ITEM_FAILED,
+                    n_detections=len(prepared.detections or []),
+                    n_fallback_detections=prepared.n_fallback_detections,
+                    error_code=ERROR_EXPORT_FAILED,
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                    decode_seconds=prepared.decode_seconds,
+                    inference_seconds=inference_seconds,
+                    n_forward_calls=calls_for_image,
+                )
+                continue
+
+            results[result_index] = SegmentationResult(
                 image_id=prepared.image_id,
-                status=ITEM_FAILED,
-                n_detections=len(prepared.detections),
+                status=ITEM_OK,
+                mask_path=prepared.mask_path,
+                n_detections=len(prepared.detections or []),
                 n_fallback_detections=prepared.n_fallback_detections,
-                error_code=ERROR_EXPORT_FAILED,
-                error_type=type(e).__name__,
-                error_message=str(e),
                 decode_seconds=prepared.decode_seconds,
                 inference_seconds=inference_seconds,
-                n_forward_calls=n_forward_calls,
+                write_seconds=time.perf_counter() - write_start,
+                n_forward_calls=calls_for_image,
             )
-        write_seconds = time.perf_counter() - write_start
 
-        return SegmentationResult(
-            image_id=prepared.image_id,
-            status=ITEM_OK,
-            mask_path=prepared.mask_path,
-            n_detections=len(prepared.detections),
-            n_fallback_detections=prepared.n_fallback_detections,
-            decode_seconds=prepared.decode_seconds,
-            inference_seconds=inference_seconds,
-            write_seconds=write_seconds,
-            n_forward_calls=n_forward_calls,
-        )
-
-    def process_image(self, txt_path: Path, jpg_path: Path, output_dir: Path) -> SegmentationResult:
-        txt_path = Path(txt_path)
-        jpg_path = Path(jpg_path)
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        prepared = self._prepare(txt_path, jpg_path, output_dir)
-        return self._infer_and_write(prepared)
+        return [result for result in results if result is not None]
 
     def process_batch(
         self,
@@ -400,7 +428,7 @@ class Processor:
         prepare_workers = int(self.config["prepare_workers"])
         prefetch_depth = int(self.config["prefetch_depth"])
         logger.info(
-            "Execution plan | device=%s | mode=parallel-prepare+sequential-inference "
+            "Execution plan | device=%s | mode=parallel-prepare+cross-image-batching "
             "| prepare_workers=%d | prefetch_depth=%d | model_copies=1",
             self.device,
             prepare_workers,
@@ -451,42 +479,53 @@ class Processor:
                 logging_redirect_tqdm(),
                 tqdm(total=total, desc="det_to_seg", unit="img") as progress,
             ):
-                for idx in range(1, total + 1):
-                    prepared = pending.popleft().result()
-                    _submit_next()
-                    progress.set_postfix_str(prepared.image_id)
-                    progress.update(1)
-                    logger.info("[%d/%d] Processing image %s", idx, total, prepared.image_id)
+                while len(results) < total:
+                    window_size = min(prefetch_depth, total - len(results))
+                    prepared_window: list[_PreparedImage] = []
+                    for _ in range(window_size):
+                        prepared_window.append(pending.popleft().result())
+                        _submit_next()
 
-                    result = self._infer_and_write(prepared)
-                    results.append(result)
+                    if fail_stop:
+                        for index, prepared in enumerate(prepared_window):
+                            early = prepared.early_result
+                            if early is not None and early.status != ITEM_OK:
+                                prepared_window = prepared_window[: index + 1]
+                                break
 
-                    if result.status == ITEM_OK:
-                        logger.info(
-                            "[%d/%d] Image %s OK -> %s (detections=%d, fallback=%d, "
-                            "decode=%.3fs, inference=%.3fs, forward_calls=%d, write=%.3fs)",
-                            idx,
-                            total,
-                            prepared.image_id,
-                            result.mask_path,
-                            result.n_detections,
-                            result.n_fallback_detections,
-                            result.decode_seconds,
-                            result.inference_seconds,
-                            result.n_forward_calls,
-                            result.write_seconds,
-                        )
-                    else:
-                        logger.error(
-                            "[%d/%d] Image %s FAILED [%s]: %s",
-                            idx,
-                            total,
-                            prepared.image_id,
-                            result.error_code,
-                            result.error_message,
-                        )
-                        if fail_stop:
-                            return results
+                    window_results = self._infer_and_write_many(prepared_window)
+                    for prepared, result in zip(prepared_window, window_results):
+                        idx = len(results) + 1
+                        progress.set_postfix_str(prepared.image_id)
+                        progress.update(1)
+                        results.append(result)
+
+                        if result.status == ITEM_OK:
+                            logger.info(
+                                "[%d/%d] Image %s OK -> %s (detections=%d, fallback=%d, "
+                                "decode=%.3fs, inference=%.3fs, forward_calls=%d, write=%.3fs)",
+                                idx,
+                                total,
+                                prepared.image_id,
+                                result.mask_path,
+                                result.n_detections,
+                                result.n_fallback_detections,
+                                result.decode_seconds,
+                                result.inference_seconds,
+                                result.n_forward_calls,
+                                result.write_seconds,
+                            )
+                        else:
+                            logger.error(
+                                "[%d/%d] Image %s FAILED [%s]: %s",
+                                idx,
+                                total,
+                                prepared.image_id,
+                                result.error_code,
+                                result.error_message,
+                            )
+                            if fail_stop:
+                                return results
         finally:
             for future in pending:
                 future.cancel()
