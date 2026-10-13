@@ -7,7 +7,6 @@ requires-python = ">=3.12"
 
 # Core pipeline dependencies.
 dependencies = [
-  "pycolmap",
   "pyyaml>=6.0",
   "pidng>=4.0.9",
   "pytz>=2026.2",
@@ -65,6 +64,15 @@ ml = [
   "timm>=0.9.0",
 ]
 
+# SAM 3 detection backend for jpg_to_det (stages/jpg_to_det/configs/sam3.yaml)
+sam3 = [
+  "sam3 @ git+https://github.com/facebookresearch/sam3@2345a4ad109ac29c569da749c91d84f10dc08c40",
+  "setuptools<81",  # sam3 imports pkg_resources, removed in setuptools 81
+  "einops",         # imported by sam3 but not in its dependencies
+  "psutil",         # ditto
+  "pycocotools",    # ditto
+]
+
 # Everything (dev + docs + cv + ml + hpc)
 all = [
   "pytest>=7.4.0",
@@ -102,7 +110,6 @@ requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.package-dir]
-"" = "src"
 "stages" = "stages"
 "stages.common" = "stages/common"
 "stages.det_to_world" = "stages/det_to_world"
@@ -160,3 +167,16 @@ force_grid_wrap = 0
 use_parentheses = true
 ensure_newline_before_comments = true
 skip_glob = ["*/RawTherapee_*", "*/squashfs-root/*"]
+
+[tool.uv]
+# sam3 pins numpy<2 but runs on numpy 2
+override-dependencies = ["numpy>=2.2.6"]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }

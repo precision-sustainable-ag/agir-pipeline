@@ -48,7 +48,7 @@ def main() -> int:
         description="Run multiscale YOLO plant detection on JPG images."
     )
     parser.add_argument("--c", type=Path, required=True, help="Path to detection YAML config file.")
-    parser.add_argument("--m", type=Path, required=True, help="Path to YOLO model weights (.pt).")
+    parser.add_argument("--m", type=Path, required=True, help="Path to model weights (.pt): YOLO, or SAM 3 with backend: sam3 in --c.")
     parser.add_argument("--i", type=Path, required=True, help="Directory containing JPG images.")
     parser.add_argument("--o", type=Path, required=True, help="Output directory.")
     parser.add_argument("--t", type=int, default=0, help="Number of parallel worker processes. Default 0 = sequential.")

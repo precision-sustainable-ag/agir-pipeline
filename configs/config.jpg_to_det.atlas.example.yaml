@@ -14,7 +14,7 @@ paths:
   # Relative paths resolve against agir_pipeline_dir (default: repo root).
 
   # Detection YAML config passed to jpg_to_det --c
-  stage_config: stages/jpg_to_det/configs/default.yaml
+  stage_config: stages/jpg_to_det/configs/sam3.yaml
 
   # Detection model weights passed to jpg_to_det --m
   det_model_path: /90daydata/dash_agir/semifield-tools/models/plant_detector/With_Synthetic_Train_Data/weights/last.pt
