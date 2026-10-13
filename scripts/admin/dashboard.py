@@ -97,8 +97,8 @@ STAGES = {
         "site": "CERES",
     },
 }
-# stage_inputs.py only accepts --rerun for det_to_world.
-RERUN_STAGES = {"det_to_world"}
+# stage_inputs.py only accepts --rerun for these stages (input_staging_planner.RERUN_STAGES).
+RERUN_STAGES = {"det_to_world", "jpg_to_det"}
 
 SYNC_CONFIG = "configs/config.result_sync.ceres.example.yaml"
 SYNC_STATES = ("requested", "transferring", "transferred", "verified", "ingested",

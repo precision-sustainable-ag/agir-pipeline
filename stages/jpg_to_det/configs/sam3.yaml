@@ -5,8 +5,9 @@
 # edge-aware filtering. Needs the sam3 extra: uv pip install -e ".[sam3]"
 backend: sam3
 resolution: 2016          # SAM 3 input size; match the checkpoint's sam3_finetune resolution (1008 or 2016)
-base_checkpoint: null     # sam3.pt the fine-tuned weights apply to; null uses the one recorded in the
-                          # checkpoint ("sam3" = Hugging Face download, gated; set a local path on nodes without network)
+# sam3.pt the fine-tuned weights apply to; null uses the one recorded in the checkpoint
+# ("sam3" = Hugging Face download, gated; set a local path on nodes without network)
+base_checkpoint: /90daydata/dash_agir/semifield-tools/models/plant_detector/SAM3_v4_boxes_whole_2016/weights/base/sam3.pt
 conf: 0.5                 # SAM 3 score threshold (presence x query score)
 final_max_det: 1000       # SAM 3 returns at most 200 per prompt
 prompts:                  # text prompt -> YOLO class id / name written to the detections

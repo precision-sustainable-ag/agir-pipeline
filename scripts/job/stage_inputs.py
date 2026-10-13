@@ -29,6 +29,7 @@ from orchestrator.globus_transfer import (
     submit_transfer,
 )
 from orchestrator.input_staging_planner import (
+    RERUN_STAGES,
     STAGE_INPUT_SPECS,
     StagingRequest,
     plan_input_staging,
@@ -359,8 +360,8 @@ def main() -> int:
         action="store_true",
         help=(
             "Stage batches even if they already have a successful run or "
-            "georeferenced output (which the readiness view excludes). "
-            "det_to_world only; requires --batches."
+            "the stage's output (which the readiness view excludes). "
+            f"{', '.join(RERUN_STAGES)} only; requires --batches."
         ),
     )
     parser.add_argument(
@@ -396,8 +397,8 @@ def main() -> int:
         help="Optional base directory for command logs. Defaults to paths.log_dir from config.",
     )
     args = parser.parse_args()
-    if args.rerun and args.stage != "det_to_world":
-        parser.error("--rerun is only supported for --stage det_to_world")
+    if args.rerun and args.stage not in RERUN_STAGES:
+        parser.error(f"--rerun is only supported for --stage {', '.join(RERUN_STAGES)}")
     if args.rerun and not args.batches:
         parser.error("--rerun requires --batches")
 

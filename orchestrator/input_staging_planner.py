@@ -107,6 +107,10 @@ STAGE_INPUT_SPECS: Dict[str, StageInputSpec] = {
     ),
 }
 
+# Stages whose readiness query supports rerun=True (bypassing the view's
+# "already has output" / "already succeeded" exclusions for named batches).
+RERUN_STAGES = ("det_to_world", "jpg_to_det")
+
 # data_state/parent_dir matched when checking whether a site already has a
 # given input subdir indexed (see _site_has_subdir). Shared by stages whose
 # inputs live under the semifield-developed-images batch convention.
@@ -147,8 +151,10 @@ def _rows_for_stage(
 ) -> List[Dict]:
     if stage not in STAGE_INPUT_SPECS:
         raise ValueError(f"Unsupported stage for input staging: {stage!r}")
-    if rerun and stage != "det_to_world":
-        raise ValueError(f"rerun is only supported for det_to_world, not {stage!r}")
+    if rerun and stage not in RERUN_STAGES:
+        raise ValueError(
+            f"rerun is only supported for {', '.join(RERUN_STAGES)}, not {stage!r}"
+        )
     spec = STAGE_INPUT_SPECS[stage]
 
     if spec.readiness_view == "v_batches_needing_raw_to_jpg":
@@ -158,7 +164,9 @@ def _rows_for_stage(
         # _plan_multi_site_requests) checks destination/CERES/JUNO itself,
         # so scoping readiness to one --site would wrongly exclude batches
         # whose images landed on CERES or ATLAS instead of JUNO.
-        return get_batches_needing_jpg_to_det(conn, site=None, limit=limit, batch_ids=batch_ids)
+        return get_batches_needing_jpg_to_det(
+            conn, site=None, limit=limit, batch_ids=batch_ids, rerun=rerun
+        )
     if spec.readiness_view == "v_batches_needing_det_to_world":
         # site-agnostic: det_to_world's per-subdir multi-site resolver (see
         # _plan_multi_site_requests) checks destination/CERES/JUNO itself,
@@ -521,8 +529,8 @@ def plan_input_staging(
     """
     Build input staging requests from SQLite readiness rows and config.
 
-    ``rerun`` (det_to_world only, requires ``batch_ids``) plans the named
-    batches even if they already have georeferenced output or a successful
+    ``rerun`` (RERUN_STAGES only, requires ``batch_ids``) plans the named
+    batches even if they already have the stage's output or a successful
     run, which the readiness view would otherwise exclude.
 
     The config contract matches the existing submit config:

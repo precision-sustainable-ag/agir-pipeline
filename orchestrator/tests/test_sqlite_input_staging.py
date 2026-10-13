@@ -14,6 +14,7 @@ from orchestrator.input_staging_planner import (
 )
 from orchestrator.sqlite_db import (
     get_batches_needing_det_to_world,
+    get_batches_needing_jpg_to_det,
     get_det_to_world_staged_batch_ids,
     get_input_staging_requests,
     mark_input_staging_status,
@@ -382,17 +383,84 @@ def test_rerun_still_requires_inputs_and_skips_active_leases(tmp_path: Path) -> 
     assert get_batches_needing_det_to_world(conn, batch_ids=ids, rerun=True) == []
 
 
-def test_rerun_requires_batch_ids_and_det_to_world(tmp_path: Path) -> None:
+def test_rerun_requires_batch_ids_and_supported_stage(tmp_path: Path) -> None:
     conn = make_conn(tmp_path)
 
     with pytest.raises(ValueError, match="batch_ids"):
         get_batches_needing_det_to_world(conn, rerun=True)
 
-    with pytest.raises(ValueError, match="det_to_world"):
+    with pytest.raises(ValueError, match="batch_ids"):
+        get_batches_needing_jpg_to_det(conn, rerun=True)
+
+    with pytest.raises(ValueError, match="rerun is only supported"):
         plan_input_staging(
-            conn, _det_to_world_cfg(), stage="jpg_to_det", site=None,
+            conn, _det_to_world_cfg(), stage="raw_to_jpg", site=None,
             batch_ids=["NC_2025-06-01"], rerun=True,
         )
+
+
+def _insert_processed_jpg_to_det_batch(conn: sqlite3.Connection, batch_id: str) -> None:
+    """A batch whose JPGs are on CERES and that already has detections + a successful run."""
+    for file_ext, parent_dir in (("jpg", "images"), ("txt", "detections")):
+        insert_indexed_file(
+            conn, batch_id=batch_id, data_state="semifield-developed-images",
+            file_ext=file_ext, parent_dir=parent_dir,
+            site="CERES", storage_root="/90daydata/dash_agir",
+        )
+    conn.execute(
+        """
+        INSERT INTO stage_runs (run_id, batch_id, stage, status, exit_code, started_at, ended_at)
+        VALUES ('run-1', ?, 'jpg_to_det', 'success', 0,
+                '2026-09-16T00:00:00Z', '2026-09-16T00:01:00Z')
+        """,
+        (batch_id,),
+    )
+    conn.commit()
+
+
+def test_jpg_to_det_rerun_plans_batches_the_readiness_view_excludes(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    _insert_processed_jpg_to_det_batch(conn, "NC_2025-06-01")
+    ids = ["NC_2025-06-01"]
+
+    assert plan_input_staging(conn, _jpg_to_det_cfg(), stage="jpg_to_det", site=None, batch_ids=ids) == []
+
+    requests = plan_input_staging(
+        conn, _jpg_to_det_cfg(), stage="jpg_to_det", site=None, batch_ids=ids, rerun=True,
+    )
+    assert [(r.batch_id, r.src_endpoint, r.dst_endpoint, r.dst_path) for r in requests] == [
+        (
+            "NC_2025-06-01",
+            "ceres-uuid",
+            "atlas-uuid",
+            "/90daydata/dash_agir/semifield-developed-images/NC_2025-06-01/images",
+        )
+    ]
+
+
+def test_jpg_to_det_rerun_still_requires_jpgs_and_skips_active_leases(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    _insert_processed_jpg_to_det_batch(conn, "NC_2025-06-01")
+    insert_indexed_file(
+        conn, batch_id="NC_2025-06-02", data_state="semifield-developed-images",
+        file_ext="txt", parent_dir="detections",
+    )
+    ids = ["NC_2025-06-01", "NC_2025-06-02"]
+
+    # NC_2025-06-02 has no JPGs, so only NC_2025-06-01 qualifies.
+    rows = get_batches_needing_jpg_to_det(conn, batch_ids=ids, rerun=True)
+    assert [(r["batch_id"], r["batch_date"], r["jpg_count"], r["det_count"]) for r in rows] == [
+        ("NC_2025-06-01", "2025-01-01", 1, 1)
+    ]
+
+    conn.execute(
+        """
+        INSERT INTO stage_leases (lease_id, batch_id, stage, orchestrator_id, expires_at)
+        VALUES ('lease-1', 'NC_2025-06-01', 'jpg_to_det', 'test', '2999-01-01T00:00:00Z')
+        """
+    )
+    conn.commit()
+    assert get_batches_needing_jpg_to_det(conn, batch_ids=ids, rerun=True) == []
 
 
 def test_det_to_world_expected_dst_paths() -> None:

@@ -17,6 +17,14 @@ CONFIG_FILE="configs/config.jpg_to_det.atlas.example.yaml"
 STAGE="jpg_to_det"
 POLL_SECONDS=60
 
+# RERUN=1 (e.g. `RERUN=1 bash scripts/job/schedule_jpg_to_det_groups.sh`; sbatch
+# exports it) restages batches that already have detections or a successful
+# run, e.g. to rerun them with a new model.
+STAGE_INPUTS_EXTRA_ARGS=()
+if [[ "${RERUN:-0}" == "1" ]]; then
+    STAGE_INPUTS_EXTRA_ARGS+=(--rerun)
+fi
+
 GROUP_FILE="${1:?Usage: sbatch run_jpg_to_det_group.sbatch <group-file>}"
 
 GROUP_START_EPOCH=$(date +%s)
@@ -133,7 +141,8 @@ while IFS= read -r batch_id || [[ -n "${batch_id}" ]]; do
         --stage "${STAGE}" \
         --config "${CONFIG_FILE}" \
         --batches "${batch_file}" \
-        --site CERES
+        --site CERES \
+        "${STAGE_INPUTS_EXTRA_ARGS[@]}"
 
     python scripts/job/poll_stage_inputs.py \
         --stage "${STAGE}" \
