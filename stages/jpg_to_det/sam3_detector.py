@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import warnings
 from pathlib import Path
 
 import cv2
@@ -205,7 +206,10 @@ def load_sam3_detector(model_path: str | Path, config: dict, device: str = "cuda
             the node can't reach Hugging Face).
         device: torch device.
     """
-    from sam3.model_builder import build_sam3_image_model
+    with warnings.catch_warnings():
+        # sam3 imports pkg_resources (setuptools<81 is pinned for it in the sam3 extra)
+        warnings.filterwarnings("ignore", message="pkg_resources is deprecated", category=UserWarning)
+        from sam3.model_builder import build_sam3_image_model
 
     resolution = int(config.get("resolution", SAM3_RESOLUTION))
     delta = read_delta(model_path)
