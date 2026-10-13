@@ -51,7 +51,8 @@ def main() -> int:
     parser.add_argument("--m", type=Path, required=True, help="Path to model weights (.pt): YOLO, or SAM 3 with backend: sam3 in --c.")
     parser.add_argument("--i", type=Path, required=True, help="Directory containing JPG images.")
     parser.add_argument("--o", type=Path, required=True, help="Output directory.")
-    parser.add_argument("--t", type=int, default=0, help="Number of parallel worker processes. Default 0 = sequential.")
+    parser.add_argument("--t", type=int, default=0, help="YOLO: number of parallel worker processes (0 = sequential). "
+                        "SAM 3: number of threads decoding JPGs ahead of the GPU (0 = 1).")
     parser.add_argument("--fs", action="store_true", help="Stop processing on first failure.")
     parser.add_argument("--batch-id", type=str, default=None, help="Batch ID. Auto-inferred from input path if omitted.")
     parser.add_argument("--device", type=str, default="cpu", help="Torch device (e.g. cpu, cuda:0).")
