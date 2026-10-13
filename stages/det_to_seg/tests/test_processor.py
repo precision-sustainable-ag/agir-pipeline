@@ -21,6 +21,8 @@ from stages.det_to_seg import (
 from stages.det_to_seg.processor import (
     Processor,
     SegmentationResult,
+    _InferenceOutput,
+    _PreparedImage,
     load_config,
     parse_yolo_detections,
     validate_config,
@@ -70,6 +72,10 @@ def _make_processor(config_file):
         return Processor(config_file, device="cpu")
 
 
+def _process_one(proc, txt_path, jpg_path, output_dir):
+    return proc.process_batch([(txt_path, jpg_path)], output_dir, fail_stop=True)[0]
+
+
 class TestConfig:
     def test_load_config_valid(self, config_file):
         cfg = load_config(config_file)
@@ -83,6 +89,14 @@ class TestConfig:
         bad = {k: v for k, v in VALID_CONFIG.items() if k != "weights"}
         with pytest.raises(ValueError, match="weights"):
             validate_config(bad)
+
+    def test_legacy_prefetch_depth_populates_independent_queue_settings(self):
+        config = {**VALID_CONFIG, "prefetch_depth": 7}
+        validate_config(config)
+        assert config["prepare_queue_depth"] == 7
+        assert config["inference_window_size"] == 7
+        assert config["write_workers"] == 2
+        assert config["write_queue_depth"] == 8
 
 
 class TestDetParsing:
@@ -106,9 +120,9 @@ class TestProcessor:
         proc = _make_processor(config_file)
         out_dir = tmp_path / "out"
 
-        with patch("stages.det_to_seg.processor.composite_bbox_masks", return_value=np.zeros((20, 30), dtype=np.uint8)), \
+        with patch("stages.det_to_seg.processor.composite_bbox_masks_cross_image", return_value=[np.zeros((20, 30), dtype=np.uint8)]), \
              patch("stages.det_to_seg.processor.write_mask_png") as mock_write:
-            result = proc.process_image(fake_txt, fake_jpg, out_dir)
+            result = _process_one(proc, fake_txt, fake_jpg, out_dir)
 
         assert result.status == ITEM_OK
         assert result.mask_path.name == "img001.png"
@@ -122,9 +136,9 @@ class TestProcessor:
         txt.write_text("")
         out_dir = tmp_path / "out"
 
-        with patch("stages.det_to_seg.processor.composite_bbox_masks", return_value=np.zeros((20, 30), dtype=np.uint8)), \
+        with patch("stages.det_to_seg.processor.composite_bbox_masks_cross_image", return_value=[np.zeros((20, 30), dtype=np.uint8)]), \
              patch("stages.det_to_seg.processor.write_mask_png"):
-            result = proc.process_image(txt, fake_jpg, out_dir)
+            result = _process_one(proc, txt, fake_jpg, out_dir)
 
         assert result.status == ITEM_OK
         assert result.n_detections == 0
@@ -132,7 +146,7 @@ class TestProcessor:
     def test_image_read_failure(self, config_file, fake_txt, tmp_path):
         proc = _make_processor(config_file)
         missing_jpg = tmp_path / "missing.jpg"
-        result = proc.process_image(fake_txt, missing_jpg, tmp_path / "out")
+        result = _process_one(proc, fake_txt, missing_jpg, tmp_path / "out")
         assert result.status == ITEM_FAILED
         assert result.error_code == ERROR_IMAGE_READ_FAILED
 
@@ -142,7 +156,7 @@ class TestProcessor:
         bad_txt = tmp_path / "img001.txt"
         bad_txt.write_text("0 1\n")
 
-        result = proc.process_image(bad_txt, fake_jpg, tmp_path / "out")
+        result = _process_one(proc, bad_txt, fake_jpg, tmp_path / "out")
         assert result.status == ITEM_FAILED
         assert result.error_code == ERROR_DET_READ_FAILED
 
@@ -150,8 +164,8 @@ class TestProcessor:
     def test_inference_failure(self, config_file, fake_jpg, fake_txt, tmp_path):
         proc = _make_processor(config_file)
         # patch the function that creates the masks to throw an error, simulating an inference failure
-        with patch("stages.det_to_seg.processor.composite_bbox_masks", side_effect=RuntimeError("boom")):
-            result = proc.process_image(fake_txt, fake_jpg, tmp_path / "out")
+        with patch("stages.det_to_seg.processor.composite_bbox_masks_cross_image", side_effect=RuntimeError("boom")):
+            result = _process_one(proc, fake_txt, fake_jpg, tmp_path / "out")
 
         assert result.status == ITEM_FAILED
         assert result.error_code == ERROR_INFERENCE_FAILED
@@ -160,9 +174,9 @@ class TestProcessor:
     def test_export_failure(self, config_file, fake_jpg, fake_txt, tmp_path):
         proc = _make_processor(config_file)
         # patch the function that writes the mask to disk to throw an error
-        with patch("stages.det_to_seg.processor.composite_bbox_masks", return_value=np.zeros((20, 30), dtype=np.uint8)), \
+        with patch("stages.det_to_seg.processor.composite_bbox_masks_cross_image", return_value=[np.zeros((20, 30), dtype=np.uint8)]), \
              patch("stages.det_to_seg.processor.write_mask_png", side_effect=RuntimeError("write failed")):
-            result = proc.process_image(fake_txt, fake_jpg, tmp_path / "out")
+            result = _process_one(proc, fake_txt, fake_jpg, tmp_path / "out")
 
         assert result.status == ITEM_FAILED
         assert result.error_code == ERROR_EXPORT_FAILED
@@ -175,8 +189,8 @@ class TestProcessor:
         existing = out_dir / "img001.png"
         existing.write_bytes(b"already there")
 
-        with patch("stages.det_to_seg.processor.composite_bbox_masks") as mock_compose:
-            result = proc.process_image(fake_txt, fake_jpg, out_dir)
+        with patch("stages.det_to_seg.processor.composite_bbox_masks_cross_image") as mock_compose:
+            result = _process_one(proc, fake_txt, fake_jpg, out_dir)
 
         assert result.status == ITEM_OK
         assert result.mask_path == existing
@@ -211,6 +225,93 @@ class TestProcessor:
 
 
 class TestBatch:
+    def test_process_batch_sends_multiple_images_to_shared_inference(
+        self, config_file, tmp_path
+    ):
+        proc = _make_processor(config_file)
+        prepared_by_id = {
+            image_id: _PreparedImage(
+                image_id=image_id,
+                mask_path=tmp_path / "out" / f"{image_id}.png",
+                im_rgb=np.zeros((10, 10, 3), dtype=np.uint8),
+                detections=[],
+                height=10,
+                width=10,
+            )
+            for image_id in ("a", "b", "c")
+        }
+
+        def prepare(txt_path, jpg_path, output_dir):
+            return prepared_by_id[txt_path.stem]
+
+        def infer(window):
+            return [
+                _InferenceOutput(
+                    prepared=prepared,
+                    result=SegmentationResult(
+                        image_id=prepared.image_id,
+                        status=ITEM_OK,
+                        mask_path=prepared.mask_path,
+                    ),
+                )
+                for prepared in window
+            ]
+
+        pairs = [
+            (tmp_path / f"{image_id}.txt", tmp_path / f"{image_id}.jpg")
+            for image_id in ("a", "b", "c")
+        ]
+        with (
+            patch.object(proc, "_prepare", side_effect=prepare),
+            patch.object(proc, "_infer_many", side_effect=infer) as mock_infer,
+        ):
+            results = proc.process_batch(pairs, tmp_path / "out", fail_stop=True)
+
+        assert [result.image_id for result in results] == ["a", "b", "c"]
+        assert mock_infer.call_count == 1
+        assert len(mock_infer.call_args.args[0]) == 3
+
+    def test_inference_window_is_independent_from_prepare_queue(
+        self, config_file, tmp_path
+    ):
+        proc = _make_processor(config_file)
+        proc.config["prepare_queue_depth"] = 5
+        proc.config["inference_window_size"] = 2
+        prepared_by_id = {
+            image_id: _PreparedImage(
+                image_id=image_id,
+                mask_path=tmp_path / "out" / f"{image_id}.png",
+                early_result=SegmentationResult(
+                    image_id=image_id,
+                    status=ITEM_OK,
+                    mask_path=tmp_path / "out" / f"{image_id}.png",
+                ),
+            )
+            for image_id in ("a", "b", "c", "d", "e")
+        }
+
+        def prepare(txt_path, jpg_path, output_dir):
+            return prepared_by_id[txt_path.stem]
+
+        def infer(window):
+            return [
+                _InferenceOutput(prepared=prepared, result=prepared.early_result)
+                for prepared in window
+            ]
+
+        pairs = [
+            (tmp_path / f"{image_id}.txt", tmp_path / f"{image_id}.jpg")
+            for image_id in prepared_by_id
+        ]
+        with (
+            patch.object(proc, "_prepare", side_effect=prepare),
+            patch.object(proc, "_infer_many", side_effect=infer) as mock_infer,
+        ):
+            results = proc.process_batch(pairs, tmp_path / "out", fail_stop=True)
+
+        assert [len(call.args[0]) for call in mock_infer.call_args_list] == [2, 2, 1]
+        assert [result.image_id for result in results] == ["a", "b", "c", "d", "e"]
+
     # test that if fail_stop is True, we return immediately on first failure and do not process remaining items
     def test_fail_stop_returns_early(self, config_file, tmp_path):
         proc = _make_processor(config_file)
@@ -224,11 +325,19 @@ class TestBatch:
         )
         ok = SegmentationResult(image_id="b", status=ITEM_OK, mask_path=tmp_path / "b.png")
 
-        # process_batch dispatches through _prepare (background thread) and
-        # _infer_and_write (main thread), not process_image directly -- patch
-        # _infer_and_write so this test controls the outcome without needing
-        # real image/detection files on disk.
-        with patch.object(proc, "_infer_and_write", side_effect=[fail, ok]):
+        # Patch the shared inference window so this test controls the outcome
+        # without needing real image/detection files on disk.
+        prepared = _PreparedImage(
+            image_id="a", mask_path=tmp_path / "a.png", early_result=fail
+        )
+        with (
+            patch.object(proc, "_prepare", return_value=prepared),
+            patch.object(
+                proc,
+                "_infer_many",
+                return_value=[_InferenceOutput(prepared=prepared, result=fail)],
+            ),
+        ):
             pairs = [(tmp_path / "a.txt", tmp_path / "a.jpg"), (tmp_path / "b.txt", tmp_path / "b.jpg")]
             results = proc.process_batch(pairs, tmp_path / "out", fail_stop=True)
 
@@ -248,7 +357,23 @@ class TestBatch:
         )
         ok = SegmentationResult(image_id="b", status=ITEM_OK, mask_path=tmp_path / "b.png")
 
-        with patch.object(proc, "_infer_and_write", side_effect=[fail, ok]):
+        prepared_a = _PreparedImage(
+            image_id="a", mask_path=tmp_path / "a.png", early_result=fail
+        )
+        prepared_b = _PreparedImage(
+            image_id="b", mask_path=tmp_path / "b.png", early_result=ok
+        )
+        with (
+            patch.object(proc, "_prepare", side_effect=[prepared_a, prepared_b]),
+            patch.object(
+                proc,
+                "_infer_many",
+                return_value=[
+                    _InferenceOutput(prepared=prepared_a, result=fail),
+                    _InferenceOutput(prepared=prepared_b, result=ok),
+                ],
+            ),
+        ):
             pairs = [(tmp_path / "a.txt", tmp_path / "a.jpg"), (tmp_path / "b.txt", tmp_path / "b.jpg")]
             results = proc.process_batch(pairs, tmp_path / "out", fail_stop=False)
 
@@ -256,10 +381,9 @@ class TestBatch:
         assert results[0].status == ITEM_FAILED
         assert results[1].status == ITEM_OK
 
-    # fail_stop must not leave the prefetch thread blocked forever trying to
-    # hand off work nothing will ever consume again, and must not burn time
-    # preparing pairs process_batch is about to discard.
-    def test_fail_stop_stops_prefetch_thread_promptly(
+    # fail_stop must shut down the bounded preparation pool and must not burn
+    # time preparing every pair process_batch is about to discard.
+    def test_fail_stop_stops_prepare_pool_promptly(
         self, config_file, fake_jpg, fake_txt, tmp_path
     ):
         proc = _make_processor(config_file)
@@ -274,7 +398,17 @@ class TestBatch:
         )
         pairs = [(fake_txt, fake_jpg) for _ in range(20)]
 
-        with patch.object(proc, "_infer_and_write", return_value=fail):
+        prepared = _PreparedImage(
+            image_id="x", mask_path=tmp_path / "x.png", early_result=fail
+        )
+        with (
+            patch.object(proc, "_prepare", return_value=prepared),
+            patch.object(
+                proc,
+                "_infer_many",
+                return_value=[_InferenceOutput(prepared=prepared, result=fail)],
+            ),
+        ):
             start = time.perf_counter()
             results = proc.process_batch(pairs, out_dir, fail_stop=True)
             elapsed = time.perf_counter() - start
@@ -282,12 +416,11 @@ class TestBatch:
         assert len(results) == 1
         assert results[0].status == ITEM_FAILED
         assert elapsed < 5, "fail_stop should return after the first pair, not prepare all 20"
-        assert not any(t.name == "det_to_seg-prefetch" for t in threading.enumerate())
+        assert not any(t.name.startswith("det_to_seg-prepare") for t in threading.enumerate())
 
-    # a real (not mocked) decode failure happening on the background prepare
-    # thread must still come back as a normal failed SegmentationResult, not
-    # hang process_batch or crash the thread silently.
-    def test_process_batch_surfaces_prepare_failures_from_prefetch_thread(
+    # A real (not mocked) decode failure happening in the preparation pool
+    # must still come back as a normal failed SegmentationResult.
+    def test_process_batch_surfaces_prepare_failures_from_pool(
         self, config_file, tmp_path
     ):
         proc = _make_processor(config_file)
@@ -302,4 +435,4 @@ class TestBatch:
         assert len(results) == 1
         assert results[0].status == ITEM_FAILED
         assert results[0].error_code == ERROR_IMAGE_READ_FAILED
-        assert not any(t.name == "det_to_seg-prefetch" for t in threading.enumerate())
+        assert not any(t.name.startswith("det_to_seg-prepare") for t in threading.enumerate())

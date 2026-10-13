@@ -116,22 +116,6 @@ def _predict_probabilities(
 # Segmentation inference
 # ---------------------------------------------------------------------------
 
-def predict_mask_single(
-    model: torch.nn.Module,
-    crop_rgb: np.ndarray,
-    thr: float,
-    divisor: Optional[int],
-    device: str,
-) -> np.ndarray:
-    return predict_masks_batched(
-        model=model,
-        crops_rgb=[crop_rgb],
-        thr=thr,
-        divisor=divisor,
-        device=device,
-    )[0]
-
-
 def _predict_probabilities_padded(
     model: torch.nn.Module,
     crops_rgb: Sequence[np.ndarray],
@@ -198,85 +182,18 @@ def _hann2d(h: int, w: int) -> np.ndarray:
     return np.maximum(normalized, 1e-3)
 
 
-def predict_mask_tiled(
-    model: torch.nn.Module,
-    crop_rgb: np.ndarray,
-    thr: float,
-    divisor: Optional[int],
-    device: str,
-    tile_size: int = 1024,
-    overlap: int = 128,
-    batch_size: int = DEFAULT_BATCH_SIZE,
-) -> np.ndarray:
-    h, w = crop_rgb.shape[:2]
-    acc = np.zeros((h, w), dtype=np.float32)
-    wsum = np.zeros((h, w), dtype=np.float32)
-    step = max(1, tile_size - overlap)
-
-    positions: list[tuple[int, int, int, int]] = []
-    y = 0
-    while y < h:
-        x = 0
-        while x < w:
-            positions.append((y, x, min(y + tile_size, h), min(x + tile_size, w)))
-            x += step
-        y += step
-
-    # Batch tiles through the shared padded-probability primitive so a large
-    # crop's tiles cost a handful of forward calls, not one per tile. Tiles
-    # are accumulated as continuous probabilities and thresholded once at the
-    # end (below) -- never via the thresholding predict_masks_batched, which
-    # would threshold each tile before Hann-blending and corrupt the seams
-    # the windowing exists to smooth.
-    for start in range(0, len(positions), batch_size):
-        chunk = positions[start : start + batch_size]
-        tiles = [crop_rgb[y:y2, x:x2] for (y, x, y2, x2) in chunk]
-        probabilities = _predict_probabilities_padded(model, tiles, divisor, device)
-        for (y, x, y2, x2), p in zip(chunk, probabilities):
-            win = _hann2d(y2 - y, x2 - x)
-            acc[y:y2, x:x2] += p * win
-            wsum[y:y2, x:x2] += win
-
-    return (acc / np.clip(wsum, 1e-6, None) >= thr).astype(np.uint8)
-
-
-
-def predict_mask(
-    model: torch.nn.Module,
-    crop_rgb: np.ndarray,
-    *,
-    thr: float,
-    divisor: Optional[int],
-    device: str,
-    use_tiling: bool,
+def _tile_positions(
+    height: int,
+    width: int,
     tile_size: int,
     overlap: int,
-    batch_size: int = DEFAULT_BATCH_SIZE,
-    tile_trigger_side: int = TILE_TRIGGER_SIDE,
-    tile_trigger_area: int = TILE_TRIGGER_AREA,
-) -> np.ndarray:
-    h, w = crop_rgb.shape[:2]
-    should_tile = use_tiling and (max(h, w) > tile_trigger_side or (h * w) > tile_trigger_area)
-
-    if should_tile:
-        return predict_mask_tiled(
-            model=model,
-            crop_rgb=crop_rgb,
-            thr=thr,
-            divisor=divisor,
-            device=device,
-            tile_size=tile_size,
-            overlap=overlap,
-            batch_size=batch_size,
-        )
-
-    return predict_mask_single(
-        model=model,
-        crop_rgb=crop_rgb,
-        thr=thr,
-        divisor=divisor,
-        device=device,
-    )
+) -> list[tuple[int, int, int, int]]:
+    step = max(1, tile_size - overlap)
+    positions: list[tuple[int, int, int, int]] = []
+    for y in range(0, height, step):
+        for x in range(0, width, step):
+            positions.append((y, x, min(y + tile_size, height), min(x + tile_size, width)))
+    return positions
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +206,29 @@ class _PreparedCrop:
     detection: DetectionBox
     xyxy: tuple[int, int, int, int]
     crop_rgb: np.ndarray
+
+
+@dataclass(frozen=True)
+class _CrossImageCrop:
+    image_index: int
+    crop: _PreparedCrop
+
+
+@dataclass
+class _TiledCropState:
+    item: _CrossImageCrop
+    acc: np.ndarray
+    wsum: np.ndarray
+
+
+@dataclass(frozen=True)
+class _TileTask:
+    state_index: int
+    y: int
+    x: int
+    y2: int
+    x2: int
+    tile_rgb: np.ndarray
 
 
 def _validated_class_id(detection: DetectionBox) -> int:
@@ -341,12 +281,27 @@ def _is_large_crop(crop: np.ndarray) -> bool:
     return max(height, width) > TILE_TRIGGER_SIDE or height * width > TILE_TRIGGER_AREA
 
 
-def _chunk_by_size(crops: Sequence[_PreparedCrop], batch_size: int) -> list[list[_PreparedCrop]]:
-    """Sort crops by longest side so crops batched together are similarly
-    sized (bounds padding waste when they're padded to a shared shape), then
-    slice into fixed-size chunks."""
-    ordered = sorted(crops, key=lambda crop: max(crop.crop_rgb.shape[:2]))
+def _shape_sort_key(array: np.ndarray) -> tuple[int, int, int]:
+    height, width = array.shape[:2]
+    return max(height, width), min(height, width), height * width
+
+
+def _chunk_cross_image_crops(
+    crops: Sequence[_CrossImageCrop],
+    batch_size: int,
+) -> list[list[_CrossImageCrop]]:
+    ordered = sorted(crops, key=lambda item: _shape_sort_key(item.crop.crop_rgb))
     return [ordered[i : i + batch_size] for i in range(0, len(ordered), batch_size)]
+
+
+def _chunk_tile_tasks(
+    tasks: Sequence[_TileTask],
+    batch_size: int,
+) -> list[list[_TileTask]]:
+    # Most tiles have the configured fixed size. Keep each crop's tile order
+    # stable so Hann accumulation remains deterministic, while allowing the
+    # last partial batch for one crop to be filled by tiles from the next.
+    return [list(tasks[i : i + batch_size]) for i in range(0, len(tasks), batch_size)]
 
 
 def _validate_crop_mask(mask: np.ndarray, crop: _PreparedCrop) -> None:
@@ -359,18 +314,15 @@ def _validate_crop_mask(mask: np.ndarray, crop: _PreparedCrop) -> None:
         )
 
 
-def composite_bbox_masks(
+def composite_bbox_masks_cross_image(
     model: torch.nn.Module,
-    image_rgb: np.ndarray,
-    detections: Sequence[DetectionBox],
+    images: Sequence[tuple[np.ndarray, Sequence[DetectionBox]]],
     config: dict,
     device: str,
-) -> np.ndarray:
-    height, width = image_rgb.shape[:2]
-    full_mask = np.zeros((height, width), dtype=np.uint8)
-    prepared = _prepare_crops(image_rgb, detections)
-    if not prepared:
-        return full_mask
+) -> list[np.ndarray]:
+    """Create masks for several images using shared crop and tile batches."""
+    if not images:
+        return []
 
     threshold = float(config["threshold"])
     divisor = int(config["pad_divisor"]) if int(config["pad_divisor"]) > 0 else None
@@ -378,35 +330,34 @@ def composite_bbox_masks(
     if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
         raise ValueError(f"batch_size must be a positive integer, got {batch_size!r}")
 
-    masks_by_order: dict[int, np.ndarray] = {}
-    large_crops: list[_PreparedCrop] = []
-    ordinary_crops: list[_PreparedCrop] = []
-    for crop in prepared:
-        (large_crops if _is_large_crop(crop.crop_rgb) else ordinary_crops).append(crop)
+    tile_size = int(config["tile_size"])
+    overlap = int(config["overlap"])
+    use_tiling = bool(config["tiling"])
+    prepared_by_image: list[list[_PreparedCrop]] = []
+    masks_by_image: list[dict[int, np.ndarray]] = []
+    full_masks: list[np.ndarray] = []
+    ordinary: list[_CrossImageCrop] = []
+    tiled: list[_CrossImageCrop] = []
 
-    for crop in large_crops:
-        masks_by_order[crop.order] = predict_mask(
-            model=model,
-            crop_rgb=crop.crop_rgb,
-            thr=threshold,
-            divisor=divisor,
-            device=device,
-            use_tiling=bool(config["tiling"]),
-            tile_size=int(config["tile_size"]),
-            overlap=int(config["overlap"]),
-            batch_size=batch_size,
-        )
+    for image_index, (image_rgb, detections) in enumerate(images):
+        height, width = image_rgb.shape[:2]
+        prepared = _prepare_crops(image_rgb, detections)
+        prepared_by_image.append(prepared)
+        masks_by_image.append({})
+        full_masks.append(np.zeros((height, width), dtype=np.uint8))
 
-    # Sort-by-longest-side then fixed-size chunking replaces exact-shape
-    # grouping: real YOLO boxes almost never share an exact pixel size, so
-    # requiring an exact match left batch_size effectively unused. Crops in a
-    # chunk are padded (not resized) to the chunk's own max shape inside
-    # predict_masks_batched, so grouping strategy has no effect on any crop's
-    # own pixel content -- only how many forward calls it costs to infer them.
-    for chunk in _chunk_by_size(ordinary_crops, batch_size):
+        for crop in prepared:
+            item = _CrossImageCrop(image_index=image_index, crop=crop)
+            if use_tiling and _is_large_crop(crop.crop_rgb):
+                tiled.append(item)
+            else:
+                ordinary.append(item)
+
+    ordinary_batches = _chunk_cross_image_crops(ordinary, batch_size)
+    for chunk in ordinary_batches:
         masks = predict_masks_batched(
             model=model,
-            crops_rgb=[crop.crop_rgb for crop in chunk],
+            crops_rgb=[item.crop.crop_rgb for item in chunk],
             thr=threshold,
             divisor=divisor,
             device=device,
@@ -415,21 +366,80 @@ def composite_bbox_masks(
             raise RuntimeError(
                 f"Batched inference returned {len(masks)} masks for {len(chunk)} crops"
             )
-        for crop, mask in zip(chunk, masks):
-            masks_by_order[crop.order] = mask
+        for item, mask in zip(chunk, masks):
+            masks_by_image[item.image_index][item.crop.order] = mask
 
-    # Composite in original TXT order even though inference was grouped into
-    # size-sorted chunks. The first detection owns overlap pixels; later
-    # detections may only fill pixels that are still background.
-    for crop in prepared:
-        mask_crop = masks_by_order[crop.order]
-        _validate_crop_mask(mask_crop, crop)
-        x1, y1, x2, y2 = crop.xyxy
-        region = full_mask[y1:y2, x1:x2]
-        writable = (mask_crop != 0) & (region == 0)
-        region[writable] = _validated_class_id(crop.detection)
+    tiled_states: list[_TiledCropState] = []
+    tile_tasks: list[_TileTask] = []
+    for item in tiled:
+        height, width = item.crop.crop_rgb.shape[:2]
+        state_index = len(tiled_states)
+        tiled_states.append(
+            _TiledCropState(
+                item=item,
+                acc=np.zeros((height, width), dtype=np.float32),
+                wsum=np.zeros((height, width), dtype=np.float32),
+            )
+        )
+        for y, x, y2, x2 in _tile_positions(height, width, tile_size, overlap):
+            tile_tasks.append(
+                _TileTask(
+                    state_index=state_index,
+                    y=y,
+                    x=x,
+                    y2=y2,
+                    x2=x2,
+                    tile_rgb=item.crop.crop_rgb[y:y2, x:x2],
+                )
+            )
 
-    return full_mask
+    tile_batches = _chunk_tile_tasks(tile_tasks, batch_size)
+    for chunk in tile_batches:
+        probabilities = _predict_probabilities_padded(
+            model,
+            [task.tile_rgb for task in chunk],
+            divisor,
+            device,
+        )
+        if len(probabilities) != len(chunk):
+            raise RuntimeError(
+                f"Batched inference returned {len(probabilities)} tile predictions "
+                f"for {len(chunk)} tiles"
+            )
+        for task, probability in zip(chunk, probabilities):
+            state = tiled_states[task.state_index]
+            window = _hann2d(task.y2 - task.y, task.x2 - task.x)
+            state.acc[task.y : task.y2, task.x : task.x2] += probability * window
+            state.wsum[task.y : task.y2, task.x : task.x2] += window
+
+    for state in tiled_states:
+        mask = (
+            state.acc / np.clip(state.wsum, 1e-6, None) >= threshold
+        ).astype(np.uint8)
+        masks_by_image[state.item.image_index][state.item.crop.order] = mask
+
+    log.info(
+        "Cross-image batching | images=%d | ordinary_crops=%d batches=%d "
+        "| tiled_crops=%d tiles=%d batches=%d",
+        len(images),
+        len(ordinary),
+        len(ordinary_batches),
+        len(tiled),
+        len(tile_tasks),
+        len(tile_batches),
+    )
+
+    for image_index, prepared in enumerate(prepared_by_image):
+        full_mask = full_masks[image_index]
+        for crop in prepared:
+            mask_crop = masks_by_image[image_index][crop.order]
+            _validate_crop_mask(mask_crop, crop)
+            x1, y1, x2, y2 = crop.xyxy
+            region = full_mask[y1:y2, x1:x2]
+            writable = (mask_crop != 0) & (region == 0)
+            region[writable] = _validated_class_id(crop.detection)
+
+    return full_masks
 
 
 def validate_class_mask(
