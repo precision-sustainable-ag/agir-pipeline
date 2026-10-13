@@ -21,6 +21,7 @@ from stages.det_to_seg import (
 from stages.det_to_seg.processor import (
     Processor,
     SegmentationResult,
+    _InferenceOutput,
     _PreparedImage,
     load_config,
     parse_yolo_detections,
@@ -88,6 +89,14 @@ class TestConfig:
         bad = {k: v for k, v in VALID_CONFIG.items() if k != "weights"}
         with pytest.raises(ValueError, match="weights"):
             validate_config(bad)
+
+    def test_legacy_prefetch_depth_populates_independent_queue_settings(self):
+        config = {**VALID_CONFIG, "prefetch_depth": 7}
+        validate_config(config)
+        assert config["prepare_queue_depth"] == 7
+        assert config["inference_window_size"] == 7
+        assert config["write_workers"] == 2
+        assert config["write_queue_depth"] == 8
 
 
 class TestDetParsing:
@@ -237,10 +246,13 @@ class TestBatch:
 
         def infer(window):
             return [
-                SegmentationResult(
-                    image_id=prepared.image_id,
-                    status=ITEM_OK,
-                    mask_path=prepared.mask_path,
+                _InferenceOutput(
+                    prepared=prepared,
+                    result=SegmentationResult(
+                        image_id=prepared.image_id,
+                        status=ITEM_OK,
+                        mask_path=prepared.mask_path,
+                    ),
                 )
                 for prepared in window
             ]
@@ -251,13 +263,54 @@ class TestBatch:
         ]
         with (
             patch.object(proc, "_prepare", side_effect=prepare),
-            patch.object(proc, "_infer_and_write_many", side_effect=infer) as mock_infer,
+            patch.object(proc, "_infer_many", side_effect=infer) as mock_infer,
         ):
             results = proc.process_batch(pairs, tmp_path / "out", fail_stop=True)
 
         assert [result.image_id for result in results] == ["a", "b", "c"]
         assert mock_infer.call_count == 1
         assert len(mock_infer.call_args.args[0]) == 3
+
+    def test_inference_window_is_independent_from_prepare_queue(
+        self, config_file, tmp_path
+    ):
+        proc = _make_processor(config_file)
+        proc.config["prepare_queue_depth"] = 5
+        proc.config["inference_window_size"] = 2
+        prepared_by_id = {
+            image_id: _PreparedImage(
+                image_id=image_id,
+                mask_path=tmp_path / "out" / f"{image_id}.png",
+                early_result=SegmentationResult(
+                    image_id=image_id,
+                    status=ITEM_OK,
+                    mask_path=tmp_path / "out" / f"{image_id}.png",
+                ),
+            )
+            for image_id in ("a", "b", "c", "d", "e")
+        }
+
+        def prepare(txt_path, jpg_path, output_dir):
+            return prepared_by_id[txt_path.stem]
+
+        def infer(window):
+            return [
+                _InferenceOutput(prepared=prepared, result=prepared.early_result)
+                for prepared in window
+            ]
+
+        pairs = [
+            (tmp_path / f"{image_id}.txt", tmp_path / f"{image_id}.jpg")
+            for image_id in prepared_by_id
+        ]
+        with (
+            patch.object(proc, "_prepare", side_effect=prepare),
+            patch.object(proc, "_infer_many", side_effect=infer) as mock_infer,
+        ):
+            results = proc.process_batch(pairs, tmp_path / "out", fail_stop=True)
+
+        assert [len(call.args[0]) for call in mock_infer.call_args_list] == [2, 2, 1]
+        assert [result.image_id for result in results] == ["a", "b", "c", "d", "e"]
 
     # test that if fail_stop is True, we return immediately on first failure and do not process remaining items
     def test_fail_stop_returns_early(self, config_file, tmp_path):
@@ -274,7 +327,17 @@ class TestBatch:
 
         # Patch the shared inference window so this test controls the outcome
         # without needing real image/detection files on disk.
-        with patch.object(proc, "_infer_and_write_many", return_value=[fail]):
+        prepared = _PreparedImage(
+            image_id="a", mask_path=tmp_path / "a.png", early_result=fail
+        )
+        with (
+            patch.object(proc, "_prepare", return_value=prepared),
+            patch.object(
+                proc,
+                "_infer_many",
+                return_value=[_InferenceOutput(prepared=prepared, result=fail)],
+            ),
+        ):
             pairs = [(tmp_path / "a.txt", tmp_path / "a.jpg"), (tmp_path / "b.txt", tmp_path / "b.jpg")]
             results = proc.process_batch(pairs, tmp_path / "out", fail_stop=True)
 
@@ -294,7 +357,23 @@ class TestBatch:
         )
         ok = SegmentationResult(image_id="b", status=ITEM_OK, mask_path=tmp_path / "b.png")
 
-        with patch.object(proc, "_infer_and_write_many", return_value=[fail, ok]):
+        prepared_a = _PreparedImage(
+            image_id="a", mask_path=tmp_path / "a.png", early_result=fail
+        )
+        prepared_b = _PreparedImage(
+            image_id="b", mask_path=tmp_path / "b.png", early_result=ok
+        )
+        with (
+            patch.object(proc, "_prepare", side_effect=[prepared_a, prepared_b]),
+            patch.object(
+                proc,
+                "_infer_many",
+                return_value=[
+                    _InferenceOutput(prepared=prepared_a, result=fail),
+                    _InferenceOutput(prepared=prepared_b, result=ok),
+                ],
+            ),
+        ):
             pairs = [(tmp_path / "a.txt", tmp_path / "a.jpg"), (tmp_path / "b.txt", tmp_path / "b.jpg")]
             results = proc.process_batch(pairs, tmp_path / "out", fail_stop=False)
 
@@ -319,7 +398,17 @@ class TestBatch:
         )
         pairs = [(fake_txt, fake_jpg) for _ in range(20)]
 
-        with patch.object(proc, "_infer_and_write_many", return_value=[fail]):
+        prepared = _PreparedImage(
+            image_id="x", mask_path=tmp_path / "x.png", early_result=fail
+        )
+        with (
+            patch.object(proc, "_prepare", return_value=prepared),
+            patch.object(
+                proc,
+                "_infer_many",
+                return_value=[_InferenceOutput(prepared=prepared, result=fail)],
+            ),
+        ):
             start = time.perf_counter()
             results = proc.process_batch(pairs, out_dir, fail_stop=True)
             elapsed = time.perf_counter() - start

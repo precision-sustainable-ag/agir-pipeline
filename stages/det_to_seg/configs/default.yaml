@@ -7,5 +7,8 @@ tile_size: 1024
 overlap: 256
 tiling: true
 batch_size: 16
-prepare_workers: 2
-prefetch_depth: 4
+prepare_workers: 2          # Number of images read and decoded at the same time on the CPU.
+prepare_queue_depth: 8      # Number of decoded images kept ready for the GPU; higher uses more RAM.
+inference_window_size: 4    # Number of images whose detection crops can share GPU batches.
+write_workers: 2            # Number of segmentation masks compressed and written at the same time.
+write_queue_depth: 8        # Maximum masks waiting to be written; higher uses more RAM.
