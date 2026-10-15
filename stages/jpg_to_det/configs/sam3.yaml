@@ -5,6 +5,9 @@
 # edge-aware filtering. Needs the sam3 extra: uv pip install -e ".[sam3]"
 backend: sam3
 resolution: 2016          # SAM 3 input size; match the checkpoint's sam3_finetune resolution (1008 or 2016)
+batch_size: 8             # images per forward pass. GH200, 2016 px, 127 MP JPGs: 1 -> 0.17, 8 -> 0.14 s/img on GPU,
+                          # peak 7.5 -> 12 GB (16: 20 GB). jpg_to_det --t threads decode JPGs ahead of it.
+                          # Re-tune with tests/gpu/jpg_to_det/bench_sam3_batch.py
 # sam3.pt the fine-tuned weights apply to; null uses the one recorded in the checkpoint
 # ("sam3" = Hugging Face download, gated; set a local path on nodes without network)
 base_checkpoint: /90daydata/dash_agir/semifield-tools/models/plant_detector/SAM3_v4_boxes_whole_2016/weights/base/sam3.pt
