@@ -222,3 +222,47 @@ def test_load_species_reference_is_idempotent(tmp_path: Path) -> None:
 
     assert conn.execute("SELECT COUNT(*) FROM species").fetchone()[0] == 2
     assert conn.execute("SELECT COUNT(*) FROM cultivars").fetchone()[0] == 1
+
+
+def test_schema_rejects_invalid_colors_and_palette_assignments(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    load_species_reference(
+        conn,
+        SPECIES_JSON,
+        CULTIVARS_JSON,
+        ["#a5482f", "#e86928", "#ffffff"],
+        [[165, 72, 47], [232, 105, 40], [255, 255, 255]],
+        ["#03039e", "#05f217"],
+        [[3, 3, 158], [5, 242, 23]],
+    )
+
+    invalid_writes = [
+        "UPDATE species SET hex = '#a5482f' WHERE class_id = 33",
+        "UPDATE species SET r = 165, g = 72, b = 47 WHERE class_id = 33",
+        "UPDATE species SET r = 256 WHERE class_id = 33",
+        """INSERT INTO cultivars (
+                cultivar_class_id, cultivar_key, parent_USDA_symbol, entity_type,
+                display_name, registered, hex, r, g, b
+            ) VALUES (102, 'DUP_HEX', 'ARHY', 'cultivar', 'Duplicate hex', 1,
+                      '#03039e', 1, 2, 3)""",
+        """INSERT INTO cultivars (
+                cultivar_class_id, cultivar_key, parent_USDA_symbol, entity_type,
+                display_name, registered, hex, r, g, b
+            ) VALUES (103, 'DUP_RGB', 'ARHY', 'cultivar', 'Duplicate RGB', 1,
+                      '#010203', 3, 3, 158)""",
+        "UPDATE cultivars SET b = -1 WHERE cultivar_class_id = 101",
+        "UPDATE color_palette SET hex = '#a5482f' WHERE palette = 'species' AND seq_index = 1",
+        "UPDATE color_palette SET r = 165, g = 72, b = 47 "
+        "WHERE palette = 'species' AND seq_index = 1",
+        "UPDATE color_palette SET g = 256 WHERE palette = 'species' AND seq_index = 0",
+        "UPDATE color_palette SET assigned_cultivar_class_id = 101 "
+        "WHERE palette = 'species' AND seq_index = 2",
+        "UPDATE color_palette SET assigned_class_id = 75 "
+        "WHERE palette = 'cultivar' AND seq_index = 1",
+        "UPDATE color_palette SET assigned_class_id = 75, assigned_cultivar_class_id = 101 "
+        "WHERE palette = 'species' AND seq_index = 2",
+    ]
+
+    for sql in invalid_writes:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(sql)

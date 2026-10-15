@@ -128,11 +128,14 @@ CREATE TABLE IF NOT EXISTS species (
     collection_timing   TEXT,
     link                TEXT,
     note                TEXT,
-    hex                 TEXT    NOT NULL,
+    hex                 TEXT    NOT NULL UNIQUE,
     r                   INTEGER NOT NULL,
     g                   INTEGER NOT NULL,
     b                   INTEGER NOT NULL,
-    updated_at_ts_iso   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    updated_at_ts_iso   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+
+    UNIQUE (r, g, b),
+    CHECK (r BETWEEN 0 AND 255 AND g BETWEEN 0 AND 255 AND b BETWEEN 0 AND 255)
 );
 
 -- Alternate common names/spellings for a species. From species_info.json's
@@ -170,11 +173,14 @@ CREATE TABLE IF NOT EXISTS cultivars (
     cultivar_category  TEXT,
     link               TEXT,
     note               TEXT,
-    hex                TEXT    NOT NULL,
+    hex                TEXT    NOT NULL UNIQUE,
     r                  INTEGER NOT NULL,
     g                  INTEGER NOT NULL,
     b                  INTEGER NOT NULL,
-    updated_at_ts_iso  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    updated_at_ts_iso  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+
+    UNIQUE (r, g, b),
+    CHECK (r BETWEEN 0 AND 255 AND g BETWEEN 0 AND 255 AND b BETWEEN 0 AND 255)
 );
 
 -- Alternate names for a cultivar. From cultivars.json's per-entry "alias" list.
@@ -194,14 +200,20 @@ CREATE TABLE IF NOT EXISTS cultivar_aliases (
 CREATE TABLE IF NOT EXISTS color_palette (
     palette                    TEXT    NOT NULL CHECK (palette IN ('species', 'cultivar')),
     seq_index                  INTEGER NOT NULL,  -- position in the source colors.py/cultivar_colors.py list
-    hex                        TEXT    NOT NULL,
+    hex                        TEXT    NOT NULL UNIQUE,
     r                          INTEGER NOT NULL,
     g                          INTEGER NOT NULL,
     b                          INTEGER NOT NULL,
     assigned_class_id          INTEGER REFERENCES species (class_id),
     assigned_cultivar_class_id INTEGER REFERENCES cultivars (cultivar_class_id),
 
-    PRIMARY KEY (palette, seq_index)
+    PRIMARY KEY (palette, seq_index),
+    UNIQUE (r, g, b),
+    CHECK (r BETWEEN 0 AND 255 AND g BETWEEN 0 AND 255 AND b BETWEEN 0 AND 255),
+    CHECK (
+        (palette = 'species' AND assigned_cultivar_class_id IS NULL)
+        OR (palette = 'cultivar' AND assigned_class_id IS NULL)
+    )
 );
 
 
