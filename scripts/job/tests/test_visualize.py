@@ -9,6 +9,8 @@ import numpy as np
 import cv2
 import pytest
 
+from stages.seg_to_cut.config import SegToCutConfig
+
 _MODULE_PATH = Path(__file__).resolve().parents[1] / "visualize.py"
 _spec = importlib.util.spec_from_file_location("visualize", _MODULE_PATH)
 visualize = importlib.util.module_from_spec(_spec)
@@ -164,9 +166,71 @@ def test_detection_name_label_falls_back_to_species_name() -> None:
     assert visualize._detection_name_label(row) == "Ragweed"
 
 
+def test_detection_name_label_falls_back_to_species_common_name() -> None:
+    # Monoculture batches (e.g. beets) have no shapefile, so the catalog's
+    # common name is the only name column they carry.
+    assert visualize._detection_name_label({"species_common_name": "beet"}) == "beet"
+
+
+def test_detection_name_label_prefers_shapefile_name_over_common_name() -> None:
+    row = {"species_name": "Ragweed", "species_common_name": "common ragweed"}
+    assert visualize._detection_name_label(row) == "Ragweed"
+
+
 def test_detection_name_label_none_when_absent() -> None:
     assert visualize._detection_name_label({}) is None
-    assert visualize._detection_name_label({"cultivar_name": "", "species_name": ""}) is None
+    assert visualize._detection_name_label(
+        {"cultivar_name": "", "species_name": "", "species_common_name": ""}
+    ) is None
+
+
+_BLANK_WORLD_ROW = {
+    # As the monoculture config writes them: world_* and crs present but blank.
+    "crs": "",
+    "world_tl_x": "", "world_tl_y": "", "world_tr_x": "", "world_tr_y": "",
+    "world_br_x": "", "world_br_y": "", "world_bl_x": "", "world_bl_y": "",
+}
+
+
+def test_bbox_area_label_prefers_world_area() -> None:
+    row = {
+        "crs": "LOCAL",
+        "world_tl_x": "0.0", "world_tl_y": "0.0",
+        "world_tr_x": "0.5", "world_tr_y": "0.0",
+        "world_br_x": "0.5", "world_br_y": "0.25",
+        "world_bl_x": "0.0", "world_bl_y": "0.25",
+    }
+    label = visualize._bbox_area_label(row, (0.1, 0.1, 0.2, 0.2), 13392, 9528, SegToCutConfig())
+    assert label == "1250.0 cm^2"
+
+
+def test_bbox_area_label_estimates_from_camera_without_world_corners() -> None:
+    # Default camera: 170 cm x 56.73 mm diagonal / 60 mm gives a ~131 x 93 cm
+    # footprint at a 13392x9528 aspect ratio, so a 10% x 10% box is ~122 cm^2.
+    label = visualize._bbox_area_label(
+        _BLANK_WORLD_ROW, (0.1, 0.1, 0.2, 0.2), 13392, 9528, SegToCutConfig()
+    )
+    assert label == "122.0 cm^2 (est)"
+
+
+def test_bbox_area_label_none_without_world_corners_or_camera_config() -> None:
+    assert visualize._bbox_area_label(_BLANK_WORLD_ROW, (0.1, 0.1, 0.2, 0.2), 100, 80, None) is None
+
+
+def test_render_det_to_world_labels_estimated_area_with_camera_config(tmp_path: Path) -> None:
+    image_path = tmp_path / "img_007.jpg"
+    _write_image(image_path, width=400, height=300)
+    rows = [{"xmin": "0.3", "ymin": "0.5", "xmax": "0.6", "ymax": "0.8", **_BLANK_WORLD_ROW}]
+
+    without_label = tmp_path / "out" / "without.jpg"
+    with_label = tmp_path / "out" / "with.jpg"
+    assert visualize._render_det_to_world(image_path, rows, without_label, max_width=1800)
+    assert visualize._render_det_to_world(
+        image_path, rows, with_label, max_width=1800, camera_config=SegToCutConfig()
+    )
+
+    # Same box either way; only the camera-estimate label text differs.
+    assert not np.array_equal(cv2.imread(str(without_label)), cv2.imread(str(with_label)))
 
 
 def _bbox_row(**overrides) -> dict[str, str]:
@@ -240,8 +304,8 @@ def test_render_det_to_world_labels_name_and_area(tmp_path: Path) -> None:
 def test_render_det_to_world_draws_box_without_label_when_area_unavailable(
     tmp_path: Path,
 ) -> None:
-    # No world_* corner columns at all -> _bbox_area_cm2 returns None -> no
-    # label should be drawn, but the box itself still should be (and the
+    # No world_* corner columns and no camera config -> no area and no name
+    # -> no label should be drawn, but the box itself still should be (and the
     # function must not crash).
     image_path = tmp_path / "img_005.jpg"
     _write_image(image_path, width=200, height=200)
