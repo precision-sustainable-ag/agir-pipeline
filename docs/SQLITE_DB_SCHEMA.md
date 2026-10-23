@@ -690,13 +690,27 @@ skipped
 | `run_report_json` | Complete serialized run report |
 | `ingested_at` | Database ingestion time |
 
+#### Invalidation
+
+| Column | Meaning |
+| --- | --- |
+| `invalidated_at` | When a successful run was invalidated because its outputs were lost; `NULL` while still valid |
+| `invalidated_reason` | Why it was invalidated (detected missing outputs, forced, or operator text) |
+
+Readiness views ignore `success` rows with `invalidated_at` set, so the batch
+becomes eligible for that stage again. Nothing else about the row changes, so
+`result_syncs` reconciliation still matches it. These columns were added in
+v13; `open_db()` adds them to an existing database on any writable open.
+
 `ingest_run_report()` uses an upsert on `run_id`. Re-ingesting a report updates
 its result, counts, paths, and stored JSON instead of adding a duplicate row.
+It does not touch the invalidation columns.
 
 Writers:
 
 ```text
 scripts/job/ingest_and_release.py
+scripts/admin/invalidate_stage_runs.py   (invalidated_at / invalidated_reason)
 orchestrator/sqlite_db.py
 ```
 
@@ -786,7 +800,17 @@ Readiness views exclude a batch when:
 
 - the view defines existing output files as evidence that no work is needed;
 - an unexpired lease exists for the batch and stage; or
-- `stage_runs` contains a successful run for the batch and stage.
+- `stage_runs` contains a successful run for the batch and stage that has not
+  been invalidated (`invalidated_at IS NULL`).
+
+If a batch's outputs are lost after a successful run, that run keeps the batch
+out of the view until it is invalidated with
+`scripts/admin/invalidate_stage_runs.py`. The nightly
+`scripts/admin/globus_index.sh` job runs it with `--apply --min-missing-days 2`
+after each scan, so outputs that have been missing from every indexed site for
+two days are re-queued automatically. Outputs that were never indexed, or a
+whole storage root that vanished (scans that see nothing don't mark rows
+stale), still need a manual `--batches <file> --force --apply`.
 
 Input-transfer completion is a separate gate applied by `submit.py` after it
 queries a readiness view.
@@ -1000,6 +1024,12 @@ Apply or refresh the schema:
 sqlite3 <database.sqlite3> < schemas/sqlite/pipeline.sql
 ```
 
+Upgrading a pre-v13 database this way leaves `stage_runs` without the
+`invalidated_at` column the readiness views reference, so the views fail with
+`no such column: sr.invalidated_at` until a writable `open_db()` adds it. Any
+orchestrator writer does that; to do it explicitly, run a dry run of
+`scripts/admin/invalidate_stage_runs.py --db <database.sqlite3>`.
+
 Show the schema version:
 
 ```bash
@@ -1164,6 +1194,7 @@ Use the supported commands for state changes:
 | Claim leases and record Slurm IDs | `orchestrator/submit_jobs.py` through `scripts/job/submit.py` |
 | Ingest stage results and release leases | `scripts/job/ingest_and_release.py` |
 | Sync and promote Atlas run results to Ceres | `scripts/admin/sync_atlas_results.py` through `orchestrator/result_sync.py` |
+| Invalidate successful runs whose outputs were lost | `scripts/admin/invalidate_stage_runs.py` |
 
 Avoid manually inserting, updating, or deleting orchestration rows during
 normal operation. The Python helpers enforce status validation, idempotency,
@@ -1175,7 +1206,7 @@ can bypass.
 The schema uses:
 
 ```sql
-PRAGMA user_version = 12;
+PRAGMA user_version = 13;
 ```
 
 Recent version history (see the comment block at the end of
@@ -1188,6 +1219,7 @@ Recent version history (see the comment block at the end of
 | v10 | `v_batches_needing_jpg_to_det` no longer restricts JPG inputs to `site IN ('JUNO', 'CERES')` — it now resolves images via the same destination/CERES/JUNO priority chain as `det_to_world` |
 | v11 | Add `v_batches_needing_det_to_seg` for batches with JPGs, detection TXT files, and `det_to_world` georeferenced output but no segmentation PNGs |
 | v12 | Add `v_batches_needing_seg_to_cut` for batches with JPGs, segmentation PNGs, and the exact batch georeferenced CSV |
+| v13 | Add `stage_runs.invalidated_at` / `invalidated_reason`; every readiness view ignores invalidated success rows. Existing databases get the columns from `open_db()` on a writable open |
 
 When changing the schema:
 

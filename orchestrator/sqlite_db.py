@@ -477,10 +477,37 @@ _STATUS_MAP: Dict[str, str] = {
     "skipped":        "skipped",
 }
 
+# stage_runs columns added after the table first shipped (pipeline.sql v13).
+# CREATE TABLE IF NOT EXISTS does not retrofit columns onto an existing table,
+# and every readiness view references invalidated_at, so writable opens add
+# whichever are missing (see _migrate_stage_runs_columns).
+_STAGE_RUNS_ADDED_COLUMNS = (
+    ("invalidated_at", "TEXT"),
+    ("invalidated_reason", "TEXT"),
+)
+
 
 # ---------------------------------------------------------------------------
 # Connection
 # ---------------------------------------------------------------------------
+
+def _migrate_stage_runs_columns(conn: sqlite3.Connection) -> None:
+    """Add ``_STAGE_RUNS_ADDED_COLUMNS`` to a pre-v13 ``stage_runs`` table."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(stage_runs)")}
+    if not existing:
+        return  # table doesn't exist yet; pipeline.sql creates it with all columns
+    for name, decl in _STAGE_RUNS_ADDED_COLUMNS:
+        if name in existing:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE stage_runs ADD COLUMN {name} {decl}")
+        except sqlite3.OperationalError as exc:
+            # Another process added it between our PRAGMA and ALTER.
+            if "duplicate column" not in str(exc).lower():
+                raise
+        else:
+            logger.info("Added missing stage_runs.%s column", name)
+
 
 def open_db(
     db_path: str | Path,
@@ -512,6 +539,10 @@ def open_db(
     -------
     sqlite3.Connection
         Row factory set to sqlite3.Row for dict-like access.
+
+    Writable opens also add any ``stage_runs`` columns a pre-v13 DB is
+    missing (``invalidated_at``/``invalidated_reason``), which the readiness
+    views require.
     """
     db_path = Path(db_path)
 
@@ -577,6 +608,7 @@ def open_db(
         conn.execute("PRAGMA temp_store=MEMORY;")
         conn.execute("PRAGMA busy_timeout=120000;")
         conn.execute("PRAGMA foreign_keys=ON;")
+        _migrate_stage_runs_columns(conn)
 
     conn.row_factory = sqlite3.Row
     logger.debug("Opened SQLite DB: %s (readonly=%s)", db_path, readonly)

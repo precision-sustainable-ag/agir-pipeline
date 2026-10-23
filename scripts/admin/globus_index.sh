@@ -50,6 +50,7 @@ echo "[INFO] Main log: ${MAIN_LOG}"
 REPO_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
 PYTHON_SCRIPT="${REPO_DIR}/scripts/admin/globus_index.py"
 SPECIES_REFERENCE_SCRIPT="${REPO_DIR}/scripts/admin/load_species_reference.py"
+INVALIDATE_SCRIPT="${REPO_DIR}/scripts/admin/invalidate_stage_runs.py"
 ENDPOINT_CONFIG_YAML="${REPO_DIR}/configs/globus_endpoint_config.example.yaml"
 SQLITE_DB="/project/dash_agir/globus_index/globus_file_index.sqlite3"
 
@@ -58,6 +59,9 @@ source "${REPO_DIR}/.venv/bin/activate"
 # ---- Tuning ----
 MAX_WORKERS=12
 BATCH_SIZE=10000
+# Days a successful run's outputs must have been missing from every site
+# before the lost-output step invalidates it (>= 2 nightly scans).
+LOST_OUTPUT_GRACE_DAYS=2
 
 mkdir -p "$(dirname "${SQLITE_DB}")"
 
@@ -117,6 +121,28 @@ echo "========================================"
 echo "SQLite Globus Indexing Complete"
 echo "Timestamp: $(date)"
 echo "SQLite DB: ${SQLITE_DB}"
+echo "========================================"
+
+# Re-queue batches whose stage outputs have been missing from every indexed
+# site for LOST_OUTPUT_GRACE_DAYS, by invalidating their successful
+# stage_runs rows (see scripts/admin/invalidate_stage_runs.py).
+echo "========================================"
+echo "Lost-Output Invalidation Started"
+echo "Timestamp: $(date)"
+echo "========================================"
+
+if [ -f "${INVALIDATE_SCRIPT}" ]; then
+    python3 "${INVALIDATE_SCRIPT}" \
+        --db "${SQLITE_DB}" \
+        --min-missing-days "${LOST_OUTPUT_GRACE_DAYS}" \
+        --apply
+else
+    echo "[WARN] Invalidation script not found: ${INVALIDATE_SCRIPT}. Skipping."
+fi
+
+echo "========================================"
+echo "Lost-Output Invalidation Complete"
+echo "Timestamp: $(date)"
 echo "========================================"
 
 # species/cultivar reference data

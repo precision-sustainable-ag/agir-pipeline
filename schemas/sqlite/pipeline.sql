@@ -31,6 +31,11 @@
 --   scanner populates it.
 -- - Legacy table migration (missing file_id / created_at_ts_iso) is
 --   handled by the Python script, not this file.
+-- - stage_runs.invalidated_at / invalidated_reason (v13) are added to
+--   pre-v13 DBs by orchestrator/sqlite_db.py's open_db() on any writable
+--   open. Applying this file to such a DB before that happens leaves the
+--   readiness views failing with "no such column: sr.invalidated_at" until
+--   a writable open_db() runs (e.g. scripts/admin/invalidate_stage_runs.py).
 --
 -- Apply (idempotent):
 --   sqlite3 /path/to/globus_file_index.sqlite3 < schemas/sqlite/pipeline.sql
@@ -388,7 +393,15 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     -- Full JSON blob for forward-compatibility
     run_report_json TEXT,
 
-    ingested_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    ingested_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+
+    -- Invalidation (v13): set by scripts/admin/invalidate_stage_runs.py when a
+    -- successful run's outputs are lost. Readiness views ignore invalidated
+    -- success rows, so the batch becomes eligible for the stage again; the row
+    -- itself (status, provenance, run_report_json) is left intact. Pre-v13
+    -- DBs get these columns from orchestrator/sqlite_db.py's open_db().
+    invalidated_at     TEXT,                -- ISO-8601; NULL = still valid
+    invalidated_reason TEXT
 );
 
 -- Advisory lock preventing duplicate SLURM job submissions for the same
@@ -630,7 +643,9 @@ CREATE INDEX IF NOT EXISTS idx_sgs_batch
 -- Readiness views exclude batches that:
 --   - already have their stage's output files
 --   - have an active, unexpired lease in stage_leases
---   - have ever had a successful stage_run (NOT EXISTS on stage_runs)
+--   - have a successful stage_run that has not been invalidated
+--     (NOT EXISTS on stage_runs ... AND invalidated_at IS NULL; see
+--     scripts/admin/invalidate_stage_runs.py for re-queuing lost outputs)
 --
 -- Views are DROP + CREATE so re-applying this file always installs the
 -- latest logic without touching any table data.
@@ -691,6 +706,7 @@ WHERE COALESCE(j.jpg_file_count, 0) = 0   -- no JPGs exist yet
       WHERE sr.batch_id = r.batch_id
         AND sr.stage    = 'raw_to_jpg'
         AND sr.status   = 'success'
+        AND sr.invalidated_at IS NULL
   )
 ORDER BY r.batch_date DESC, r.batch_id DESC;
 
@@ -784,6 +800,7 @@ WHERE COALESCE(d.det_count, 0) = 0   -- no detections exist yet
       WHERE sr.batch_id = j.batch_id
         AND sr.stage    = 'jpg_to_det'
         AND sr.status   = 'success'
+        AND sr.invalidated_at IS NULL
   )
 ORDER BY j.batch_date DESC, j.batch_id DESC, l.site ASC, l.storage_domain ASC, l.namespace ASC;
 
@@ -890,6 +907,7 @@ WHERE COALESCE(w.georef_count, 0) = 0   -- no georeferenced output exists yet
       WHERE sr.batch_id = i.batch_id
         AND sr.stage    = 'det_to_world'
         AND sr.status   = 'success'
+        AND sr.invalidated_at IS NULL
   )
 ORDER BY i.batch_date DESC, i.batch_id DESC;
 
@@ -988,6 +1006,7 @@ WHERE COALESCE(s.seg_count, 0) = 0
       WHERE sr.batch_id = i.batch_id
         AND sr.stage    = 'det_to_seg'
         AND sr.status   = 'success'
+        AND sr.invalidated_at IS NULL
   )
 ORDER BY i.batch_date DESC, i.batch_id DESC;
 
@@ -1068,6 +1087,7 @@ WHERE al.batch_id IS NULL
       WHERE sr.batch_id = i.batch_id
         AND sr.stage    = 'seg_to_cut'
         AND sr.status   = 'success'
+        AND sr.invalidated_at IS NULL
   )
 ORDER BY i.batch_date DESC, i.batch_id DESC;
 
@@ -1083,5 +1103,8 @@ ORDER BY i.batch_date DESC, i.batch_id DESC;
 -- v11: add v_batches_needing_det_to_seg for class-coded segmentation
 --      readiness after det_to_world georeferencing.
 -- v12: add v_batches_needing_seg_to_cut for cutout-generation readiness.
-PRAGMA user_version = 12;
+-- v13: add stage_runs.invalidated_at/invalidated_reason; every readiness
+--      view's "never succeeded" check ignores invalidated success rows so
+--      batches whose outputs were lost can be re-queued.
+PRAGMA user_version = 13;
 COMMIT;
