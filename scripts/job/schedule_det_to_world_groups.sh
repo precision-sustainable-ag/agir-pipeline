@@ -12,7 +12,7 @@ GROUP_RUNNER="scripts/job/run_det_to_world_group.sbatch"
 # jpg_to_det, so groups here are bigger and spaced closer together —
 # this is just about not dumping 50 jobs on the queue at once, not about
 # working around contention for scarce resources.
-BATCHES_PER_GROUP=12
+BATCHES_PER_GROUP=24
 INTERVAL_HOURS=1
 
 cd "${PROJECT_DIR}"
