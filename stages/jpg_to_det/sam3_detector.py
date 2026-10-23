@@ -10,7 +10,10 @@ SemiF-Segmentation src/finetune/sam3_model.py and src/models/proposals/sam3.py.
 Each image runs once through SAM 3 per text prompt, whole (SAM 3 resizes it to
 resolution x resolution), with no mirror padding, multiscale, WBF or
 edge-aware filtering. Only boxes and scores are computed: the model is built
-without its segmentation head, as it was fine-tuned.
+without its segmentation head, as it was fine-tuned. Several images can share
+one forward pass (run_sam3_batch): the image encoder takes them as a batch and
+the grounding heads every (image, prompt) pair at once; the text prompts are
+encoded once per processor.
 
 The sam3 package is an optional dependency (`pip install -e ".[sam3]"`) and is
 only imported when a model is loaded.
@@ -20,11 +23,11 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import warnings
 from pathlib import Path
 
 import cv2
 import torch
-from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +116,63 @@ def _box_only_processor(model, resolution: int, device: str, confidence_threshol
     from sam3.model import box_ops
     from sam3.model.sam3_image_processor import Sam3Processor
 
+    from sam3.model.data_misc import FindStage
+
     class BoxOnlySam3Processor(Sam3Processor):
+        _text_cache = None  # (prompts, forward_text output)
+
+        def _text_features(self, prompts: tuple[str, ...]) -> dict:
+            if self._text_cache is None or self._text_cache[0] != prompts:
+                self._text_cache = (prompts, self.model.backbone.forward_text(list(prompts), device=self.device))
+            return self._text_cache[1]
+
+        @torch.inference_mode()
+        def detect_batch(self, images: list[torch.Tensor], prompts: list[str]):
+            """
+            Boxes and scores for every prompt on every image, in one forward pass.
+
+            Args:
+                images: RGB uint8 CxHxW tensors, any size (resized here, on the
+                    device, as set_image does).
+                prompts: text prompts.
+
+            Returns:
+                [image][prompt] -> (boxes Nx4 xyxy in image px, scores N), on the device.
+            """
+            sizes = [tuple(im.shape[-2:]) for im in images]
+            batch = torch.stack([self.transform(im.to(self.device, non_blocking=True)) for im in images])
+            backbone_out = self.model.backbone.forward_image(batch)
+            del batch
+            backbone_out.update(self._text_features(tuple(prompts)))
+
+            # one query per (image, prompt), image-major
+            n_img, n_txt = len(images), len(prompts)
+            find = FindStage(
+                img_ids=torch.arange(n_img, device=self.device).repeat_interleave(n_txt),
+                text_ids=torch.arange(n_txt, device=self.device).repeat(n_img),
+                input_boxes=None, input_boxes_mask=None, input_boxes_label=None,
+                input_points=None, input_points_mask=None,
+            )
+            outputs = self.model.forward_grounding(
+                backbone_out=backbone_out, find_input=find,
+                geometric_prompt=self.model._get_dummy_prompt(num_prompts=n_img * n_txt),
+                find_target=None,
+            )
+            presence = outputs["presence_logit_dec"].float().sigmoid().unsqueeze(1)
+            scores = (outputs["pred_logits"].float().sigmoid() * presence).squeeze(-1)
+            boxes = box_ops.box_cxcywh_to_xyxy(outputs["pred_boxes"].float())
+
+            results = []
+            for i, (h, w) in enumerate(sizes):
+                scale = torch.tensor([w, h, w, h], device=boxes.device, dtype=boxes.dtype)
+                per_prompt = []
+                for j in range(n_txt):
+                    q = i * n_txt + j
+                    keep = scores[q] > self.confidence_threshold
+                    per_prompt.append((boxes[q][keep] * scale, scores[q][keep]))
+                results.append(per_prompt)
+            return results
+
         def _forward_grounding(self, state):
             outputs = self.model.forward_grounding(
                 # a copy: without the segmentation head, sam3 drops the image
@@ -147,7 +206,10 @@ def load_sam3_detector(model_path: str | Path, config: dict, device: str = "cuda
             the node can't reach Hugging Face).
         device: torch device.
     """
-    from sam3.model_builder import build_sam3_image_model
+    with warnings.catch_warnings():
+        # sam3 imports pkg_resources (setuptools<81 is pinned for it in the sam3 extra)
+        warnings.filterwarnings("ignore", message="pkg_resources is deprecated", category=UserWarning)
+        from sam3.model_builder import build_sam3_image_model
 
     resolution = int(config.get("resolution", SAM3_RESOLUTION))
     delta = read_delta(model_path)
@@ -178,15 +240,21 @@ def class_names(config: dict) -> dict[int, str]:
     return {int(p["class"]): str(p["name"]) for p in config["prompts"]}
 
 
-@torch.inference_mode()
+def to_rgb_tensor(im_bgr) -> torch.Tensor:
+    """RGB uint8 CxHxW tensor of a BGR HxWx3 array, as the image detect_batch
+    takes (what set_image makes of a PIL image). Converts im_bgr in place and
+    shares its memory."""
+    cv2.cvtColor(im_bgr, cv2.COLOR_BGR2RGB, dst=im_bgr)
+    return torch.from_numpy(im_bgr).permute(2, 0, 1)
+
+
 def run_sam3(processor, im0_bgr, config: dict) -> torch.Tensor:
     """
     Detect every prompt in config["prompts"] on one image.
 
     Args:
-        processor: from load_sam3_detector (or any object with Sam3Processor's
-            set_image / set_text_prompt returning "boxes" and "scores").
-        im0_bgr: original BGR image in numpy HxWx3 format.
+        processor: from load_sam3_detector (or any object with its detect_batch).
+        im0_bgr: original BGR image in numpy HxWx3 format; left as is.
         config: jpg_to_det config (prompts, final_max_det).
 
     Returns:
@@ -194,27 +262,43 @@ def run_sam3(processor, im0_bgr, config: dict) -> torch.Tensor:
         on the CPU, sorted by descending conf, or an empty (0, 6) tensor, as
         detector.run_multiscale returns.
     """
-    h, w = im0_bgr.shape[:2]
-    image = Image.fromarray(cv2.cvtColor(im0_bgr, cv2.COLOR_BGR2RGB))
+    return run_sam3_batch(processor, [to_rgb_tensor(im0_bgr.copy())], config)[0]
 
+
+@torch.inference_mode()
+def run_sam3_batch(processor, images: list[torch.Tensor], config: dict) -> list[torch.Tensor]:
+    """
+    Detect every prompt in config["prompts"] on several images in one pass.
+
+    Args:
+        processor: from load_sam3_detector (or any object with its detect_batch).
+        images: RGB uint8 CxHxW tensors (to_rgb_tensor), any sizes.
+        config: jpg_to_det config (prompts, final_max_det).
+
+    Returns:
+        One Nx6 tensor per image, as run_sam3 returns.
+    """
     # SAM 3 runs in bfloat16 on GPU (its kernels expect it, as in sam3's own examples)
     device = str(getattr(processor, "device", "cpu"))
     autocast = (torch.autocast("cuda", dtype=torch.bfloat16) if device.startswith("cuda")
                 else contextlib.nullcontext())
-    per_prompt = []
+    prompts = config["prompts"]
     with autocast:
-        state = processor.set_image(image)
-        for prompt in config["prompts"]:
-            out = processor.set_text_prompt(prompt=str(prompt["prompt"]), state=state)
-            boxes = torch.as_tensor(out["boxes"]).float().reshape(-1, 4).cpu()
-            scores = torch.as_tensor(out["scores"]).float().reshape(-1, 1).cpu()
-            cls = torch.full_like(scores, float(prompt["class"]))
-            per_prompt.append(torch.cat([boxes, scores, cls], dim=1))
-        del state
+        outputs = processor.detect_batch(images, [str(p["prompt"]) for p in prompts])
 
-    det = torch.cat(per_prompt) if per_prompt else torch.zeros((0, 6))
-    det[:, 0:4:2] = det[:, 0:4:2].clamp(0, w)
-    det[:, 1:4:2] = det[:, 1:4:2].clamp(0, h)
-    det = det[(det[:, 2] > det[:, 0]) & (det[:, 3] > det[:, 1])]
-    det = det[det[:, 4].argsort(descending=True)]
-    return det[: int(config.get("final_max_det", 1000))]
+    max_det = int(config.get("final_max_det", 1000))
+    dets = []
+    for image, per_prompt in zip(images, outputs):
+        h, w = image.shape[-2:]
+        det = torch.cat([
+            torch.cat([torch.as_tensor(boxes).float().reshape(-1, 4).cpu(),
+                       torch.as_tensor(scores).float().reshape(-1, 1).cpu(),
+                       torch.full((len(scores), 1), float(prompt["class"]))], dim=1)
+            for prompt, (boxes, scores) in zip(prompts, per_prompt)
+        ]) if per_prompt else torch.zeros((0, 6))
+        det[:, 0:4:2] = det[:, 0:4:2].clamp(0, w)
+        det[:, 1:4:2] = det[:, 1:4:2].clamp(0, h)
+        det = det[(det[:, 2] > det[:, 0]) & (det[:, 3] > det[:, 1])]
+        det = det[det[:, 4].argsort(descending=True)]
+        dets.append(det[:max_det])
+    return dets

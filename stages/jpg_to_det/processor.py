@@ -3,12 +3,15 @@ JPG -> Detection processor.
 """
 
 import logging
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import time
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List
 
 import cv2
+import torch
 import yaml
 from ultralytics import YOLO
 
@@ -19,7 +22,7 @@ from . import (
     ERROR_EXPORT_FAILED,
 )
 from .detector import run_multiscale, export_predictions
-from .sam3_detector import class_names, load_sam3_detector, run_sam3
+from .sam3_detector import class_names, load_sam3_detector, run_sam3, run_sam3_batch, to_rgb_tensor
 from stages import ITEM_OK, ITEM_FAILED
 
 logger = logging.getLogger(__name__)
@@ -100,6 +103,10 @@ def _validate_sam3_config(config: dict) -> None:
     class_ids = [int(p["class"]) for p in prompts]
     if len(set(class_ids)) != len(class_ids):
         raise ValueError(f"Config 'prompts' class ids must be unique, got {class_ids}")
+
+    batch_size = config.setdefault("batch_size", 1)
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
+        raise ValueError(f"Config 'batch_size' must be a positive integer, got {batch_size!r}")
 
 
 def load_config(config_path: Path) -> dict:
@@ -334,10 +341,9 @@ class Processor:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.backend == "sam3" and max_workers > 1:
-            # One SAM 3 copy per worker would not fit; the GPU is the bottleneck anyway.
-            logger.info("SAM 3 backend runs sequentially; ignoring max_workers=%d", max_workers)
-            max_workers = 0
+        if self.backend == "sam3":
+            # One SAM 3 copy per worker would not fit: workers read JPGs instead.
+            return self._process_batch_sam3(jpg_list, output_dir, fail_stop, max_workers)
 
         if max_workers <= 1:
             logger.info(
@@ -408,3 +414,153 @@ class Processor:
         result_map = {r.image_id: r for r in results}
         ordered_results = [result_map[p.stem] for p in jpg_list if p.stem in result_map]
         return ordered_results
+
+    def _process_batch_sam3(
+        self,
+        jpg_list: List[Path],
+        output_dir: Path,
+        fail_stop: bool,
+        max_workers: int,
+    ) -> List[DetectionResult]:
+        """
+        One SAM 3 model, fed config["batch_size"] images per forward pass by
+        max_workers reader threads that decode the next JPGs while the GPU runs.
+        """
+        batch_size = int(self.config.get("batch_size", 1))
+        readers = max(1, int(max_workers))
+        # decoded images held at once (each a full-size RGB array): the batch on
+        # the GPU, the next one ready, and one in flight per reader
+        window = 2 * batch_size + readers
+        logger.info(
+            "Execution plan | device=%s | mode=sam3-pipeline | batch_size=%d | readers=%d | prefetch=%d | model_copies=1",
+            self.device, batch_size, readers, window,
+        )
+
+        results: dict[str, DetectionResult] = {}
+        timings = {"read_wait": 0.0, "gpu": 0.0, "export": 0.0}
+        start = time.perf_counter()
+        n_done = 0
+        paths = iter(jpg_list)
+        pending: deque = deque()  # (path, future of (im, rgb)) in input order
+
+        def record(result: DetectionResult, jpg_path: Path) -> bool:
+            """Store result; True when the run should stop."""
+            results[result.image_id] = result
+            if result.status == ITEM_OK:
+                logger.info("Processed %s -> %s", jpg_path.name, result.txt_path.name)
+                return False
+            logger.error("Failed processing %s [%s]: %s",
+                         jpg_path.name, result.error_code, result.error_message)
+            return fail_stop
+
+        with ThreadPoolExecutor(max_workers=readers, thread_name_prefix="jpg-read") as pool:
+            def fill() -> None:
+                while len(pending) < window:
+                    jpg_path = next(paths, None)
+                    if jpg_path is None:
+                        return
+                    pending.append((jpg_path, pool.submit(_read_rgb, jpg_path)))
+
+            fill()
+            stop = False
+            while pending and not stop:
+                batch = []  # (path, im, rgb)
+                while pending and len(batch) < batch_size and not stop:
+                    jpg_path, future = pending.popleft()
+                    t0 = time.perf_counter()
+                    try:
+                        im, rgb = future.result()
+                    except Exception as e:
+                        stop = record(_failed(jpg_path, ERROR_IMAGE_READ_FAILED, e), jpg_path)
+                    else:
+                        batch.append((jpg_path, im, rgb))
+                    timings["read_wait"] += time.perf_counter() - t0
+                    fill()
+                if not batch:
+                    continue
+
+                t0 = time.perf_counter()
+                dets = self._detect_sam3(batch)
+                timings["gpu"] += time.perf_counter() - t0
+
+                t0 = time.perf_counter()
+                for (jpg_path, im, _), det in zip(batch, dets):
+                    if isinstance(det, Exception):
+                        result = _failed(jpg_path, ERROR_INFERENCE_FAILED, det)
+                    else:
+                        result = self._export(jpg_path, output_dir, det, im)
+                    stop = record(result, jpg_path) or stop
+                timings["export"] += time.perf_counter() - t0
+                n_done += len(batch)
+                del batch, dets
+
+            for _, future in pending:
+                future.cancel()
+
+        elapsed = time.perf_counter() - start
+        self.last_timings = {**timings, "total": elapsed, "images": n_done}
+        logger.info(
+            "SAM 3 timing | images=%d | total=%.1fs | %.2f img/s | waiting on reads=%.1fs | gpu=%.1fs | export=%.1fs",
+            n_done, elapsed, n_done / elapsed if elapsed else 0.0,
+            timings["read_wait"], timings["gpu"], timings["export"],
+        )
+        return [results[p.stem] for p in jpg_list if p.stem in results]
+
+    def _detect_sam3(self, batch: list) -> list:
+        """run_sam3_batch on the batch's images; if the batch fails (e.g. out of
+        GPU memory), each image alone, so one bad image fails only itself."""
+        images = [rgb for _, _, rgb in batch]
+        try:
+            return run_sam3_batch(self.model, images, self.config)
+        except Exception as e:
+            if len(images) == 1:
+                return [e]
+            logger.warning("SAM 3 batch of %d failed (%s: %s); retrying one image at a time",
+                           len(images), type(e).__name__, e)
+            if isinstance(e, torch.OutOfMemoryError):
+                torch.cuda.empty_cache()
+        dets = []
+        for rgb in images:
+            try:
+                dets.append(run_sam3_batch(self.model, [rgb], self.config)[0])
+            except Exception as e:
+                dets.append(e)
+        return dets
+
+    def _export(self, jpg_path: Path, output_dir: Path, det, im) -> DetectionResult:
+        try:
+            txt_path, detection_rows = export_predictions(
+                results_raw_xyxy_abs=det,
+                save_dir=output_dir,
+                filename=str(jpg_path),
+                names=self.names,
+                im0=im,
+            )
+        except Exception as e:
+            return _failed(jpg_path, ERROR_EXPORT_FAILED, e)
+        return DetectionResult(
+            image_id=jpg_path.stem,
+            status=ITEM_OK,
+            txt_path=txt_path,
+            detection_rows=detection_rows,
+            n_detections=len(detection_rows),
+        )
+
+
+def _read_rgb(jpg_path: Path):
+    """(im, rgb): the decoded image (RGB, HxWx3) and the CxHxW tensor view of it
+    run_sam3_batch takes."""
+    im = cv2.imread(str(jpg_path))
+    if im is None:
+        raise RuntimeError(f"cv2.imread returned None for {jpg_path}")
+    return im, to_rgb_tensor(im)
+
+
+def _failed(jpg_path: Path, code: str, e: Exception) -> DetectionResult:
+    return DetectionResult(
+        image_id=Path(jpg_path).stem,
+        status=ITEM_FAILED,
+        error_code=code,
+        error_type=type(e).__name__,
+        error_message=str(e),
+    )
