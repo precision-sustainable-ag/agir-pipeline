@@ -456,11 +456,13 @@ top-left corner with its species/cultivar name (whichever of
 the shoelace formula over the box's four remapped world corners
 (`world_tl/tr/bl/br_x/y`), not just width × height, since a bbox's world
 footprint can be a rotated/skewed quad rather than an axis-aligned
-rectangle. The area half of the label is omitted when it can't be computed
-(missing corner columns — including detections that weren't georeferenced —
-or a geographic CRS like EPSG:4326 where raw-unit
-shoelace area isn't meaningful as cm² without a geodetic reprojection — see
-`_DEGREE_CRS_CODES`); no label is drawn at all when neither the name nor the
+rectangle. For a geographic CRS like EPSG:4326 (longitude/latitude degrees,
+which newer ASFM grids use), the corners are first placed in a local metre
+frame from their geodesic distance and azimuth to the top-left corner, so
+the label matches seg_to_cut's `bbox_area_cm2`. Projected CRSs and `LOCAL`
+are used as metres directly. The area half of the label is omitted when it
+can't be computed (missing corner columns, including detections that weren't
+georeferenced); no label is drawn at all when neither the name nor the
 area is available. `no_detections` placeholder rows have no bbox and are skipped.
 
 `--images` is expected to already be the pre-sampled subset staged above

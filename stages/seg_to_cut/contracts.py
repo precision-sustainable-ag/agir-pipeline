@@ -28,7 +28,7 @@ class PixelBoundingBox:
 
 @dataclass(frozen=True)
 class WorldBoundingBox:
-    """Four ordered bounding-box corners in one projected CRS."""
+    """Four ordered bounding-box corners in one projected, geographic, or ``LOCAL`` CRS."""
 
     top_left: tuple[float, float]
     top_right: tuple[float, float]

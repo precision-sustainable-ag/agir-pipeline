@@ -84,6 +84,7 @@ def measurement_provenance(config: SegToCutConfig) -> dict[str, Any]:
         "area_metrics": {
             "bbox_area_source": config.bbox_area_source,
             "world_area_algorithm": "planar_shoelace",
+            "world_area_geographic_crs_frame": "local_azimuthal_equidistant_on_crs_ellipsoid",
             "world_area_output_unit": "cm2",
             "estimated_area_method": "pinhole_camera_flat_surface",
             "camera_focal_length_mm": config.camera_focal_length_mm,
@@ -129,9 +130,39 @@ def _segments_intersect(
 
 
 def calculate_bbox_area_cm2(world_bbox: WorldBoundingBox | None) -> float | None:
-    """Calculate planar quadrilateral area in cm² for a projected CRS or ``LOCAL`` (metres)."""
+    """Calculate quadrilateral area in cm² for a projected CRS, ``LOCAL`` (metres), or a
+    geographic (longitude/latitude degrees) CRS."""
 
     return _bbox_area_with_reason(world_bbox)[0]
+
+
+def _geographic_to_local_metres(
+    points: tuple[tuple[float, float], ...], crs: CRS
+) -> tuple[tuple[float, float], ...] | None:
+    """Place longitude/latitude corners in a metre frame centred on the first corner.
+
+    Each corner's geodesic distance and azimuth from the first corner, on the
+    CRS's own ellipsoid, gives azimuthal-equidistant x/y. Distortion is
+    negligible at plant-box scale, so the planar checks and shoelace sum apply
+    unchanged. World x is longitude and y is latitude, the order det_to_world
+    writes regardless of the CRS's official axis order.
+    """
+    geod = crs.get_geod()
+    if geod is None or any(axis.unit_name != "degree" for axis in crs.axis_info[:2]):
+        return None
+    if not all(-90.0 <= latitude <= 90.0 for _, latitude in points):
+        return None
+    origin_lon, origin_lat = points[0]
+    azimuths, _, distances = geod.inv(
+        [origin_lon] * len(points),
+        [origin_lat] * len(points),
+        [longitude for longitude, _ in points],
+        [latitude for _, latitude in points],
+    )
+    return tuple(
+        (distance * math.sin(math.radians(azimuth)), distance * math.cos(math.radians(azimuth)))
+        for azimuth, distance in zip(azimuths, distances)
+    )
 
 
 def _bbox_area_with_reason(
@@ -149,10 +180,6 @@ def _bbox_area_with_reason(
         return None, "world corners contain nonnumeric coordinates"
     if len(set(points)) != 4 or not coordinates_are_finite:
         return None, "world corners are repeated or contain nonfinite coordinates"
-    if _segments_intersect(points[0], points[1], points[2], points[3]) or _segments_intersect(
-        points[1], points[2], points[3], points[0]
-    ):
-        return None, "world box has intersecting or collinear edges"
     if world_bbox.crs == LOCAL_CRS:
         # LOCAL is the pipeline's project frame; it is not a pyproj CRS but its
         # coordinates are already in metres.
@@ -162,15 +189,28 @@ def _bbox_area_with_reason(
             crs = CRS.from_user_input(world_bbox.crs)
         except (CRSError, TypeError, ValueError):
             return None, "CRS could not be parsed"
-        if not crs.is_projected or len(crs.axis_info) < 2:
-            return None, "CRS is not projected or lacks two coordinate axes"
-        x_factor = crs.axis_info[0].unit_conversion_factor
-        y_factor = crs.axis_info[1].unit_conversion_factor
-        if not all(
-            factor is not None and math.isfinite(factor) and factor > 0
-            for factor in (x_factor, y_factor)
-        ):
-            return None, "CRS axis units cannot be converted to metres"
+        if crs.is_geographic and len(crs.axis_info) >= 2:
+            # Convert before the edge check below: its absolute tolerance is
+            # sized for metres, and degree-scale plant boxes fall under it.
+            metre_points = _geographic_to_local_metres(points, crs)
+            if metre_points is None:
+                return None, "geographic CRS corners are not longitude/latitude degrees"
+            points = metre_points
+            x_factor = y_factor = 1.0
+        else:
+            if not crs.is_projected or len(crs.axis_info) < 2:
+                return None, "CRS is neither projected nor geographic, or lacks two coordinate axes"
+            x_factor = crs.axis_info[0].unit_conversion_factor
+            y_factor = crs.axis_info[1].unit_conversion_factor
+            if not all(
+                factor is not None and math.isfinite(factor) and factor > 0
+                for factor in (x_factor, y_factor)
+            ):
+                return None, "CRS axis units cannot be converted to metres"
+    if _segments_intersect(points[0], points[1], points[2], points[3]) or _segments_intersect(
+        points[1], points[2], points[3], points[0]
+    ):
+        return None, "world box has intersecting or collinear edges"
     # Translate near the origin before the shoelace sum to avoid cancellation
     # for large UTM eastings/northings surrounding a small plant box.
     origin_x, origin_y = points[0]

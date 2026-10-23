@@ -7,6 +7,7 @@ from pathlib import Path
 import geopandas as gpd
 import numpy as np
 import cv2
+import pytest
 
 _MODULE_PATH = Path(__file__).resolve().parents[1] / "visualize.py"
 _spec = importlib.util.spec_from_file_location("visualize", _MODULE_PATH)
@@ -112,15 +113,19 @@ def test_bbox_area_cm2_computes_shoelace_area_from_world_corners() -> None:
     assert visualize._bbox_area_cm2(row) == 1250.0
 
 
-def test_bbox_area_cm2_returns_none_for_geographic_crs() -> None:
+@pytest.mark.parametrize("crs", ["EPSG:4326", "4326"])
+def test_bbox_area_cm2_measures_geographic_crs_geodesically(crs: str) -> None:
+    # A real NC_2025-02-28 detection: lon/lat corners only ~1e-6 deg apart,
+    # which a raw-degree shoelace rendered as "0.0 cm^2".
     row = {
-        "crs": "4326",
-        "world_tl_x": "0.0", "world_tl_y": "0.0",
-        "world_tr_x": "0.5", "world_tr_y": "0.0",
-        "world_br_x": "0.5", "world_br_y": "0.25",
-        "world_bl_x": "0.0", "world_bl_y": "0.25",
+        "crs": crs,
+        "world_tl_x": "-78.67256795573982", "world_tl_y": "35.77416775623888",
+        "world_tr_x": "-78.67256918897759", "world_tr_y": "35.774168345592024",
+        "world_br_x": "-78.67256847620487", "world_br_y": "35.77416918530215",
+        "world_bl_x": "-78.67256724268589", "world_bl_y": "35.77416860928108",
     }
-    assert visualize._bbox_area_cm2(row) is None
+    # Reference: shoelace in an equal-area LAEA projection centred on the box.
+    assert visualize._bbox_area_cm2(row) == pytest.approx(146.4056, abs=1e-3)
 
 
 def test_bbox_area_cm2_returns_none_when_corners_missing() -> None:
