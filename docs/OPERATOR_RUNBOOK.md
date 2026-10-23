@@ -894,6 +894,11 @@ python scripts/admin/sync_atlas_results.py \
   --refresh-inventory
 ```
 
+When working through many bundles across several runs, pass `--skip-inventory`
+to defer the refresh, then run `--refresh-inventory` once at the end. Snapshot
+reconciliation still checks every promoted artifact against the inventory, so
+publishing is refused until that final refresh succeeds.
+
 An inventory or confirmation failure makes the command exit unsuccessfully but
 does not reverse completed promotion or ingestion. Correct the inventory issue
 and rerun with `--refresh-inventory`. Do not publish a fresh database snapshot
