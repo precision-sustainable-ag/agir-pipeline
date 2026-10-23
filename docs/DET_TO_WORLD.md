@@ -399,6 +399,29 @@ piece only when it has at least one NPZ grid and at least one directory with a
 paired `camera_reference.csv` and `fov.csv`; there is no separate
 `primary_references/` transfer.
 
+### Monoculture configs without grids
+
+A config whose `stage.cli_args` never references `$GRID_ROOT` runs without
+ASFM grids: `det_to_world_uses_grids()` in
+`orchestrator/input_staging_planner.py` is false, so readiness drops the
+grids requirement (`get_batches_needing_det_to_world(require_grids=False)`),
+no ASFM bundle is planned, and the all-inputs submission gate expects only
+images and detections. Such a config passes `--species <code>` and no `--g`,
+so every detection is written un-georeferenced with that species (see
+[Rows that aren't georeferenced](#rows-that-arent-georeferenced)). Because the
+species is hardcoded for every batch it submits, `stage_inputs.py` and
+`submit.py` refuse it without an explicit `--batches` list.
+
+[`configs/config.det_to_world.beets_2025.example.yaml`](../configs/config.det_to_world.beets_2025.example.yaml)
+is one (species `BEVU2`). It passes the staged detections directory as `--i`,
+so batches without an aggregate `<batch_id>.csv` use their per-image `.txt`
+files. Select it for the group runner with `DET_TO_WORLD_CONFIG`:
+
+```bash
+DET_TO_WORLD_CONFIG=configs/config.det_to_world.beets_2025.example.yaml \
+  sbatch scripts/job/run_det_to_world_group.sbatch configs/det_to_world_groups/beets_2025.txt
+```
+
 ### Image sampling
 
 The stage CLI never reads image pixels — only the detections CSV (`--i`)

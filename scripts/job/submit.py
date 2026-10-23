@@ -46,6 +46,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from orchestrator.input_staging_planner import (
     STAGE_INPUT_SPECS,
+    det_to_world_uses_grids,
     expected_staged_input_dst_paths,
 )
 from orchestrator.sqlite_db import (
@@ -329,6 +330,14 @@ def main() -> int:
     )
 
     cfg = yaml.safe_load(args.config.read_text())
+
+    # A det_to_world config without grids hardcodes one --species for every
+    # batch it submits, so it must never fall back to the readiness view.
+    if args.stage == "det_to_world" and not args.batches and not det_to_world_uses_grids(cfg):
+        parser.error(
+            f"{args.config} runs det_to_world without ASFM grids (one species for "
+            "every batch); pass --batches"
+        )
 
     # ── Find batches ──────────────────────────────────────────────────────────
     if args.batches:
