@@ -472,8 +472,9 @@ entire batch of images it has no use for.
 `scripts/job/visualize.py`'s `det_to_world` mode (enabled via
 `visualization.enabled: true` / `mode: det_to_world` in the stage config)
 draws each detection box back onto its sampled image, labeled at the
-top-left corner with its species/cultivar name (whichever of
-`cultivar_name`/`species_name` the CSV has, if either — see
+top-left corner with its species/cultivar name (`cultivar_name` or
+`species_name` from the zone shapefile, else the catalog's
+`species_common_name`, which is the only name monoculture batches carry — see
 `_detection_name_label()`) and the box's world-space area in cm², joined as
 `"<name> | <area> cm^2"` when both are available. The area is computed via
 the shoelace formula over the box's four remapped world corners
@@ -483,10 +484,14 @@ rectangle. For a geographic CRS like EPSG:4326 (longitude/latitude degrees,
 which newer ASFM grids use), the corners are first placed in a local metre
 frame from their geodesic distance and azimuth to the top-left corner, so
 the label matches seg_to_cut's `bbox_area_cm2`. Projected CRSs and `LOCAL`
-are used as metres directly. The area half of the label is omitted when it
-can't be computed (missing corner columns, including detections that weren't
-georeferenced); no label is drawn at all when neither the name nor the
-area is available. `no_detections` placeholder rows have no bbox and are skipped.
+are used as metres directly. Boxes without world corners (monoculture
+batches, or detections that weren't georeferenced) get a camera-geometry
+estimate instead, labeled `"<area> cm^2 (est)"`. It uses the same formula and
+camera block as seg_to_cut's `estimated_bbox_area_cm2` (focal length, sensor
+diagonal, and lens height above the pot surface from
+`stages/seg_to_cut/configs/default.yaml`, or `--camera-config`), so objects
+on the ground below the pots read smaller than they are. No label is drawn at
+all when neither the name nor any area is available. `no_detections` placeholder rows have no bbox and are skipped.
 
 `--images` is expected to already be the pre-sampled subset staged above
 (`$TMPINPUT/images`), so this mode renders every image found there rather

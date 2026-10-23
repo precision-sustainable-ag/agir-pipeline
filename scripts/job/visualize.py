@@ -15,7 +15,7 @@ Works for any stage — behaviour is controlled by --mode:
                Output: overlay JPGs downscaled to --max-width.
 
   det_to_world Draw georeferenced detection boxes (pixel-space corners,
-               labeled with their computed world centroid) on every JPG
+               labeled with species name and bbox area) on every JPG
                found under --images. Requires --detections pointing at the
                *_georeferenced.csv file (not a directory) — det_to_world
                writes one CSV for the whole batch, unlike jpg_to_det's
@@ -111,6 +111,10 @@ import numpy as np
 from pyproj import CRS, Geod
 from pyproj.exceptions import CRSError
 from shapely.geometry import Polygon
+
+from stages.seg_to_cut.camera_area import estimate_camera_bbox_area_cm2
+from stages.seg_to_cut.config import SegToCutConfig, load_config
+from stages.seg_to_cut.errors import SegToCutConfigError
 
 logger = logging.getLogger(__name__)
 
@@ -385,14 +389,48 @@ def write_bbox_shapefile(rows: list[dict[str, str]], batch_id: str, output_dir: 
 
 def _detection_name_label(row: dict[str, str]) -> str | None:
     """
-    Human-readable species/cultivar name for this detection, if the batch's
-    shapefile had one — cultivar_name (cultivar seasons, e.g. "Peanut - NC
-    20") and species_name (comm_name, e.g. "Ragweed") are mutually exclusive
-    per shapefile (see species.assign_spatial), so at most one is ever
-    present. Monoculture batches and shapefiles with neither attribute have
-    neither column — row.get() returns None rather than raising.
+    Human-readable species/cultivar name for this detection. Prefers the
+    batch shapefile's own name: cultivar_name (cultivar seasons, e.g.
+    "Peanut - NC 20") or species_name (comm_name, e.g. "Ragweed"), which are
+    mutually exclusive per shapefile (see species.assign_spatial). Falls
+    back to the species catalog's species_common_name, the only name
+    monoculture batches (no shapefile, e.g. beets) carry. Columns a batch
+    doesn't have make row.get() return None rather than raising.
     """
-    return row.get("cultivar_name") or row.get("species_name") or None
+    return (
+        row.get("cultivar_name")
+        or row.get("species_name")
+        or row.get("species_common_name")
+        or None
+    )
+
+
+def _bbox_area_label(
+    row: dict[str, str],
+    normalized_bbox: tuple[float, float, float, float],
+    image_width_px: int,
+    image_height_px: int,
+    camera_config: SegToCutConfig | None,
+) -> str | None:
+    """
+    "<area> cm^2" from the box's world corners when it has them, else
+    "<area> cm^2 (est)" from fixed camera geometry, the same fallback
+    seg_to_cut uses for estimated_bbox_area_cm2 (see
+    stages/seg_to_cut/camera_area.py). Monoculture batches are written
+    without world coordinates, so they always get the estimate. None when
+    neither is available.
+    """
+    area_cm2 = _bbox_area_cm2(row)
+    if area_cm2 is not None:
+        return f"{area_cm2:.1f} cm^2"
+    if camera_config is None:
+        return None
+    estimated_cm2, _ = estimate_camera_bbox_area_cm2(
+        normalized_bbox, image_width_px, image_height_px, camera_config
+    )
+    if estimated_cm2 is None:
+        return None
+    return f"{estimated_cm2:.1f} cm^2 (est)"
 
 
 def _render_det_to_world(
@@ -400,6 +438,7 @@ def _render_det_to_world(
     rows: list[dict[str, str]],
     out_path: Path,
     max_width: int,
+    camera_config: SegToCutConfig | None = None,
 ) -> bool:
     """
     Draw det_to_world's georeferenced boxes on one JPG.
@@ -408,11 +447,10 @@ def _render_det_to_world(
     jpg_to_det produced (world_* columns are derived from them, not a
     separate pixel location), so overlaying them directly confirms boxes
     still line up with the image. Each box is labeled at its top-left corner
-    with its world-space area (cm^2, via the four remapped corners) and,
-    when the shapefile provided one, its species/cultivar name (see
-    _detection_name_label) — no label at all if neither is available
-    (missing corners and no name attribute in the shapefile), so a
-    georeferencing failure is visible at a glance.
+    with its species/cultivar name (see _detection_name_label) and its area
+    in cm^2: world-space when the box was georeferenced, otherwise a camera
+    estimate from camera_config marked "(est)" (see _bbox_area_label). No
+    label at all if neither name nor area is available.
 
     Boxes/labels are drawn *after* downscaling to max_width, not before —
     source images here are huge (e.g. 13368x9520), so text/box strokes sized
@@ -425,10 +463,10 @@ def _render_det_to_world(
         logger.warning("Could not read: %s", image_path)
         return False
 
-    orig_w = im.shape[1]
+    orig_h, orig_w = im.shape[:2]
     if orig_w > max_width:
         scale = max_width / orig_w
-        im = cv2.resize(im, (int(orig_w * scale), int(im.shape[0] * scale)))
+        im = cv2.resize(im, (int(orig_w * scale), int(orig_h * scale)))
 
     h, w = im.shape[:2]
 
@@ -442,11 +480,11 @@ def _render_det_to_world(
         x2, y2 = int(xmax * w), int(ymax * h)
         cv2.rectangle(im, (x1, y1), (x2, y2), _BOX_COLOR, _BOX_THICKNESS)
 
-        area_cm2 = _bbox_area_cm2(row)
+        area_label = _bbox_area_label(
+            row, (xmin, ymin, xmax, ymax), orig_w, orig_h, camera_config
+        )
         name_label = _detection_name_label(row)
-        label_parts = [name_label] if name_label else []
-        if area_cm2 is not None:
-            label_parts.append(f"{area_cm2:.1f} cm^2")
+        label_parts = [part for part in (name_label, area_label) if part]
         if label_parts:
             y_area = max(_DET_TO_WORLD_LABEL_Y_MIN, y1 - 10)
             cv2.putText(
@@ -755,6 +793,16 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--camera-config", type=Path, default=None,
+        help=(
+            "det_to_world mode only: seg_to_cut stage config whose camera "
+            "block (focal_length_mm, sensor_size_mm, "
+            "lens_height_above_pot_surface_cm) estimates the area of boxes "
+            "without world coordinates. Default: seg_to_cut's packaged "
+            "stages/seg_to_cut/configs/default.yaml."
+        ),
+    )
+    parser.add_argument(
         "--log-level", default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
@@ -831,8 +879,15 @@ def main() -> int:
     )
 
     rows_by_image: dict[str, list[dict[str, str]]] = {}
+    camera_config: SegToCutConfig | None = None
     if args.mode == "det_to_world":
         rows_by_image = load_georeferenced_rows_by_image(args.detections)
+        try:
+            camera_config = load_config(args.camera_config)
+        except SegToCutConfigError as exc:
+            logger.warning(
+                "Camera config unavailable, so boxes without world area get no estimate: %s", exc
+            )
 
     seg_colors: dict[int, tuple[int, int, int]] = {}
     seg_names: dict[int, str] = {}
@@ -857,7 +912,9 @@ def main() -> int:
 
         elif args.mode == "det_to_world":
             image_rows = rows_by_image.get(image_path.stem, [])
-            ok = _render_det_to_world(image_path, image_rows, out_path, args.max_width)
+            ok = _render_det_to_world(
+                image_path, image_rows, out_path, args.max_width, camera_config
+            )
 
         elif args.mode == "det_to_seg":
             mask_path = args.masks / f"{image_path.stem}.png"
