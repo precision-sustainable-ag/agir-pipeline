@@ -55,6 +55,8 @@ import yaml
 
 from orchestrator.sqlite_db import open_db
 
+import nightly_report  # sibling script; this script's dir is on sys.path
+
 logger = logging.getLogger("dashboard")
 
 DEFAULT_DB = "/project/dash_agir/globus_index/globus_file_index.sqlite3"
@@ -360,6 +362,17 @@ class Store:
                       "unregistered": sorted(set(inbox_ids) - known)},
             "snapshot": snap,
         }
+
+    def report(self, hours: int) -> dict:
+        """The emailed daily report (scripts/admin/nightly_report.py), as HTML."""
+        if not 1 <= hours <= 720:
+            raise ValueError("hours must be between 1 and 720")
+        conn = self.connect()
+        try:
+            rep = nightly_report.build_report(conn, hours)
+        finally:
+            conn.close()
+        return {"html": nightly_report.render_html(rep), "subject": rep["subject"]}
 
     def batch(self, batch_id: str) -> dict:
         p = (batch_id,)
@@ -684,6 +697,8 @@ def make_handler(store: Store, token: str):
                     return self._send(200, store.sync_state())
                 if url.path == "/api/history":
                     return self._send(200, {"jobs": sacct_history()})
+                if url.path == "/api/report":
+                    return self._send(200, store.report(int(q.get("hours", ["24"])[0])))
                 if url.path == "/api/task":
                     return self._send(200, store.tasks[q["id"][0]])
                 if url.path == "/api/log":
@@ -824,6 +839,13 @@ dialog pre { max-height: 70vh; }
 .spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--muted);
   border-top-color: transparent; border-radius: 50%; animation: s 1s linear infinite; }
 @keyframes s { to { transform: rotate(360deg); } }
+/* Daily report fragment, rendered server-side by nightly_report.render_html. */
+.rp h3 { font-size: 13.5px; margin: 16px 0 6px; padding-bottom: 3px; border-bottom: 1px solid var(--line); }
+.rp p { margin: 6px 0; font-size: 13px; }
+.rp ul { margin: 6px 0; padding-left: 20px; }
+.rp-table { max-height: 340px; overflow: auto; margin-bottom: 6px; }
+.lv-ok { color: var(--ok); } .lv-warn, .s-partial { color: var(--warn); }
+.lv-bad { color: var(--bad); font-weight: 600; } .s-skipped { color: var(--muted); }
 @media (max-width: 600px) { header, main { padding-left: 16px; padding-right: 16px; } }
 </style>
 </head>
@@ -841,6 +863,18 @@ dialog pre { max-height: 70vh; }
       <span class="note" id="refreshNote">Readiness views take ~25–110 s each; cached between refreshes.</span>
     </h2>
     <div class="cards" id="cards"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Daily report
+      <select id="rpHours">
+        <option value="24">last 24 h</option><option value="48">last 48 h</option>
+        <option value="72">last 72 h</option><option value="168">last 7 days</option>
+      </select>
+      <button id="rpGo">Refresh</button>
+      <span class="note">Same report scripts/admin/nightly_report.sbatch emails every morning at 07:00.</span>
+    </h2>
+    <div id="rpOut" class="note">Loading…</div>
   </section>
 
   <div class="grid2">
@@ -1165,6 +1199,16 @@ async function doSync(action) {
   } catch (e) { out.innerHTML = `<div class="warnbox">${esc(e.message)}</div>`; }
 }
 
+// Not part of tick(): it runs sacct and reads job logs, so only on load/refresh.
+async function loadReport() {
+  const out = document.getElementById("rpOut");
+  out.innerHTML = '<span class="spin"></span>';
+  try {
+    const r = await api(`/api/report?hours=${document.getElementById("rpHours").value}`);
+    out.innerHTML = r.html;  // escaped server-side by render_html
+  } catch (e) { out.innerHTML = `<div class="warnbox">${esc(e.message)}</div>`; }
+}
+
 async function tick() {
   try { await Promise.all([loadOverview(), loadActivity(), loadSync(), loadHistory()]); }
   catch (e) { document.getElementById("updated").textContent = `refresh failed: ${e.message}`; }
@@ -1314,7 +1358,11 @@ document.getElementById("bId").onkeydown = e => { if (e.key === "Enter") lookup(
 document.getElementById("dlgClose").onclick = () => document.getElementById("dlg").close();
 document.getElementById("dlgReload").onclick = () => dlgPath && showLog(dlgPath);
 
+document.getElementById("rpGo").onclick = loadReport;
+document.getElementById("rpHours").onchange = loadReport;
+
 tick();
+loadReport();
 setInterval(tick, 15000);
 </script>
 </body>
