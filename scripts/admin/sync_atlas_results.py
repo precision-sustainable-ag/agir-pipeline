@@ -100,6 +100,14 @@ def _parser() -> argparse.ArgumentParser:
         help="Force a Ceres developed-images inventory refresh.",
     )
     parser.add_argument(
+        "--skip-inventory",
+        action="store_true",
+        help=(
+            "Skip the Ceres developed-images inventory refresh after promotion; "
+            "run --refresh-inventory later, before publishing a snapshot."
+        ),
+    )
+    parser.add_argument(
         "--log-dir",
         type=Path,
         default=None,
@@ -208,6 +216,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.bundle_limit <= 0:
         parser.error("--bundle-limit must be greater than zero")
+    if args.skip_inventory and args.refresh_inventory:
+        parser.error("--skip-inventory cannot be combined with --refresh-inventory")
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
@@ -306,7 +316,21 @@ def main() -> int:
             for outcome in finalizations
             for path in outcome.inventory_paths
         )
-        if promoted_paths or args.refresh_inventory:
+        if args.skip_inventory:
+            if promoted_paths:
+                inventory = [
+                    SyncOutcome(
+                        phase="inventory",
+                        run_id=None,
+                        status="skipped",
+                        message=(
+                            f"skipped refresh for {len(set(promoted_paths))} promoted "
+                            "files (--skip-inventory); run --refresh-inventory "
+                            "before publishing a snapshot"
+                        ),
+                    )
+                ]
+        elif promoted_paths or args.refresh_inventory:
             inventory = [
                 _refresh_promoted_inventory(
                     config,

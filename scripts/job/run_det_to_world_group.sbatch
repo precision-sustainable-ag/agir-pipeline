@@ -47,13 +47,11 @@ if [[ ! -f "${GROUP_FILE}" ]]; then
     exit 1
 fi
 
-wait_for_batch_job() {
+batch_job_submitted() {
     local batch_id="$1"
     local job_name="${STAGE}_${batch_id}"
 
-    echo "Waiting for Slurm job: ${job_name}"
-
-    # First wait for the submitted job to appear in Slurm.
+    # Wait for the submitted job to appear in Slurm.
     local attempts=0
 
     while ! squeue \
@@ -65,14 +63,20 @@ wait_for_batch_job() {
         attempts=$((attempts + 1))
 
         if (( attempts >= 10 )); then
-            echo "Could not find ${job_name} after submission." >&2
             return 1
         fi
 
         sleep 6
     done
+}
 
-    # Then wait until the job is no longer pending or running.
+wait_for_batch_job() {
+    local batch_id="$1"
+    local job_name="${STAGE}_${batch_id}"
+
+    echo "Waiting for Slurm job: ${job_name}"
+
+    # Wait until the job is no longer pending or running.
     while squeue \
         --noheader \
         --user="${USER}" \
@@ -127,6 +131,8 @@ wait_for_batch_job() {
     esac
 }
 
+skipped_batches=()
+
 while IFS= read -r batch_id || [[ -n "${batch_id}" ]]; do
     # Ignore empty lines and comments.
     [[ -z "${batch_id//[[:space:]]/}" ]] && continue
@@ -162,6 +168,15 @@ while IFS= read -r batch_id || [[ -n "${batch_id}" ]]; do
 
     rm -f "${batch_file}"
 
+    # submit.py exits 0 without submitting when a batch fails its staging
+    # gate (e.g. no pixel_world_grids indexed) or holds an active lease —
+    # skip it so one unready batch doesn't end the rest of the group.
+    if ! batch_job_submitted "${batch_id}"; then
+        echo "No Slurm job submitted for ${batch_id}; skipping." >&2
+        skipped_batches+=("${batch_id}")
+        continue
+    fi
+
     # Do not submit the next batch until this batch's det_to_world job
     # finishes — det_to_world jobs are cheap (4 cpus / 16G / <=1h, see
     # slurm: in CONFIG_FILE) but this still keeps this group from holding
@@ -185,4 +200,8 @@ echo
 echo "=================================================="
 echo "Group completed: ${GROUP_END_TIME}"
 echo "Total group duration: ${GROUP_DURATION}"
+echo "Skipped (not submitted): ${#skipped_batches[@]}"
+for batch_id in "${skipped_batches[@]}"; do
+    echo "  ${batch_id}"
+done
 echo "=================================================="
