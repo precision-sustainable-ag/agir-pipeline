@@ -96,8 +96,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import functools
 import json
 import logging
+import math
 import random
 from pathlib import Path
 import shutil
@@ -106,6 +108,8 @@ from tqdm import tqdm
 import cv2
 import geopandas as gpd
 import numpy as np
+from pyproj import CRS, Geod
+from pyproj.exceptions import CRSError
 from shapely.geometry import Polygon
 
 logger = logging.getLogger(__name__)
@@ -127,13 +131,6 @@ _LABEL_Y_MIN    = 40
 _DET_TO_WORLD_FONT_SCALE     = 0.7
 _DET_TO_WORLD_FONT_THICKNESS = 2
 _DET_TO_WORLD_LABEL_Y_MIN    = 20
-
-# world_tl_x/y etc. are only meaningful as meters for a projected CRS (UTM
-# EPSG codes, or this pipeline's 'LOCAL' project frame) — a geographic CRS
-# like EPSG:4326 stores coordinates in degrees, where a shoelace area in raw
-# units is not cm^2 without a geodetic reprojection. Skip the area label
-# rather than show a wildly wrong number.
-_DEGREE_CRS_CODES = {"4326"}
 
 # det_to_seg mask overlay style — true alpha blend, masked pixels only (see
 # _render_det_to_seg), so background pixels outside a mask are left exactly
@@ -255,19 +252,38 @@ def _polygon_area(points: list[tuple[float, float]]) -> float:
     return abs(total) / 2.0
 
 
+@functools.lru_cache(maxsize=None)
+def _geographic_geod(crs: str) -> Geod | None:
+    """
+    The ellipsoid to measure on when a row's CRS is geographic (lon/lat
+    degrees, e.g. EPSG:4326), else None. Projected CRSs, this pipeline's
+    'LOCAL' frame, and blank/unparseable strings return None, and their
+    world corners are treated as planar meters. Cached because every row in
+    a batch repeats the same CRS string.
+    """
+    try:
+        parsed = CRS.from_user_input(crs)
+    except CRSError:
+        return None
+    return parsed.get_geod() if parsed.is_geographic else None
+
+
 def _bbox_area_cm2(row: dict[str, str]) -> float | None:
     """
     Bbox area in cm^2 from its four remapped world corners (shoelace, not
     just width*height, since a bbox's world quad can be a rotated/skewed
     trapezoid rather than an axis-aligned rectangle).
 
-    Returns None when the corners are missing/unparseable, or when the row's
-    CRS is geographic (degrees) rather than a projected meter-based CRS —
-    see _DEGREE_CRS_CODES.
+    A geographic CRS stores corners as degrees (world x = longitude, y =
+    latitude). A raw-degree shoelace would print as 0.0 cm^2, so those
+    corners are first placed in a local meter frame: each one's geodesic
+    distance and azimuth from the top-left corner on the CRS's ellipsoid.
+    That matches stages.seg_to_cut's bbox_area_cm2. Geod.polygon_area_perimeter
+    is not used because it is ~0.1% noisy at plant-box scale.
+
+    Returns None when the corners are missing/unparseable.
     """
     crs = str(row.get("crs") or "").strip()
-    if crs in _DEGREE_CRS_CODES:
-        return None
     try:
         corners = [
             (float(row["world_tl_x"]), float(row["world_tl_y"])),
@@ -277,6 +293,15 @@ def _bbox_area_cm2(row: dict[str, str]) -> float | None:
         ]
     except (KeyError, TypeError, ValueError):
         return None
+    geod = _geographic_geod(crs) if crs else None
+    if geod is not None:
+        lon0, lat0 = corners[0]
+        lons, lats = zip(*corners)
+        azimuths, _, distances = geod.inv([lon0] * 4, [lat0] * 4, list(lons), list(lats))
+        corners = [
+            (d * math.sin(math.radians(az)), d * math.cos(math.radians(az)))
+            for az, d in zip(azimuths, distances)
+        ]
     area_m2 = _polygon_area(corners)
     return area_m2 * 10_000.0  # m^2 -> cm^2
 
@@ -386,8 +411,8 @@ def _render_det_to_world(
     with its world-space area (cm^2, via the four remapped corners) and,
     when the shapefile provided one, its species/cultivar name (see
     _detection_name_label) — no label at all if neither is available
-    (missing corners, a geographic CRS, or no name attribute in the
-    shapefile), so a georeferencing failure is visible at a glance.
+    (missing corners and no name attribute in the shapefile), so a
+    georeferencing failure is visible at a glance.
 
     Boxes/labels are drawn *after* downscaling to max_width, not before —
     source images here are huge (e.g. 13368x9520), so text/box strokes sized

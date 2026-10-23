@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 import pytest
+from pyproj import Transformer
 
 from stages.seg_to_cut.config import SegToCutConfig
 from stages.seg_to_cut.contracts import AreaMetricInput, PixelBoundingBox, WorldBoundingBox
@@ -74,11 +75,58 @@ def test_local_crs_is_treated_as_metres_without_pyproj_lookup() -> None:
     assert calculate_bbox_area_cm2(world_box(crs="local")) is None
 
 
+def nc_geographic_box(crs: str = "EPSG:4326", **corners) -> WorldBoundingBox:
+    # A real NC_2025-02-28 detection: lon/lat corners only ~1e-6 deg apart.
+    return world_box(
+        top_left=corners.get("top_left", (-78.67256795573982, 35.77416775623888)),
+        top_right=corners.get("top_right", (-78.67256918897759, 35.774168345592024)),
+        bottom_left=corners.get("bottom_left", (-78.67256724268589, 35.77416860928108)),
+        bottom_right=corners.get("bottom_right", (-78.67256847620487, 35.77416918530215)),
+        crs=crs,
+    )
+
+
+@pytest.mark.parametrize("crs", ["EPSG:4326", "EPSG:4269"])
+def test_geographic_world_area_matches_equal_area_projection(crs) -> None:
+    bbox = nc_geographic_box(crs)
+    lon0, lat0 = bbox.top_left
+    laea = Transformer.from_crs(
+        crs, f"+proj=laea +lat_0={lat0} +lon_0={lon0} +ellps=WGS84", always_xy=True
+    )
+    projected = [laea.transform(lon, lat) for lon, lat in bbox.polygon]
+    expected = world_box(
+        top_left=projected[0], top_right=projected[1],
+        bottom_right=projected[2], bottom_left=projected[3], crs="LOCAL",
+    )
+    assert calculate_bbox_area_cm2(bbox) == pytest.approx(
+        calculate_bbox_area_cm2(expected), rel=1e-6
+    )
+    assert calculate_bbox_area_cm2(bbox) == pytest.approx(146.4056, abs=1e-3)
+
+
+def test_geographic_world_area_is_not_rejected_as_collinear_at_degree_scale() -> None:
+    # ~1 cm box: its raw-degree cross products fall under the metre-sized
+    # collinearity tolerance, so conversion must happen before that check.
+    lon, lat = -78.6725, 35.7741
+    bbox = nc_geographic_box(
+        top_left=(lon, lat + 1e-7),
+        top_right=(lon + 1e-7, lat + 1e-7),
+        bottom_left=(lon, lat),
+        bottom_right=(lon + 1e-7, lat),
+    )
+    assert calculate_bbox_area_cm2(bbox) == pytest.approx(1.003, abs=1e-3)
+
+
+def test_geographic_world_area_rejects_out_of_range_latitude() -> None:
+    bbox = world_box(top_left=(0.0, 95.0), top_right=(2.0, 95.0), crs="EPSG:4326")
+    assert calculate_bbox_area_cm2(bbox) is None
+
+
 @pytest.mark.parametrize(
     "bbox",
     [
         None,
-        world_box(crs="EPSG:4326"),
+        world_box(crs="EPSG:4978"),
         world_box(crs="not-a-crs"),
         world_box(bottom_right=(0.0, 0.0)),
         world_box(top_right=(2.0, 0.0), bottom_right=(2.0, 3.0)),
@@ -104,7 +152,7 @@ def test_camera_source_is_null_until_xyz_input_is_defined() -> None:
 @pytest.mark.parametrize(
     "bbox,source,reason",
     [(None, "georeferenced_csv", "missing"),
-     (world_box(crs="EPSG:4326"), "georeferenced_csv", "not projected"),
+     (world_box(crs="EPSG:4978"), "georeferenced_csv", "neither projected nor geographic"),
      (world_box(), "camera", "XYZ")],
 )
 def test_null_reasons_identify_area_source_and_dependencies(bbox, source, reason):
