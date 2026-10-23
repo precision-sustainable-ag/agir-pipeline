@@ -43,7 +43,9 @@
 # file, so one config can't serve both modes at once. Which config to use
 # for a given batch is still a manual/operator choice (see
 # stages/det_to_world docs) — it is not derived automatically from whether
-# the season has a shapefile.
+# the season has a shapefile. A monoculture config that also drops --g (no
+# $GRID_ROOT) runs without ASFM grids, and must be run with --batches — see
+# configs/config.det_to_world.beets_2025.example.yaml.
 stage:
   name: det_to_world
   cli_module: stages.det_to_world.cli

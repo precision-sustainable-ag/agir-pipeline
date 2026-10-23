@@ -9,6 +9,8 @@ from orchestrator.input_staging_planner import (
     DEFAULT_IMAGE_SAMPLE_SIZE,
     STAGE_INPUT_SPECS,
     det_to_world_expected_dst_paths,
+    det_to_world_uses_grids,
+    expected_staged_input_dst_paths,
     plan_input_staging,
     requests_as_dicts,
 )
@@ -397,6 +399,87 @@ def test_rerun_requires_batch_ids_and_supported_stage(tmp_path: Path) -> None:
             conn, _det_to_world_cfg(), stage="raw_to_jpg", site=None,
             batch_ids=["NC_2025-06-01"], rerun=True,
         )
+
+
+def _monoculture_det_to_world_cfg() -> dict:
+    """A det_to_world config with --species and no --g, so no ASFM grids."""
+    cfg = _det_to_world_cfg()
+    cfg["stage"] = {
+        "cli_args": "--i $TMPDIR/input/detections --o $TMPDIR/output "
+        "--batch-id $BATCH_ID --species BEVU2 --bbot-version $BBOT_VERSION"
+    }
+    return cfg
+
+
+def _insert_images_and_detections(conn: sqlite3.Connection, batch_id: str) -> None:
+    for file_ext, parent_dir in (("jpg", "images"), ("txt", "detections")):
+        insert_indexed_file(
+            conn, batch_id=batch_id, data_state="semifield-developed-images",
+            file_ext=file_ext, parent_dir=parent_dir,
+        )
+
+
+def test_det_to_world_uses_grids_follows_cli_args() -> None:
+    cfg = _det_to_world_cfg()
+    assert det_to_world_uses_grids(cfg)  # no cli_args: assume grids
+
+    cfg["stage"] = {"cli_args": '--i x.csv --g "$GRID_ROOT/$BATCH_ID" --shp $SHAPEFILE_PATH'}
+    assert det_to_world_uses_grids(cfg)
+    assert not det_to_world_uses_grids(_monoculture_det_to_world_cfg())
+
+
+def test_readiness_without_grids_keeps_output_and_success_exclusions(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    _insert_images_and_detections(conn, "MD_2025-08-26")
+    _insert_images_and_detections(conn, "MD_2025-09-22")
+    conn.execute(
+        """
+        INSERT INTO stage_runs (run_id, batch_id, stage, status, exit_code, started_at, ended_at)
+        VALUES ('run-1', 'MD_2025-09-22', 'det_to_world', 'success', 0,
+                '2026-09-16T00:00:00Z', '2026-09-16T00:01:00Z')
+        """
+    )
+    conn.commit()
+    ids = ["MD_2025-08-26", "MD_2025-09-22"]
+
+    with pytest.raises(ValueError, match="batch_ids"):
+        get_batches_needing_det_to_world(conn, require_grids=False)
+
+    # Neither batch has grids, so the default readiness skips both; without
+    # grids only the batch that never succeeded qualifies.
+    assert get_batches_needing_det_to_world(conn, batch_ids=ids) == []
+    rows = get_batches_needing_det_to_world(conn, batch_ids=ids, require_grids=False)
+    assert [(r["batch_id"], r["grid_count"], r["georef_count"]) for r in rows] == [
+        ("MD_2025-08-26", 0, 0)
+    ]
+
+    insert_indexed_file(
+        conn, batch_id="MD_2025-08-26", data_state="semifield-developed-images",
+        file_ext="csv", parent_dir="georeferenced",
+    )
+    assert get_batches_needing_det_to_world(conn, batch_ids=ids, require_grids=False) == []
+    rows = get_batches_needing_det_to_world(conn, batch_ids=ids, rerun=True, require_grids=False)
+    assert [r["batch_id"] for r in rows] == ids
+
+
+def test_plan_input_staging_without_grids_skips_grid_bundle(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    _insert_images_and_detections(conn, "MD_2025-08-26")
+    cfg = _monoculture_det_to_world_cfg()
+
+    with pytest.raises(ValueError, match="--batches"):
+        plan_input_staging(conn, cfg, stage="det_to_world", site=None)
+
+    requests = requests_as_dicts(
+        plan_input_staging(conn, cfg, stage="det_to_world", site=None, batch_ids=["MD_2025-08-26"])
+    )
+    expected = [
+        "/90daydata/dash_agir/semifield-developed-images/MD_2025-08-26/images",
+        "/90daydata/dash_agir/semifield-developed-images/MD_2025-08-26/detections",
+    ]
+    assert {r["dst_path"] for r in requests} == set(expected)
+    # The submission gate waits for exactly those pieces, with no grid root.
+    assert expected_staged_input_dst_paths(cfg, "det_to_world", "MD_2025-08-26") == expected
 
 
 def _insert_processed_jpg_to_det_batch(conn: sqlite3.Connection, batch_id: str) -> None:

@@ -140,6 +140,21 @@ def _join_posix(*parts: str) -> str:
     return prefix + str(PurePosixPath(*cleaned))
 
 
+def det_to_world_uses_grids(cfg: Dict) -> bool:
+    """
+    Return whether a det_to_world config's job reads ASFM grids.
+
+    A config whose ``stage.cli_args`` never references ``$GRID_ROOT`` (a
+    monoculture config: ``--species`` and no ``--g``) can't use grids, so
+    readiness, grid staging, and the all-inputs submission gate stop
+    requiring them -- the same cli_args-driven choice
+    orchestrator/submit_jobs.py makes for ``$SHAPEFILE_PATH``. A config with
+    no ``cli_args`` is assumed to use grids.
+    """
+    cli_args = (cfg.get("stage") or {}).get("cli_args")
+    return cli_args is None or "GRID_ROOT" in cli_args
+
+
 def _rows_for_stage(
     conn: sqlite3.Connection,
     stage: str,
@@ -148,6 +163,7 @@ def _rows_for_stage(
     limit: int,
     batch_ids: Optional[Sequence[str]] = None,
     rerun: bool = False,
+    require_grids: bool = True,
 ) -> List[Dict]:
     if stage not in STAGE_INPUT_SPECS:
         raise ValueError(f"Unsupported stage for input staging: {stage!r}")
@@ -173,7 +189,8 @@ def _rows_for_stage(
         # so scoping readiness to one --site would wrongly exclude batches
         # whose data landed somewhere else.
         return get_batches_needing_det_to_world(
-            conn, site=None, limit=limit, batch_ids=batch_ids, rerun=rerun
+            conn, site=None, limit=limit, batch_ids=batch_ids, rerun=rerun,
+            require_grids=require_grids,
         )
     if spec.readiness_view == "v_batches_needing_det_to_seg":
         # det_to_seg resolves images, detections, and georeferenced output
@@ -548,13 +565,21 @@ def plan_input_staging(
         raise ValueError(f"Unsupported stage for input staging: {stage!r}")
 
     spec = STAGE_INPUT_SPECS[stage]
+    uses_grids = stage != "det_to_world" or det_to_world_uses_grids(cfg)
+    if not uses_grids and not batch_ids:
+        raise ValueError(
+            "This det_to_world config runs without ASFM grids (no $GRID_ROOT in "
+            "stage.cli_args), so it assigns one species to every batch -- pass "
+            "explicit batch_ids (--batches)."
+        )
 
     wanted = set(batch_ids or [])
     # When targeting specific batches, don't let the default/passed limit
     # truncate the readiness query before the batch_id filter is applied.
     effective_limit = max(limit, len(wanted)) if wanted else limit
     rows = _rows_for_stage(
-        conn, stage, site=site, limit=effective_limit, batch_ids=batch_ids, rerun=rerun
+        conn, stage, site=site, limit=effective_limit, batch_ids=batch_ids, rerun=rerun,
+        require_grids=uses_grids,
     )
     wanted_rows = [row for row in rows if not wanted or row["batch_id"] in wanted]
 
@@ -574,7 +599,7 @@ def plan_input_staging(
                     priority=spec.default_priority,
                 )
             )
-            if stage == "det_to_world":
+            if stage == "det_to_world" and uses_grids:
                 requests.append(
                     _plan_grid_request(conn, cfg, batch_id=batch_id, priority=spec.default_priority)
                 )
@@ -638,7 +663,8 @@ def expected_staged_input_dst_paths(cfg: Dict, stage: str, batch_id: str) -> Lis
     This mirrors the path construction in ``plan_input_staging`` so a
     submission gate can check the exact destinations the planner records.
     ``det_to_world`` retains its separate grids destination in addition to
-    its developed-images subdirectories.
+    its developed-images subdirectories, unless its config runs without
+    grids (see ``det_to_world_uses_grids``).
     """
     if stage not in STAGE_INPUT_SPECS:
         raise ValueError(f"Unsupported stage for input staging: {stage!r}")
@@ -657,7 +683,7 @@ def expected_staged_input_dst_paths(cfg: Dict, stage: str, batch_id: str) -> Lis
         input_subdir = route.get("input_subdir", spec.destination_subdir)
         expected = [_join_posix(input_root, batch_id, input_subdir)]
 
-    if stage == "det_to_world":
+    if stage == "det_to_world" and det_to_world_uses_grids(cfg):
         grid_root = route.get("grid_destination_root") or paths.get("grid_root")
         if not grid_root:
             raise ValueError("Config paths block must define grid_root for det_to_world")

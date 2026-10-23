@@ -13,7 +13,10 @@ umask 002
 
 # Repo root = sbatch submit dir (Slurm runs a spooled copy of this script).
 PROJECT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
-CONFIG_FILE="configs/config.det_to_world.example.yaml"
+# Set DET_TO_WORLD_CONFIG when submitting to use another config, e.g. a
+# monoculture one (configs/config.det_to_world.beets_2025.example.yaml) that
+# assigns one --species without ASFM grids.
+CONFIG_FILE="${DET_TO_WORLD_CONFIG:-configs/config.det_to_world.example.yaml}"
 STAGE="det_to_world"
 # det_to_world's readiness/submission checks are site-agnostic (driven by
 # transfer.routes.det_to_world.destination_site in CONFIG_FILE instead) —
@@ -35,6 +38,7 @@ GROUP_START_EPOCH=$(date +%s)
 GROUP_START_TIME=$(date --iso-8601=seconds)
 
 echo "Group started: ${GROUP_START_TIME}"
+echo "Config: ${CONFIG_FILE} (rerun=${DET_TO_WORLD_RERUN:-0})"
 
 cd "${PROJECT_DIR}"
 

@@ -187,6 +187,7 @@ def get_batches_needing_det_to_world(
     limit: int = 200,
     batch_ids: Optional[Sequence[str]] = None,
     rerun: bool = False,
+    require_grids: bool = True,
 ) -> List[Dict]:
     """
     Return rows from ``v_batches_needing_det_to_world``.
@@ -202,10 +203,30 @@ def get_batches_needing_det_to_world(
     drops the view's "no georeferenced output" and "never succeeded"
     exclusions so already-processed batches can be re-staged and rerun.
     Active leases are still excluded, and ``site`` is ignored.
+
+    ``require_grids=False`` (also requires ``batch_ids``) is for monoculture
+    configs that run without ASFM grids: it bypasses the view the same way
+    but drops only the grids requirement, keeping the "no georeferenced
+    output" and "never succeeded" exclusions unless ``rerun`` is also set.
     """
-    if rerun:
+    if rerun or not require_grids:
         if not batch_ids:
-            raise ValueError("rerun=True requires explicit batch_ids")
+            raise ValueError("rerun=True or require_grids=False requires explicit batch_ids")
+        having = ["img_count > 0", "det_count > 0"]
+        if require_grids:
+            having.append("grid_count > 0")
+        never_succeeded_sql = ""
+        if not rerun:
+            having.append("georef_count = 0")
+            never_succeeded_sql = """
+              AND g.batch_id NOT IN (
+                  SELECT batch_id
+                  FROM   stage_runs
+                  WHERE  stage  = 'det_to_world'
+                    AND  status = 'success'
+                    AND  invalidated_at IS NULL
+              )"""
+        having_sql = " AND ".join(having)
         placeholders = ",".join("?" for _ in batch_ids)
         rows = conn.execute(
             f"""
@@ -234,9 +255,9 @@ def get_batches_needing_det_to_world(
                   FROM   stage_leases
                   WHERE  stage      = 'det_to_world'
                     AND  expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-              )
+              ){never_succeeded_sql}
             GROUP BY g.batch_id
-            HAVING img_count > 0 AND det_count > 0 AND grid_count > 0
+            HAVING {having_sql}
             ORDER BY batch_date ASC, g.batch_id ASC
             LIMIT ?
             """,
