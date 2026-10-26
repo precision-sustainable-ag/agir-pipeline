@@ -4,7 +4,7 @@ encoder: mit_b4
 threshold: 0.5
 pad_divisor: 32
 tile_size: 1024
-overlap: 256
+overlap: 512
 tiling: true
 batch_size: 16
 prepare_workers: 2          # Number of images read and decoded at the same time on the CPU.
