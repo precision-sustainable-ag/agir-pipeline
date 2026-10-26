@@ -100,7 +100,7 @@ STAGES = {
     },
 }
 # stage_inputs.py only accepts --rerun for these stages (input_staging_planner.RERUN_STAGES).
-RERUN_STAGES = {"det_to_world", "jpg_to_det"}
+RERUN_STAGES = {"det_to_world", "jpg_to_det", "det_to_seg"}
 
 SYNC_CONFIG = "configs/config.result_sync.ceres.example.yaml"
 SYNC_STATES = ("requested", "transferring", "transferred", "verified", "ingested",

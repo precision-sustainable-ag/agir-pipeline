@@ -109,7 +109,7 @@ STAGE_INPUT_SPECS: Dict[str, StageInputSpec] = {
 
 # Stages whose readiness query supports rerun=True (bypassing the view's
 # "already has output" / "already succeeded" exclusions for named batches).
-RERUN_STAGES = ("det_to_world", "jpg_to_det")
+RERUN_STAGES = ("det_to_world", "jpg_to_det", "det_to_seg")
 
 # data_state/parent_dir matched when checking whether a site already has a
 # given input subdir indexed (see _site_has_subdir). Shared by stages whose
@@ -196,7 +196,9 @@ def _rows_for_stage(
         # det_to_seg resolves images, detections, and georeferenced output
         # independently across destination/CERES/JUNO, so readiness must not
         # be restricted to whichever site the operator passed on the CLI.
-        return get_batches_needing_det_to_seg(conn, site=None, limit=limit, batch_ids=batch_ids)
+        return get_batches_needing_det_to_seg(
+            conn, site=None, limit=limit, batch_ids=batch_ids, rerun=rerun
+        )
     if spec.readiness_view == "v_batches_needing_seg_to_cut":
         # Each required input is resolved independently to CERES, so the
         # inventory-level readiness query must remain site-agnostic.
