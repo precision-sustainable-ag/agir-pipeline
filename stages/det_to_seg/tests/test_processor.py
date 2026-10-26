@@ -107,6 +107,17 @@ class TestDetParsing:
         assert 0 <= x1 < x2 <= 100
         assert 0 <= y1 < y2 <= 50
 
+    def test_parse_skips_color_checker(self, tmp_path):
+        txt = tmp_path / "img001.txt"
+        txt.write_text(
+            "0 0.5 0.5 0.4 0.5 0.9\n"
+            "1 0.5 0.5 0.4 0.5 0.9\n"
+            "2 0.5 0.5 0.4 0.5 0.9\n"
+        )
+        boxes = parse_yolo_detections(txt, width=100, height=50)
+        # Row 1 is the color checker; the others keep their TXT row IDs.
+        assert [box.bounding_box_id for box in boxes] == [0, 2]
+
     def test_parse_bad_row(self, tmp_path):
         txt = tmp_path / "bad.txt"
         txt.write_text("0 0.5\n")

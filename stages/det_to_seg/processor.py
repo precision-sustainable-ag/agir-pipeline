@@ -103,6 +103,11 @@ DEFAULT_PREFETCH_DEPTH = 4
 DEFAULT_WRITE_WORKERS = 2
 DEFAULT_WRITE_QUEUE_DEPTH = 8
 
+# The detection model's color-checker class (same rule as det_to_world's
+# COLOR_CHECKER_DETECTION_CLASS). Color checkers are not segmented, so their
+# boxes stay background in the mask.
+COLOR_CHECKER_DETECTION_CLASS = 1
+
 
 def validate_config(config: dict) -> None:
     if not config:
@@ -171,6 +176,7 @@ def parse_yolo_detections(txt_path: Path, width: int, height: int) -> list[Detec
 
     Returns boxes with clamped absolute xyxy coordinates and the original
     zero-based TXT row ID used by det_to_world's georeferenced CSV.
+    Color-checker rows are skipped so they are never segmented.
     """
     txt_path = Path(txt_path)
     if not txt_path.exists():
@@ -192,8 +198,8 @@ def parse_yolo_detections(txt_path: Path, width: int, height: int) -> list[Detec
             )
 
         try:
-            # cls and conf are accepted but not used.
-            _cls = float(parts[0])
+            # conf is accepted but not used.
+            cls = float(parts[0])
             xc = float(parts[1])
             yc = float(parts[2])
             bw = float(parts[3])
@@ -204,6 +210,9 @@ def parse_yolo_detections(txt_path: Path, width: int, height: int) -> list[Detec
             raise ValueError(
                 f"Non-numeric detection row {row_number} in {txt_path.name}: '{line}'"
             ) from e
+
+        if cls == COLOR_CHECKER_DETECTION_CLASS:
+            continue
 
         x1 = (xc - bw / 2.0) * width
         y1 = (yc - bh / 2.0) * height
