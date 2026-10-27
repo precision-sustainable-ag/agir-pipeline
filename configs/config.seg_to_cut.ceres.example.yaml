@@ -13,6 +13,7 @@ stage:
     --t $CPUS
     --batch-id $BATCH_ID
     --bbot-version $BBOT_VERSION
+    --season $SEASON
     --lens-model "Linos Inspect XL"
   output_subdir: seg_to_cut
   # The dedicated publisher validates every four-file cutout set, builds a

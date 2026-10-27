@@ -15,6 +15,7 @@ from orchestrator.input_staging_planner import (
     requests_as_dicts,
 )
 from orchestrator.sqlite_db import (
+    get_batches_needing_det_to_seg,
     get_batches_needing_det_to_world,
     get_batches_needing_jpg_to_det,
     get_det_to_world_staged_batch_ids,
@@ -42,8 +43,10 @@ def insert_indexed_file(
     parent_dir: str,
     site: str = "JUNO",
     storage_root: str = "/LTS/project/dash_agir",
+    file_name: str | None = None,
 ) -> None:
-    rel_path = f"{data_state}/{batch_id}/{parent_dir}/image.{file_ext}"
+    file_name = file_name or f"image.{file_ext}"
+    rel_path = f"{data_state}/{batch_id}/{parent_dir}/{file_name}"
     conn.execute(
         """
         INSERT INTO globus_file_index (
@@ -62,7 +65,7 @@ def insert_indexed_file(
             rel_path,
             f"{storage_root}/{rel_path}",
             parent_dir,
-            f"image.{file_ext}",
+            file_name,
             file_ext,
             batch_id,
             data_state,
@@ -394,6 +397,9 @@ def test_rerun_requires_batch_ids_and_supported_stage(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="batch_ids"):
         get_batches_needing_jpg_to_det(conn, rerun=True)
 
+    with pytest.raises(ValueError, match="batch_ids"):
+        get_batches_needing_det_to_seg(conn, rerun=True)
+
     with pytest.raises(ValueError, match="rerun is only supported"):
         plan_input_staging(
             conn, _det_to_world_cfg(), stage="raw_to_jpg", site=None,
@@ -544,6 +550,105 @@ def test_jpg_to_det_rerun_still_requires_jpgs_and_skips_active_leases(tmp_path: 
     )
     conn.commit()
     assert get_batches_needing_jpg_to_det(conn, batch_ids=ids, rerun=True) == []
+
+
+def _det_to_seg_cfg() -> dict:
+    return {
+        "paths": {"input_staging_root": "/90daydata/dash_agir/semifield-developed-images"},
+        "transfer": {
+            "juno_endpoint": "juno-uuid",
+            "atlas_endpoint": "atlas-uuid",
+            "ceres_endpoint": "ceres-uuid",
+            "routes": {
+                "det_to_seg": {
+                    "destination_site": "ATLAS",
+                    "source_root_ceres": "/90daydata/dash_agir/semifield-developed-images",
+                    "source_root_juno": "/LTS/project/dash_agir/semifield-developed-images",
+                }
+            },
+        },
+    }
+
+
+def _insert_det_to_seg_inputs(
+    conn: sqlite3.Connection, batch_id: str, *, georef_file_name: str | None = None
+) -> None:
+    for file_ext, parent_dir in (("jpg", "images"), ("txt", "detections")):
+        insert_indexed_file(
+            conn, batch_id=batch_id, data_state="semifield-developed-images",
+            file_ext=file_ext, parent_dir=parent_dir,
+        )
+    insert_indexed_file(
+        conn, batch_id=batch_id, data_state="semifield-developed-images",
+        file_ext="csv", parent_dir="georeferenced",
+        file_name=georef_file_name or f"{batch_id}_georeferenced.csv",
+    )
+
+
+def _insert_processed_det_to_seg_batch(conn: sqlite3.Connection, batch_id: str) -> None:
+    """A batch with every det_to_seg input that already has segmentations + a successful run."""
+    _insert_det_to_seg_inputs(conn, batch_id)
+    insert_indexed_file(
+        conn, batch_id=batch_id, data_state="semifield-developed-images",
+        file_ext="png", parent_dir="segmentations",
+    )
+    conn.execute(
+        """
+        INSERT INTO stage_runs (run_id, batch_id, stage, status, exit_code, started_at, ended_at)
+        VALUES ('run-1', ?, 'det_to_seg', 'success', 0,
+                '2026-09-16T00:00:00Z', '2026-09-16T00:01:00Z')
+        """,
+        (batch_id,),
+    )
+    conn.commit()
+
+
+def test_det_to_seg_rerun_plans_batches_the_readiness_view_excludes(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    _insert_processed_det_to_seg_batch(conn, "NC_2025-06-01")
+    ids = ["NC_2025-06-01"]
+
+    assert plan_input_staging(conn, _det_to_seg_cfg(), stage="det_to_seg", site=None, batch_ids=ids) == []
+
+    requests = plan_input_staging(
+        conn, _det_to_seg_cfg(), stage="det_to_seg", site=None, batch_ids=ids, rerun=True,
+    )
+    root = "/90daydata/dash_agir/semifield-developed-images/NC_2025-06-01"
+    assert [(r.batch_id, r.src_endpoint, r.dst_endpoint, r.dst_path) for r in requests] == [
+        ("NC_2025-06-01", "juno-uuid", "atlas-uuid", f"{root}/images"),
+        ("NC_2025-06-01", "juno-uuid", "atlas-uuid", f"{root}/detections"),
+        ("NC_2025-06-01", "juno-uuid", "atlas-uuid", f"{root}/georeferenced"),
+    ]
+
+
+def test_det_to_seg_rerun_still_requires_inputs_and_skips_active_leases(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    _insert_processed_det_to_seg_batch(conn, "NC_2025-06-01")
+    for file_ext, parent_dir in (("jpg", "images"), ("txt", "detections")):
+        insert_indexed_file(
+            conn, batch_id="NC_2025-06-02", data_state="semifield-developed-images",
+            file_ext=file_ext, parent_dir=parent_dir,
+        )
+    _insert_det_to_seg_inputs(conn, "NC_2025-06-03", georef_file_name="other.csv")
+    ids = ["NC_2025-06-01", "NC_2025-06-02", "NC_2025-06-03"]
+
+    # NC_2025-06-02 has no georeferenced CSV and NC_2025-06-03's isn't
+    # <batch_id>_georeferenced.csv, so only NC_2025-06-01 qualifies.
+    rows = get_batches_needing_det_to_seg(conn, batch_ids=ids, rerun=True)
+    assert [
+        (r["batch_id"], r["batch_date"], r["img_count"], r["det_count"],
+         r["georef_count"], r["seg_count"])
+        for r in rows
+    ] == [("NC_2025-06-01", "2025-01-01", 1, 1, 1, 1)]
+
+    conn.execute(
+        """
+        INSERT INTO stage_leases (lease_id, batch_id, stage, orchestrator_id, expires_at)
+        VALUES ('lease-1', 'NC_2025-06-01', 'det_to_seg', 'test', '2999-01-01T00:00:00Z')
+        """
+    )
+    conn.commit()
+    assert get_batches_needing_det_to_seg(conn, batch_ids=ids, rerun=True) == []
 
 
 def test_det_to_world_expected_dst_paths() -> None:

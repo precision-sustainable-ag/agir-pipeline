@@ -195,6 +195,7 @@ def _render_slurm_script(
     time_limit: str,
     image_sample_size: int,
     bbot_version: str = "",
+    season: str = "",
     shapefile_path: str = "",
     species_catalog_path: str = "",
     grid_root: str = "",
@@ -234,6 +235,7 @@ def _render_slurm_script(
         "time_limit": time_limit,
         "image_sample_size": image_sample_size,
         "bbot_version": bbot_version,
+        "season": season,
         "shapefile_path": shapefile_path,
         "species_catalog_path": species_catalog_path,
         "grid_root": grid_root,
@@ -393,6 +395,7 @@ def submit_jobs(
     # cli_args content, not stage_name, keeps that config's batches
     # unaffected and generalizes to any future stage/config wanting these.
     needs_bbot_version = "$BBOT_VERSION" in cli_args
+    needs_season = "$SEASON" in cli_args
     needs_shapefile = "$SHAPEFILE_PATH" in cli_args
 
     results: List[JobResult] = []
@@ -405,8 +408,9 @@ def submit_jobs(
             # so a config gap (no season window, or shapefile not indexed
             # on CERES) never burns a lease slot.
             bbot_version = ""
+            season_value = ""
             shapefile_path = ""
-            if needs_bbot_version or needs_shapefile:
+            if needs_bbot_version or needs_season or needs_shapefile:
                 site, batch_date = _split_batch_id(batch_id)
                 season = resolve_season_for_batch(conn, site=site, batch_date=batch_date)
                 if season is None:
@@ -422,18 +426,22 @@ def submit_jobs(
                 if needs_bbot_version:
                     bbot_version = season["bbot_version"]
 
-                if needs_shapefile:
-                    pipeline_season = season.get("pipeline_season")
-                    if not pipeline_season:
-                        error = (
-                            f"season_date_ranges row for {batch_id} "
-                            f"(season_name={season['season_name']!r}) has no "
-                            f"pipeline_season set — cannot derive a shapefile path."
-                        )
-                        logger.error("[%s] %s", batch_id, error)
-                        results.append(JobResult(batch_id, "config_error", None, None, error))
-                        continue
+                pipeline_season = season.get("pipeline_season")
+                if (needs_season or needs_shapefile) and not pipeline_season:
+                    error = (
+                        f"season_date_ranges row for {batch_id} "
+                        f"(season_name={season['season_name']!r}) has no "
+                        f"pipeline_season set — cannot derive the season "
+                        f"or a shapefile path."
+                    )
+                    logger.error("[%s] %s", batch_id, error)
+                    results.append(JobResult(batch_id, "config_error", None, None, error))
+                    continue
 
+                if needs_season:
+                    season_value = pipeline_season
+
+                if needs_shapefile:
                     rel_path = _shapefile_rel_path(pipeline_season)
                     shapefile_path = resolve_file_path_with_priority(
                         conn, rel_path, priority=file_source_priority
@@ -515,6 +523,7 @@ def submit_jobs(
                 time_limit=time_limit,
                 image_sample_size=image_sample_size,
                 bbot_version=bbot_version,
+                season=season_value,
                 shapefile_path=shapefile_path,
                 species_catalog_path=species_catalog_path,
                 grid_root=str(paths.get("grid_root", "")),
