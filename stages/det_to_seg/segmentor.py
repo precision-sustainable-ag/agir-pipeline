@@ -182,19 +182,21 @@ def _hann2d(h: int, w: int) -> np.ndarray:
     return np.maximum(normalized, 1e-3)
 
 
-def _tile_positions(
-    height: int,
-    width: int,
-    tile_size: int,
-    overlap: int,
-) -> list[tuple[int, int, int, int]]:
-    step = max(1, tile_size - overlap)
-    positions: list[tuple[int, int, int, int]] = []
-    for y in range(0, height, step):
-        for x in range(0, width, step):
-            positions.append((y, x, min(y + tile_size, height), min(x + tile_size, width)))
-    return positions
+def _axis_starts(length: int, tile_size: int, step: int) -> list[int]:
+    if length <= tile_size:
+        return [0]
+    starts = list(range(0, length - tile_size, step))
+    starts.append(length - tile_size)
+    return starts
 
+
+def _tile_positions(height, width, tile_size, overlap):
+    step = max(1, tile_size - overlap)
+    return [
+        (y, x, min(y + tile_size, height), min(x + tile_size, width))
+        for y in _axis_starts(height, tile_size, step)
+        for x in _axis_starts(width, tile_size, step)
+    ]
 
 # ---------------------------------------------------------------------------
 # BBox compositing
