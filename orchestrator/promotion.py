@@ -128,6 +128,11 @@ def promote_run_bundle(
         report.get("inputs", {}).get("inputs_manifest_path"),
         metadata_dest,
     )
+    # Visualization sample carried in Atlas run bundles. Absent from older
+    # bundles and from the job's own promotion, which runs before zipping.
+    sample_zip = run_dir / f"{stage}_sample_{batch_id}.zip"
+    if sample_zip.is_file():
+        shutil.copy2(sample_zip, metadata_dest / sample_zip.name)
     return PromotionResult(
         promoted, dest, metadata_dest, tuple(promoted_paths), validated.skipped_items
     )

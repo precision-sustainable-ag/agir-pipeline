@@ -285,6 +285,12 @@ log "Artifacts saved to $ARTIFACT_DEST"
 
 REGISTER_EXIT=0
 {% if result_sync_enabled %}
+    # Carry the visualization sample so Ceres promotes it with this run.
+    # Non-fatal, like the rest of the visualization step.
+    if [[ -n "${VIZ_ZIP:-}" && -f "$VIZ_ZIP" ]]; then
+        cp "$VIZ_ZIP" "$ARTIFACT_DEST/" || log "[WARN] Could not add $VIZ_ZIP to run bundle"
+    fi
+
     REGISTER_ARGS=(
         --run-bundle "$ARTIFACT_DEST"
         --outbox "$RESULT_SYNC_OUTBOX"

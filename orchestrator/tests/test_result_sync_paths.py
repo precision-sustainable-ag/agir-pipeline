@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import sqlite3
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from orchestrator.promotion import promote_run_bundle
 from orchestrator.result_sync import (
     ResultSyncRequestError,
     _is_registered,
@@ -88,3 +91,54 @@ def test_is_registered() -> None:
     conn.execute("INSERT INTO result_syncs VALUES (?)", (RUN_ID,))
     assert _is_registered(conn, RUN_ID)
     assert not _is_registered(conn, "not-registered")
+
+
+SAMPLE_ZIP = "det_to_seg_sample_MD_2022-06-28.zip"
+
+
+def make_run_bundle(run_dir: Path) -> None:
+    (run_dir / "artifacts").mkdir(parents=True)
+    (run_dir / "artifacts" / "a.png").write_bytes(b"mask")
+    (run_dir / "run_report.json").write_text(
+        json.dumps({"stage": "det_to_seg", "batch_id": "MD_2022-06-28", "exit_code": 0})
+    )
+    (run_dir / "manifest.json").write_text(
+        json.dumps(
+            {"items": [{"image_id": "a", "status": "ok", "artifacts": {"mask": "a.png"}}]}
+        )
+    )
+
+
+def test_promotion_replaces_sample_zip_from_bundle(tmp_path: Path) -> None:
+    run_dir = tmp_path / RUN_ID
+    make_run_bundle(run_dir)
+    (run_dir / SAMPLE_ZIP).write_bytes(b"new")
+    promoted_zip = tmp_path / "MD_2022-06-28" / "det_to_seg" / SAMPLE_ZIP
+    promoted_zip.parent.mkdir(parents=True)
+    promoted_zip.write_bytes(b"old")
+
+    result = promote_run_bundle(
+        run_dir,
+        tmp_path / "MD_2022-06-28" / "segmentations",
+        artifacts_root=run_dir / "artifacts",
+    )
+
+    assert promoted_zip.read_bytes() == b"new"
+    # Kept out of the inventory check, like the other stage-folder metadata.
+    assert promoted_zip not in result.promoted_paths
+
+
+def test_promotion_keeps_existing_sample_zip_for_older_bundle(tmp_path: Path) -> None:
+    run_dir = tmp_path / RUN_ID
+    make_run_bundle(run_dir)
+    promoted_zip = tmp_path / "MD_2022-06-28" / "det_to_seg" / SAMPLE_ZIP
+    promoted_zip.parent.mkdir(parents=True)
+    promoted_zip.write_bytes(b"old")
+
+    promote_run_bundle(
+        run_dir,
+        tmp_path / "MD_2022-06-28" / "segmentations",
+        artifacts_root=run_dir / "artifacts",
+    )
+
+    assert promoted_zip.read_bytes() == b"old"
