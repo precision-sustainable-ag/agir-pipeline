@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -61,6 +62,11 @@ REQUIRED_RESULT_SYNC_COLUMNS = frozenset(
 
 SubmitFunc = Callable[..., TransferSubmitResult]
 PollFunc = Callable[..., TransferPollResult]
+
+# Globus has already accepted the transfer when its task id is written, so a
+# locked database must not abort the run and lose that id.
+_STATUS_WRITE_ATTEMPTS = 5
+_STATUS_WRITE_RETRY_SECONDS = 30.0
 
 __all__ = [
     "CeresResultSyncConfig",
@@ -687,6 +693,39 @@ def _log_outcome(outcome: SyncOutcome, action: str) -> None:
     )
 
 
+def _record_submitted_transfer(
+    conn,
+    run_id: str,
+    task_id: str,
+    *,
+    sleep_func: Callable[[float], None],
+) -> dict[str, Any]:
+    """Persist a submitted Globus task id, retrying while SQLite is locked."""
+    for attempt in range(1, _STATUS_WRITE_ATTEMPTS + 1):
+        try:
+            return mark_result_sync_status(
+                conn,
+                run_id=run_id,
+                status="transferring",
+                globus_task_id=task_id,
+            )
+        except sqlite3.OperationalError as exc:
+            if attempt == _STATUS_WRITE_ATTEMPTS:
+                raise
+            logger.warning(
+                "Recording Globus task failed run_id=%s task_id=%s attempt=%d/%d: "
+                "%s; retrying in %.0fs",
+                run_id,
+                task_id,
+                attempt,
+                _STATUS_WRITE_ATTEMPTS,
+                exc,
+                _STATUS_WRITE_RETRY_SECONDS,
+            )
+            sleep_func(_STATUS_WRITE_RETRY_SECONDS)
+    raise AssertionError("unreachable")
+
+
 def submit_requested_bundle_transfers(
     conn,
     config: CeresResultSyncConfig,
@@ -694,6 +733,7 @@ def submit_requested_bundle_transfers(
     limit: int,
     dry_run: bool = False,
     submit_func: SubmitFunc = submit_transfer,
+    sleep_func: Callable[[float], None] = time.sleep,
 ) -> list[SyncOutcome]:
     """Submit one checksum transfer for each requested result-sync row."""
     outcomes: list[SyncOutcome] = []
@@ -724,12 +764,31 @@ def submit_requested_bundle_transfers(
                     message=submitted.details,
                 )
             elif submitted.status == "submitted" and submitted.globus_task_id:
-                updated = mark_result_sync_status(
-                    conn,
-                    run_id=run_id,
-                    status="transferring",
-                    globus_task_id=submitted.globus_task_id,
-                )
+                try:
+                    updated = _record_submitted_transfer(
+                        conn,
+                        run_id,
+                        submitted.globus_task_id,
+                        sleep_func=sleep_func,
+                    )
+                except sqlite3.OperationalError as exc:
+                    outcome = SyncOutcome(
+                        phase="transfer",
+                        run_id=run_id,
+                        previous_status=previous_status,
+                        status="unrecorded",
+                        globus_task_id=submitted.globus_task_id,
+                        message=(
+                            f"Globus task {submitted.globus_task_id} was submitted "
+                            f"but could not be recorded ({exc}); the row is still "
+                            "requested and the next run will resubmit it"
+                        ),
+                        is_error=True,
+                    )
+                    _log_outcome(outcome, "bundle submission")
+                    outcomes.append(outcome)
+                    # Stop submitting while the database is unwritable.
+                    break
                 outcome = SyncOutcome(
                     phase="transfer",
                     run_id=run_id,
@@ -883,6 +942,7 @@ def synchronize_run_bundles(
         limit=limit,
         dry_run=dry_run,
         submit_func=submit_func,
+        sleep_func=sleep_func,
     )
     if dry_run:
         return submitted, False
