@@ -4,7 +4,7 @@
 #SBATCH --partition=compute
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=1G
-#SBATCH --time=1-00:00:00
+#SBATCH --time=3-00:00:00
 #SBATCH --output=logs/seg_to_cut_group_%j.out
 #SBATCH --error=logs/seg_to_cut_group_%j.err
 
@@ -131,6 +131,7 @@ wait_for_batch_job() {
 }
 
 skipped_batches=()
+failed_batches=()
 
 while IFS= read -r batch_id || [[ -n "${batch_id}" ]]; do
     # Ignore empty lines and comments.
@@ -146,23 +147,29 @@ while IFS= read -r batch_id || [[ -n "${batch_id}" ]]; do
     echo "Time: $(date --iso-8601=seconds)"
     echo "=================================================="
 
+    # A staging, polling, or submit error only affects this batch, not the
+    # group: submit.py won't submit without completed staged inputs, so the
+    # batch lands in skipped_batches below instead of ending the group.
     python scripts/job/stage_inputs.py \
         --stage "${STAGE}" \
         --config "${CONFIG_FILE}" \
         --batches "${batch_file}" \
-        --site "${SITE}"
+        --site "${SITE}" \
+        || echo "stage_inputs.py exited $? for ${batch_id}; continuing." >&2
 
     python scripts/job/poll_stage_inputs.py \
         --stage "${STAGE}" \
         --config "${CONFIG_FILE}" \
         --wait \
-        --interval 60
+        --interval 60 \
+        || echo "poll_stage_inputs.py exited $? for ${batch_id}; continuing." >&2
 
     python scripts/job/submit.py \
         --stage "${STAGE}" \
         --config "${CONFIG_FILE}" \
         --batches "${batch_file}" \
-        --site "${SITE}"
+        --site "${SITE}" \
+        || echo "submit.py exited $? for ${batch_id}; continuing." >&2
 
     rm -f "${batch_file}"
 
@@ -178,8 +185,12 @@ while IFS= read -r batch_id || [[ -n "${batch_id}" ]]; do
 
     # Do not submit the next batch until this batch's seg_to_cut job
     # finishes, so this group never holds more than one seg_to_cut job
-    # (8 cpus / 64G, see slurm: in CONFIG_FILE) in flight at a time.
-    wait_for_batch_job "${batch_id}"
+    # (8 cpus / 64G, see slurm: in CONFIG_FILE) in flight at a time. A batch
+    # job that times out or fails is recorded and the group moves on.
+    if ! wait_for_batch_job "${batch_id}"; then
+        failed_batches+=("${batch_id}")
+        continue
+    fi
 
     echo "Finished batch: ${batch_id}"
 done < "${GROUP_FILE}"
@@ -200,6 +211,10 @@ echo "Group completed: ${GROUP_END_TIME}"
 echo "Total group duration: ${GROUP_DURATION}"
 echo "Skipped (not submitted): ${#skipped_batches[@]}"
 for batch_id in "${skipped_batches[@]}"; do
+    echo "  ${batch_id}"
+done
+echo "Failed (job did not complete): ${#failed_batches[@]}"
+for batch_id in "${failed_batches[@]}"; do
     echo "  ${batch_id}"
 done
 echo "=================================================="

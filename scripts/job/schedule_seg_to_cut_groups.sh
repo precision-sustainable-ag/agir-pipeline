@@ -9,7 +9,7 @@ MASTER_BATCH_FILE="${1:-configs/batch_list.example.txt}"
 GROUP_DIR="configs/seg_to_cut_groups"
 GROUP_RUNNER="scripts/job/run_seg_to_cut_group.sbatch"
 
-# seg_to_cut is CPU-only but heavy (8 cpus / 64G / 4h per batch, see slurm:
+# seg_to_cut is CPU-only but heavy (8 cpus / 64G / 12h per batch, see slurm:
 # in configs/config.seg_to_cut.ceres.example.yaml). NC_2026-07-22 took ~3h
 # end to end (~40 min input copy, ~70 min cutting, ~50 min promotion), so a
 # 4-batch group runs ~12h and a 2h stagger keeps roughly 6 groups — i.e. 6

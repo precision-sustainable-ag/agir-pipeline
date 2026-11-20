@@ -83,6 +83,7 @@ def write_csv(paths: dict[str, Path], rows: list[dict[str, object]]) -> None:
         "ymax",
         "species_id",
         "cultivar_id",
+        "is_primary",
         "world_tl_x",
         "world_tl_y",
         "world_tr_x",
@@ -106,6 +107,7 @@ def detection_row(
     bbox: tuple[float, float, float, float] = (0.1, 0.2, 0.8, 0.9),
     species_id: str = "ABUTH",
     cultivar_id: str = "",
+    is_primary: str = "False",
     world_bbox: tuple[float, float, float, float, float, float, float, float] | None = None,
     crs: str = "EPSG:32617",
 ) -> dict[str, object]:
@@ -118,6 +120,7 @@ def detection_row(
         "ymax": bbox[3],
         "species_id": species_id,
         "cultivar_id": cultivar_id,
+        "is_primary": is_primary,
     }
     world_columns = (
         "world_tl_x",
