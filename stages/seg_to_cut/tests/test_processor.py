@@ -167,6 +167,27 @@ def test_blank_world_bbox_is_supported(input_paths) -> None:
     assert validate(input_paths).images[0].detections[0].world_bbox is None
 
 
+def test_blank_is_primary_reads_false_without_world_bbox(input_paths) -> None:
+    # beets_2025 and legacy-import rows are never georeferenced and leave
+    # is_primary blank.
+    row = detection_row("image_1", 0, is_primary="")
+    write_csv(input_paths, [row])
+
+    assert load_detection_rows(input_paths["csv"])[0].is_primary is False
+
+
+def test_blank_is_primary_is_rejected_with_world_bbox(input_paths) -> None:
+    row = detection_row(
+        "image_1",
+        0,
+        is_primary="",
+        world_bbox=(500000, 3900000, 500002, 3900000, 500000, 3899997, 500002, 3899997),
+    )
+    write_csv(input_paths, [row])
+
+    assert_error_code(ERROR_CSV_INVALID, lambda: load_detection_rows(input_paths["csv"]))
+
+
 @pytest.mark.parametrize("bad_value", ["", "bad", "nan", "inf"])
 def test_incomplete_or_invalid_world_bbox_is_unavailable(input_paths, bad_value) -> None:
     write_image_and_mask(input_paths, "image_1")

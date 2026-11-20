@@ -89,4 +89,4 @@ slurm:
   partition: compute
   cpus_per_task: 8
   mem: 64G
-  time: "4:00:00"
+  time: "12:00:00"
