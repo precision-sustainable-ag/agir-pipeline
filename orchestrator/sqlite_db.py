@@ -1011,6 +1011,46 @@ def request_input_staging(
         raise
 
 
+def cancel_completed_input_staging(
+    conn: sqlite3.Connection,
+    *,
+    batch_id: str,
+    stage: str,
+    dst_path: str,
+    reason: str,
+) -> int:
+    """
+    Cancel a destination's completed ``staged_inputs`` rows so it is staged again.
+
+    Used when the destination copy turned out to be older than another
+    cluster's (StagingRequest.refresh). Without this, ``request_input_staging``
+    returns ``already_completed`` for a src/dst pair transferred before, and
+    ``get_fully_staged_batch_ids`` counts any completed row for the
+    destination, so the stage could start before the new copy arrives.
+    Canceled rows are reopened by ``request_input_staging``. Returns the
+    number of rows canceled.
+    """
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            """
+            UPDATE staged_inputs
+            SET    status = 'canceled', error_summary = ?, updated_at = ?
+            WHERE  batch_id = ? AND stage = ? AND dst_path = ? AND status = 'completed'
+            """,
+            (reason, now_str, batch_id, stage, dst_path),
+        )
+        conn.execute("COMMIT")
+        return cur.rowcount
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+
+
 def mark_input_staging_status(
     conn: sqlite3.Connection,
     *,

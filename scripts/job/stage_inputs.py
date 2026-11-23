@@ -37,6 +37,7 @@ from orchestrator.input_staging_planner import (
 )
 from orchestrator.logging_utils import command_logging
 from orchestrator.sqlite_db import (
+    cancel_completed_input_staging,
     mark_input_staging_status,
     open_db,
     request_input_staging,
@@ -82,7 +83,7 @@ def process_requests(
     for req in requests:
         logger.info(
             "Attempting input staging batch_id=%s stage=%s src=%s:%s dst=%s:%s "
-            "already_satisfied=%s dry_run=%s",
+            "already_satisfied=%s refresh=%s dry_run=%s",
             req.batch_id,
             req.stage,
             req.src_endpoint,
@@ -90,15 +91,18 @@ def process_requests(
             req.dst_endpoint,
             req.dst_path,
             req.already_satisfied,
+            req.refresh,
             dry_run,
         )
         if dry_run:
             logger.info(
-                "Dry-run input staging planned batch_id=%s stage=%s already_satisfied=%s",
+                "Dry-run input staging planned batch_id=%s stage=%s already_satisfied=%s refresh=%s",
                 req.batch_id,
                 req.stage,
                 req.already_satisfied,
+                req.refresh,
             )
+            refresh_note = "refresh (destination copy is older): " if req.refresh else ""
             results.append(
                 StageInputResult(
                     batch_id=req.batch_id,
@@ -106,10 +110,34 @@ def process_requests(
                     status="already_satisfied" if req.already_satisfied else "planned",
                     staging_id=None,
                     globus_task_id=None,
-                    message=f"{req.src_endpoint}:{req.src_path} -> {req.dst_endpoint}:{req.dst_path}",
+                    message=(
+                        f"{refresh_note}{req.src_endpoint}:{req.src_path} -> "
+                        f"{req.dst_endpoint}:{req.dst_path}"
+                    ),
                 )
             )
             continue
+
+        if req.refresh:
+            # The destination already had this subdir, but another cluster's
+            # copy is newer. Cancel the destination's completed rows so an
+            # identical past transfer is reopened instead of skipped, and the
+            # all-inputs gate waits for this transfer to finish.
+            canceled = cancel_completed_input_staging(
+                conn,
+                batch_id=req.batch_id,
+                stage=req.stage,
+                dst_path=req.dst_path,
+                reason=f"destination older than {req.src_endpoint}:{req.src_path}",
+            )
+            logger.info(
+                "Destination copy is older than the source for batch_id=%s stage=%s "
+                "dst_path=%s; canceled %d completed staging row(s) so it is staged again",
+                req.batch_id,
+                req.stage,
+                req.dst_path,
+                canceled,
+            )
 
         request_result = request_input_staging(
             conn,
