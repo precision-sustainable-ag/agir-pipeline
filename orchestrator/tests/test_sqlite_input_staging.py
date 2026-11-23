@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import importlib.util
 import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
 
+from orchestrator.globus_transfer import TransferSubmitResult
 from orchestrator.input_staging_planner import (
     DEFAULT_IMAGE_SAMPLE_SIZE,
     STAGE_INPUT_SPECS,
@@ -19,6 +22,7 @@ from orchestrator.sqlite_db import (
     get_batches_needing_det_to_world,
     get_batches_needing_jpg_to_det,
     get_det_to_world_staged_batch_ids,
+    get_fully_staged_batch_ids,
     get_input_staging_requests,
     mark_input_staging_status,
     request_input_staging,
@@ -44,6 +48,8 @@ def insert_indexed_file(
     site: str = "JUNO",
     storage_root: str = "/LTS/project/dash_agir",
     file_name: str | None = None,
+    mtime_iso: str | None = None,
+    size_bytes: int = 12,
 ) -> None:
     file_name = file_name or f"image.{file_ext}"
     rel_path = f"{data_state}/{batch_id}/{parent_dir}/{file_name}"
@@ -53,10 +59,10 @@ def insert_indexed_file(
             endpoint, site, storage_domain, namespace, storage_root,
             rel_path, full_path, parent_dir, file_name,
             entry_type, file_ext, size_bytes, permissions, checksum,
-            batch_id, batch_state, batch_date, data_state, is_current
+            batch_id, batch_state, batch_date, data_state, is_current, mtime_iso
         )
-        VALUES (?, ?, 'dash_agir', 'LTS', ?, ?, ?, ?, ?, 'file', ?, 12, '644',
-                NULL, ?, 'NC', '2025-01-01', ?, 1)
+        VALUES (?, ?, 'dash_agir', 'LTS', ?, ?, ?, ?, ?, 'file', ?, ?, '644',
+                NULL, ?, 'NC', '2025-01-01', ?, 1, ?)
         """,
         (
             f"{site.lower()}-endpoint",
@@ -67,8 +73,10 @@ def insert_indexed_file(
             parent_dir,
             file_name,
             file_ext,
+            size_bytes,
             batch_id,
             data_state,
+            mtime_iso,
         ),
     )
     conn.commit()
@@ -147,6 +155,7 @@ def test_plan_input_staging_for_raw_to_jpg(tmp_path: Path) -> None:
             "dst_path": "/90daydata/dash_agir/semifield-upload/NC_2025-01-01",
             "priority": 100,
             "already_satisfied": False,
+            "refresh": False,
             "file_names": None,
         }
     ]
@@ -207,6 +216,7 @@ def test_plan_input_staging_for_jpg_to_det_falls_back_to_juno(tmp_path: Path) ->
             "dst_path": "/90daydata/dash_agir/semifield-developed-images/NC_2025-01-02/images",
             "priority": 50,
             "already_satisfied": False,
+            "refresh": False,
             "file_names": None,
         }
     ]
@@ -1025,3 +1035,222 @@ def test_request_input_staging_is_idempotent_and_reopenable(tmp_path: Path) -> N
 
     pending = get_input_staging_requests(conn, statuses=["requested"], stage="raw_to_jpg")
     assert [row["staging_id"] for row in pending] == [retry_created["staging_id"]]
+
+
+# --- Freshness: restage a destination copy older than another cluster's ------
+
+_DEV_ROOT = "/90daydata/dash_agir/semifield-developed-images"
+_OLD = "2026-08-31T07:34:00+00:00"
+_NEW = "2026-09-18T13:53:00+00:00"
+
+
+def _insert_det_to_seg_inputs_at(
+    conn: sqlite3.Connection, batch_id: str, site: str, *, georef_mtime: str, georef_size: int
+) -> None:
+    """det_to_seg inputs indexed under /90daydata at ``site``; only the CSV varies."""
+    for file_ext, parent_dir in (("jpg", "images"), ("txt", "detections")):
+        insert_indexed_file(
+            conn, batch_id=batch_id, data_state="semifield-developed-images",
+            file_ext=file_ext, parent_dir=parent_dir, site=site,
+            storage_root="/90daydata/dash_agir", mtime_iso=_OLD,
+        )
+    insert_indexed_file(
+        conn, batch_id=batch_id, data_state="semifield-developed-images",
+        file_ext="csv", parent_dir="georeferenced", file_name=f"{batch_id}_georeferenced.csv",
+        site=site, storage_root="/90daydata/dash_agir", mtime_iso=georef_mtime,
+        size_bytes=georef_size,
+    )
+
+
+def _plan_det_to_seg_by_subdir(conn: sqlite3.Connection, batch_id: str) -> dict:
+    requests = plan_input_staging(
+        conn, _det_to_seg_cfg(), stage="det_to_seg", site=None, batch_ids=[batch_id]
+    )
+    return {req.dst_path.rsplit("/", 1)[-1]: req for req in requests}
+
+
+def _record_completed_transfer(
+    conn: sqlite3.Connection, batch_id: str, *, completed_at: str | None = None
+) -> str:
+    """A completed CERES -> ATLAS transfer of the georeferenced subdir."""
+    created = request_input_staging(
+        conn,
+        batch_id=batch_id,
+        stage="det_to_seg",
+        src_endpoint="ceres-uuid",
+        dst_endpoint="atlas-uuid",
+        src_path=f"{_DEV_ROOT}/{batch_id}/georeferenced",
+        dst_path=f"{_DEV_ROOT}/{batch_id}/georeferenced",
+    )
+    mark_input_staging_status(conn, staging_id=created["staging_id"], status="completed")
+    if completed_at is not None:
+        conn.execute(
+            "UPDATE staged_inputs SET completed_at = ? WHERE staging_id = ?",
+            (completed_at, created["staging_id"]),
+        )
+        conn.commit()
+    return created["staging_id"]
+
+
+def test_det_to_seg_restages_georeferenced_csv_older_than_ceres(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    batch_id = "NC_2025-02-21"
+    _insert_det_to_seg_inputs_at(conn, batch_id, "ATLAS", georef_mtime=_OLD, georef_size=1_000)
+    _insert_det_to_seg_inputs_at(conn, batch_id, "CERES", georef_mtime=_NEW, georef_size=2_000)
+
+    by_subdir = _plan_det_to_seg_by_subdir(conn, batch_id)
+
+    assert by_subdir["images"].already_satisfied and not by_subdir["images"].refresh
+    assert by_subdir["detections"].already_satisfied and not by_subdir["detections"].refresh
+    georef = by_subdir["georeferenced"]
+    assert georef.refresh is True
+    assert georef.already_satisfied is False
+    assert georef.src_endpoint == "ceres-uuid"
+    assert georef.dst_endpoint == "atlas-uuid"
+    assert georef.src_path == f"{_DEV_ROOT}/{batch_id}/georeferenced"
+    assert georef.dst_path == f"{_DEV_ROOT}/{batch_id}/georeferenced"
+
+
+@pytest.mark.parametrize(
+    "ceres_mtime",
+    [_NEW, "2026-09-18T13:54:00+00:00", _OLD],
+    ids=["same", "within_tolerance", "older"],
+)
+def test_det_to_seg_keeps_destination_copy_that_is_not_older(
+    tmp_path: Path, ceres_mtime: str
+) -> None:
+    conn = make_conn(tmp_path)
+    batch_id = "NC_2025-02-21"
+    _insert_det_to_seg_inputs_at(conn, batch_id, "ATLAS", georef_mtime=_NEW, georef_size=2_000)
+    _insert_det_to_seg_inputs_at(conn, batch_id, "CERES", georef_mtime=ceres_mtime, georef_size=1_000)
+
+    georef = _plan_det_to_seg_by_subdir(conn, batch_id)["georeferenced"]
+
+    assert georef.already_satisfied is True
+    assert georef.refresh is False
+
+
+def test_freshness_ignores_newer_juno_copies_and_images(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    batch_id = "NC_2025-02-21"
+    _insert_det_to_seg_inputs_at(conn, batch_id, "ATLAS", georef_mtime=_OLD, georef_size=1_000)
+    # JUNO is an archive: a later mtime there is not newer content.
+    insert_indexed_file(
+        conn, batch_id=batch_id, data_state="semifield-developed-images",
+        file_ext="csv", parent_dir="georeferenced", file_name=f"{batch_id}_georeferenced.csv",
+        site="JUNO", mtime_iso=_NEW,
+    )
+    # images/ is write-once, so a newer, different CERES copy doesn't trigger a transfer.
+    insert_indexed_file(
+        conn, batch_id=batch_id, data_state="semifield-developed-images",
+        file_ext="jpg", parent_dir="images", site="CERES",
+        storage_root="/90daydata/dash_agir", mtime_iso=_NEW, size_bytes=99,
+    )
+
+    by_subdir = _plan_det_to_seg_by_subdir(conn, batch_id)
+
+    assert all(req.already_satisfied and not req.refresh for req in by_subdir.values())
+
+
+def test_newer_copy_with_the_same_size_is_not_restaged(tmp_path: Path) -> None:
+    # A plain copy is stamped later than its original, so after CERES pushes a
+    # CSV to ATLAS the ATLAS copy looks newer than CERES's. Same size means the
+    # same copy: staging for a CERES stage must not pull it back.
+    conn = make_conn(tmp_path)
+    batch_id = "NC_2025-02-21"
+    _insert_det_to_seg_inputs_at(conn, batch_id, "ATLAS", georef_mtime=_OLD, georef_size=2_000)
+    _insert_det_to_seg_inputs_at(conn, batch_id, "CERES", georef_mtime=_NEW, georef_size=2_000)
+
+    georef = _plan_det_to_seg_by_subdir(conn, batch_id)["georeferenced"]
+
+    assert georef.already_satisfied is True
+    assert georef.refresh is False
+
+
+def test_completed_transfer_after_newer_copy_counts_as_current(tmp_path: Path) -> None:
+    conn = make_conn(tmp_path)
+    batch_id = "NC_2025-02-21"
+    _insert_det_to_seg_inputs_at(conn, batch_id, "ATLAS", georef_mtime=_OLD, georef_size=1_000)
+    _insert_det_to_seg_inputs_at(conn, batch_id, "CERES", georef_mtime=_NEW, georef_size=2_000)
+
+    # A transfer that finished before the CERES copy was rewritten doesn't help...
+    staging_id = _record_completed_transfer(conn, batch_id, completed_at="2026-09-01T00:00:00Z")
+    assert _plan_det_to_seg_by_subdir(conn, batch_id)["georeferenced"].refresh is True
+
+    # ...but one that finished after it means the ATLAS copy is current, even
+    # though the index still shows the old ATLAS mtime until its next scan.
+    conn.execute(
+        "UPDATE staged_inputs SET completed_at = '2026-11-20T23:22:53Z' WHERE staging_id = ?",
+        (staging_id,),
+    )
+    conn.commit()
+    georef = _plan_det_to_seg_by_subdir(conn, batch_id)["georeferenced"]
+    assert georef.already_satisfied is True
+    assert georef.refresh is False
+
+
+def _load_stage_inputs():
+    path = Path(__file__).resolve().parents[2] / "scripts" / "job" / "stage_inputs.py"
+    spec = importlib.util.spec_from_file_location("stage_inputs_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_refresh_reopens_old_transfer_and_holds_the_gate(tmp_path: Path) -> None:
+    stage_inputs = _load_stage_inputs()
+    conn = make_conn(tmp_path)
+    cfg = _det_to_seg_cfg()
+    batch_id = "NC_2025-02-21"
+    georef_dst = f"{_DEV_ROOT}/{batch_id}/georeferenced"
+    _insert_det_to_seg_inputs_at(conn, batch_id, "ATLAS", georef_mtime=_OLD, georef_size=1_000)
+    _insert_det_to_seg_inputs_at(conn, batch_id, "CERES", georef_mtime=_NEW, georef_size=2_000)
+
+    # History: ATLAS first got the subdir from JUNO, then the CERES -> ATLAS
+    # transfer completed in August. CERES and ATLAS share the same /90daydata
+    # path, and staged_inputs rows are keyed on paths (not endpoints), so that
+    # row is also the one later "already resident" runs find completed.
+    juno = request_input_staging(
+        conn, batch_id=batch_id, stage="det_to_seg", src_endpoint="juno-uuid",
+        dst_endpoint="atlas-uuid",
+        src_path=f"/LTS/project/dash_agir/semifield-developed-images/{batch_id}/georeferenced",
+        dst_path=georef_dst,
+    )
+    mark_input_staging_status(conn, staging_id=juno["staging_id"], status="completed")
+    old_transfer_id = _record_completed_transfer(conn, batch_id, completed_at="2026-08-31T07:34:00Z")
+
+    submitted = []
+
+    def fake_submit(transfer_request):
+        submitted.append(transfer_request)
+        return TransferSubmitResult(
+            status="submitted", globus_task_id="task-2", details="submitted", command=[]
+        )
+
+    requests = plan_input_staging(conn, cfg, stage="det_to_seg", site=None, batch_ids=[batch_id])
+    stage_inputs.process_requests(
+        conn, requests, requested_by="test", dry_run=False, submit_func=fake_submit
+    )
+
+    # Only the stale subdir moves, and the August request is reopened, not skipped.
+    assert [(r.src_path, r.dst_path) for r in submitted] == [
+        (f"{_DEV_ROOT}/{batch_id}/georeferenced", georef_dst)
+    ]
+    status = {
+        row["staging_id"]: row["status"]
+        for row in conn.execute("SELECT staging_id, status FROM staged_inputs")
+    }
+    assert status[old_transfer_id] == "submitted"
+    assert status[juno["staging_id"]] == "canceled"
+
+    # The gate must wait for the new copy...
+    expected = {batch_id: expected_staged_input_dst_paths(cfg, "det_to_seg", batch_id)}
+    assert get_fully_staged_batch_ids(conn, stage="det_to_seg", expected_dst_paths=expected) == set()
+
+    # ...and passes once it lands, after which the subdir is no longer stale.
+    mark_input_staging_status(conn, staging_id=old_transfer_id, status="completed")
+    assert get_fully_staged_batch_ids(
+        conn, stage="det_to_seg", expected_dst_paths=expected
+    ) == {batch_id}
+    assert _plan_det_to_seg_by_subdir(conn, batch_id)["georeferenced"].already_satisfied is True

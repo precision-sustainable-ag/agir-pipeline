@@ -8,9 +8,11 @@ state; callers can persist requests through orchestrator.sqlite_db.
 
 from __future__ import annotations
 
+import logging
 import random
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
@@ -21,6 +23,8 @@ from orchestrator.sqlite_db import (
     get_batches_needing_raw_to_jpg,
     get_batches_needing_seg_to_cut,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -75,6 +79,13 @@ class StagingRequest:
     # _sample_image_file_names / orchestrator/globus_transfer.py's batch-mode
     # command building).
     file_names: Optional[Sequence[str]] = None
+    # True when the destination already has this subdir but another working
+    # cluster holds newer copies of its files (see _newer_copy_elsewhere), so
+    # it is transferred again. scripts/job/stage_inputs.py cancels the
+    # destination's earlier completed staged_inputs rows first; otherwise an
+    # identical past transfer would be skipped as already_completed and the
+    # all-inputs gate would let the stage start on the old copy.
+    refresh: bool = False
 
 
 STAGE_INPUT_SPECS: Dict[str, StageInputSpec] = {
@@ -248,6 +259,14 @@ def _site_has_files(
     return row is not None
 
 
+def _subdir_parent_dir_sql(subdir: str, stage: str) -> str:
+    """SQL filter selecting a developed-images input subdir's files for ``stage``."""
+    parent_dir_sql = _DEVELOPED_IMAGES_PARENT_DIRS[subdir]
+    if stage == "det_to_seg" and subdir == "detections":
+        parent_dir_sql += " AND file_ext = 'txt'"
+    return parent_dir_sql
+
+
 def _site_has_subdir(
     conn: sqlite3.Connection,
     batch_id: str,
@@ -257,9 +276,7 @@ def _site_has_subdir(
     stage: str,
 ) -> bool:
     """Check whether ``site`` has a developed-images input subdirectory."""
-    parent_dir_sql = _DEVELOPED_IMAGES_PARENT_DIRS[subdir]
-    if stage == "det_to_seg" and subdir == "detections":
-        parent_dir_sql += " AND file_ext = 'txt'"
+    parent_dir_sql = _subdir_parent_dir_sql(subdir, stage)
     return _site_has_files(
         conn, batch_id, site,
         data_state=_DEVELOPED_IMAGES_DATA_STATE,
@@ -445,6 +462,180 @@ def _plan_grid_request(
     )
 
 
+# Input subdirs that a stage rerun rewrites in place: jpg_to_det writes
+# detections/, det_to_world writes georeferenced/, det_to_seg writes
+# segmentations/. A copy of one of these already at the destination is only
+# trusted when no other working cluster holds a newer copy of the same file;
+# otherwise a rerun on one cluster never reaches the other. On 2026-11-20,
+# 133 Atlas georeferenced CSVs predated their Ceres versions, so det_to_seg
+# painted masks from stale species. images/ and ASFM grids are written once
+# and are large, so they keep the existence-only check.
+#
+# "Newer" means a later mtime AND a different size. Globus doesn't keep the
+# source mtime, so every plain copy is stamped later than its original; on
+# mtime alone, two identical copies would each look newer than the other and
+# be transferred back and forth. The index has no checksums, so a rewrite
+# that keeps the exact byte size goes unnoticed.
+_FRESHNESS_CHECKED_SUBDIRS = frozenset({"detections", "georeferenced", "segmentations"})
+
+# A copy only counts as newer past this margin, so clock skew between
+# endpoints and second-level mtime rounding don't trigger transfers.
+_FRESHNESS_TOLERANCE = timedelta(minutes=2)
+
+
+@dataclass(frozen=True)
+class _NewerCopy:
+    site: str
+    endpoint: str
+    src_path: str
+    n_files: int
+    example_file: str
+
+
+def _parse_utc(value: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp from the index or staged_inputs as UTC."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _indexed_copies(
+    conn: sqlite3.Connection,
+    *,
+    batch_id: str,
+    site: str,
+    dir_path: str,
+    parent_dir_sql: str,
+) -> Dict[str, tuple[datetime, Optional[int]]]:
+    """Map file name -> (mtime, size) for current indexed files directly under ``dir_path`` at ``site``."""
+    prefix = dir_path.rstrip("/") + "/"
+    rows = conn.execute(
+        f"""
+        SELECT file_name, mtime_iso, size_bytes
+        FROM globus_file_index
+        WHERE data_state = ?
+          AND entry_type = 'file'
+          AND is_current = 1
+          AND site       = ?
+          AND batch_id   = ?
+          AND substr(full_path, 1, ?) = ?
+          AND {parent_dir_sql}
+        """,
+        (_DEVELOPED_IMAGES_DATA_STATE, site, batch_id, len(prefix), prefix),
+    ).fetchall()
+    copies: Dict[str, tuple[datetime, Optional[int]]] = {}
+    for row in rows:
+        mtime = _parse_utc(row["mtime_iso"])
+        if mtime is not None:
+            copies[row["file_name"]] = (mtime, row["size_bytes"])
+    return copies
+
+
+def _last_transfer_completed(
+    conn: sqlite3.Connection,
+    *,
+    batch_id: str,
+    src_endpoint: str,
+    dst_endpoint: str,
+    dst_path: str,
+) -> Optional[datetime]:
+    """When a staging transfer from ``src_endpoint`` into ``dst_path`` last completed, if ever."""
+    row = conn.execute(
+        """
+        SELECT MAX(completed_at) AS completed_at
+        FROM staged_inputs
+        WHERE batch_id     = ?
+          AND dst_path     = ?
+          AND dst_endpoint = ?
+          AND src_endpoint = ?
+          AND status       = 'completed'
+        """,
+        (batch_id, dst_path, dst_endpoint, src_endpoint),
+    ).fetchone()
+    return _parse_utc(row["completed_at"]) if row else None
+
+
+def _newer_copy_elsewhere(
+    conn: sqlite3.Connection,
+    *,
+    batch_id: str,
+    subdir: str,
+    stage: str,
+    route: Dict,
+    transfer: Dict,
+    dst_site: str,
+    dst_endpoint: str,
+    dst_path: str,
+) -> Optional[_NewerCopy]:
+    """
+    Return the working cluster holding newer copies of files the destination
+    already has for ``subdir``, or None when the destination copy is current.
+
+    Compares globus_file_index entries file by file between ``dst_path`` and
+    each other cluster's ``source_root_<site>/<batch>/<subdir>``: a file is
+    newer elsewhere when its mtime is later (past _FRESHNESS_TOLERANCE) and
+    its size differs (see _FRESHNESS_CHECKED_SUBDIRS). Only ATLAS/CERES are
+    compared: JUNO is an archive, and its copies carry later mtimes without
+    newer content. A destination file also counts as current when a staging
+    transfer from that cluster into ``dst_path`` completed after the newer
+    copy was written, because the index only sees the refreshed copy after
+    its next scan; without this, every stage_inputs run until then would
+    transfer it again.
+    """
+    if subdir not in _FRESHNESS_CHECKED_SUBDIRS:
+        return None
+
+    parent_dir_sql = _subdir_parent_dir_sql(subdir, stage)
+    dst_copies = _indexed_copies(
+        conn, batch_id=batch_id, site=dst_site, dir_path=dst_path, parent_dir_sql=parent_dir_sql
+    )
+    if not dst_copies:
+        return None
+
+    best: Optional[_NewerCopy] = None
+    for site in _INTERMEDIATE_FALLBACK_SITES:
+        if site == dst_site:
+            continue
+        src_root = route.get(f"source_root_{site.lower()}")
+        src_endpoint = transfer.get(f"{site.lower()}_endpoint")
+        if not src_root or not src_endpoint:
+            continue
+        src_path = _join_posix(src_root, batch_id, subdir)
+        src_copies = _indexed_copies(
+            conn, batch_id=batch_id, site=site, dir_path=src_path, parent_dir_sql=parent_dir_sql
+        )
+        refreshed_at = _last_transfer_completed(
+            conn,
+            batch_id=batch_id,
+            src_endpoint=src_endpoint,
+            dst_endpoint=dst_endpoint,
+            dst_path=dst_path,
+        )
+        newer = sorted(
+            name
+            for name, (src_mtime, src_size) in src_copies.items()
+            if name in dst_copies
+            and src_mtime > dst_copies[name][0] + _FRESHNESS_TOLERANCE
+            and src_size != dst_copies[name][1]
+            and (refreshed_at is None or src_mtime > refreshed_at + _FRESHNESS_TOLERANCE)
+        )
+        if newer and (best is None or len(newer) > best.n_files):
+            best = _NewerCopy(
+                site=site,
+                endpoint=src_endpoint,
+                src_path=src_path,
+                n_files=len(newer),
+                example_file=newer[0],
+            )
+    return best
+
+
 def _plan_multi_site_requests(
     conn: sqlite3.Connection,
     cfg: Dict,
@@ -458,12 +649,14 @@ def _plan_multi_site_requests(
     Plan requests for a stage whose inputs may already be resident on the
     destination cluster, or may need pulling from another site before
     falling back to JUNO. Used by stages with ``StageInputSpec.subdirs`` set
-    (jpg_to_det, det_to_world, and det_to_seg).
+    (jpg_to_det, det_to_world, det_to_seg, and seg_to_cut).
 
     Each subdir is resolved independently: if the destination site already
     has it, an already_satisfied request is planned (see
-    StagingRequest.already_satisfied); otherwise the nearest available
-    source (see _INTERMEDIATE_FALLBACK_SITES, then JUNO) is used.
+    StagingRequest.already_satisfied), unless another working cluster has
+    newer copies of its files, in which case a refresh transfer from that
+    cluster is planned (see _newer_copy_elsewhere); otherwise the nearest
+    available source (see _INTERMEDIATE_FALLBACK_SITES, then JUNO) is used.
     """
     paths = cfg["paths"]
     transfer = cfg["transfer"]
@@ -479,6 +672,37 @@ def _plan_multi_site_requests(
         dst_path = _join_posix(dst_root, batch_id, subdir)
 
         if _site_has_subdir(conn, batch_id, subdir, dst_site, stage=stage):
+            newer = _newer_copy_elsewhere(
+                conn,
+                batch_id=batch_id,
+                subdir=subdir,
+                stage=stage,
+                route=route,
+                transfer=transfer,
+                dst_site=dst_site,
+                dst_endpoint=dst_endpoint,
+                dst_path=dst_path,
+            )
+            if newer is not None:
+                logger.info(
+                    "%s %s/%s: %d file(s) at %s are newer than the copy at %s (e.g. %s); "
+                    "staging them again from %s",
+                    stage, batch_id, subdir, newer.n_files, newer.site, dst_site,
+                    newer.example_file, newer.src_path,
+                )
+                requests.append(
+                    StagingRequest(
+                        batch_id=batch_id,
+                        stage=stage,
+                        src_endpoint=newer.endpoint,
+                        dst_endpoint=dst_endpoint,
+                        src_path=newer.src_path,
+                        dst_path=dst_path,
+                        priority=priority,
+                        refresh=True,
+                    )
+                )
+                continue
             requests.append(
                 StagingRequest(
                     batch_id=batch_id,
@@ -652,6 +876,7 @@ def requests_as_dicts(requests: Iterable[StagingRequest]) -> List[Dict]:
             "dst_path": r.dst_path,
             "priority": r.priority,
             "already_satisfied": r.already_satisfied,
+            "refresh": r.refresh,
             "file_names": list(r.file_names) if r.file_names else None,
         }
         for r in requests
