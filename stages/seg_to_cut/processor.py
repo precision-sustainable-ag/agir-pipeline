@@ -193,12 +193,20 @@ def _parse_optional_world_bbox(row: Mapping[str, Any]) -> WorldBoundingBox | Non
     )
 
 
-def _parse_is_primary(value: Any, *, context: str) -> bool:
-    """Read CSV booleans explicitly so the string 'False' stays false."""
+def _parse_is_primary(value: Any, *, georeferenced: bool, context: str) -> bool:
+    """Read CSV booleans explicitly so the string 'False' stays false.
+
+    ``is_primary`` only has meaning for georeferenced detections. Rows without
+    a world box (beets_2025 monoculture batches, legacy metadata imports) may
+    leave it blank, which reads as False -- the value det_to_world's
+    monoculture config writes. Georeferenced rows must still set it.
+    """
     normalized = str(value).strip().lower()
     if normalized in {"true", "1"}:
         return True
     if normalized in {"false", "0"}:
+        return False
+    if not normalized and not georeferenced:
         return False
     raise _input_error(
         ERROR_CSV_INVALID,
@@ -285,6 +293,7 @@ def load_detection_rows(path: str | Path) -> tuple[_DetectionRow, ...]:
                 if cultivar_value is not None and str(cultivar_value).strip()
                 else None
             )
+            world_bbox = _parse_optional_world_bbox(row)
             rows.append(
                 _DetectionRow(
                     image_id=image_id,
@@ -292,9 +301,13 @@ def load_detection_rows(path: str | Path) -> tuple[_DetectionRow, ...]:
                     bounding_box_id=bounding_box_id,
                     normalized_bbox=normalized_bbox,
                     species_id=species_id,
-                    is_primary=_parse_is_primary(row.get("is_primary"), context=context),
+                    is_primary=_parse_is_primary(
+                        row.get("is_primary"),
+                        georeferenced=world_bbox is not None,
+                        context=context,
+                    ),
                     cultivar_id=cultivar_id,
-                    world_bbox=_parse_optional_world_bbox(row),
+                    world_bbox=world_bbox,
                 )
             )
 
